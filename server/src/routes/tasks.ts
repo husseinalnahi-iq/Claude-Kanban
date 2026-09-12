@@ -66,7 +66,7 @@ export async function taskRoutes(app: FastifyInstance, { repo, bus, runner }: Ap
 
   /** Every task waiting for a usage window, across projects, soonest first — for the usage panel. */
   app.get("/tasks/paused", async () =>
-    repo.tasksInStatus(["paused"]).sort((a, b) => (a.resume_at ?? "").localeCompare(b.resume_at ?? "")),
+    repo.tasksInStatus(["paused"]).filter((t) => t.pause_reason !== "cost").sort((a, b) => (a.resume_at ?? "").localeCompare(b.resume_at ?? "")),
   );
 
   app.get("/tasks/:id", async (req) => {
@@ -211,6 +211,9 @@ export async function taskRoutes(app: FastifyInstance, { repo, bus, runner }: Ap
   });
 
   /** Resume a task paused by a usage limit now, without waiting for the window to reset. */
+  /** A task paused at its cost ceiling: spend one more stage's worth, or give up. */
+  app.post("/tasks/:id/continue", async (req) => runner.continueTask(idOf(req)));
+  app.post("/tasks/:id/stop-paused", async (req) => runner.stopPaused(idOf(req)));
   app.post("/tasks/:id/resume", async (req) => {
     runner.resumeNow(idOf(req));
     return mustGet(idOf(req));

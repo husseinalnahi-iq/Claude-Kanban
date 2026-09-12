@@ -4,7 +4,7 @@ import { DEFAULT_BLOCKED_COMMANDS, DEFAULT_VISION_MODEL, SEED_DEBATE, SEED_TIERS
 import type {
   Approval, ApprovalDecision, EventRow, Message, Milestone, Mode, Policy, Project, Run, RunListItem, RunStatus,
   Attachment, Note, MergePolicy, Priority, ProjectEnv, Settings, Stage, StageName, Task, TaskCard, TaskStatus, TaskType, UsageLimit,
-  Provider, RunRole, CostSource, TierRef,
+  Provider, RunRole, CostSource, TierRef, Schedule,
 } from "./types.ts";
 import { ANTHROPIC_PROVIDER_ID, DEFAULT_MERGE, EMPTY_ENV } from "./types.ts";
 import { DEFAULT_CHECKLIST } from "./engine/onboarding.ts";
@@ -85,6 +85,9 @@ const toTask = (r: Row): Task => ({
   triaged_at: (r.triaged_at as string) ?? null,
   archived_at: (r.archived_at as string) ?? null,
   resume_at: (r.resume_at as string) ?? null,
+  pause_reason: (r.pause_reason as Task["pause_reason"]) ?? null,
+  budget_extra_usd: Number(r.budget_extra_usd ?? 0),
+  start_at: (r.start_at as string) ?? null,
   suggestion: json<Task["suggestion"]>(r.suggestion_json, null),
   onboarding: (r.onboarding as Task["onboarding"]) ?? null,
   plan_gate: json<Task["plan_gate"]>(r.plan_gate_json, null),
@@ -100,6 +103,25 @@ const toTask = (r: Row): Task => ({
   position: Number(r.position),
   created_at: r.created_at as string,
   updated_at: r.updated_at as string,
+});
+
+const toSchedule = (r: Row): Schedule => ({
+  id: r.id as string,
+  project_id: r.project_id as string,
+  title: r.title as string,
+  spec_md: r.spec_md as string,
+  mode: r.mode as Mode,
+  type: (r.type as TaskType) ?? "feature",
+  priority: (r.priority as Priority) ?? "p2",
+  pipeline: json<Stage[]>(r.pipeline_json, []),
+  skills: json<string[]>(r.skills_json, []),
+  days: json<number[]>(r.days_json, []),
+  time: r.time as string,
+  enabled: Number(r.enabled) === 1,
+  next_run_at: (r.next_run_at as string) ?? null,
+  last_run_at: (r.last_run_at as string) ?? null,
+  last_task_id: (r.last_task_id as string) ?? null,
+  created_at: r.created_at as string,
 });
 
 const toAttachment = (r: Row): Attachment => ({
@@ -190,6 +212,7 @@ function setClause(patch: Record<string, unknown>, columns: Record<string, (v: u
       : k === "related_to" ? "related_to_json"
       : k === "suggestion" ? "suggestion_json"
       : k === "plan_gate" ? "plan_gate_json"
+      : k === "days" ? "days_json"
       : k;
     sets.push(`${col} = ?`);
     vals.push(columns[k](v));
@@ -204,7 +227,7 @@ const js = (v: unknown) => JSON.stringify(v);
 const TASK_COLUMNS: Record<string, (v: unknown) => SQLInputValue> = {
   parent_id: str, milestone_id: str, title: str, spec_md: str, status: str, mode: str, pipeline: js, skills: js,
   branch: str, worktree_path: str, base_sha: str, summary: str, note: str, error: str, position: num,
-  type: str, priority: str, labels: js, depends_on: js, related_to: js, triaged_at: str, archived_at: str, resume_at: str, suggestion: js, plan_gate: js, onboarding: str,
+  type: str, priority: str, labels: js, depends_on: js, related_to: js, triaged_at: str, archived_at: str, resume_at: str, pause_reason: str, budget_extra_usd: num, start_at: str, suggestion: js, plan_gate: js, onboarding: str,
   auto_queue_children: (v) => (v ? 1 : 0),
 };
 
@@ -274,6 +297,7 @@ export class Repo {
       delegateTimeoutMin: Number(m.get("delegateTimeoutMin") ?? 30),
       autoSizing: (m.get("autoSizing") ?? "true") !== "false",
       autoResume: (m.get("autoResume") ?? "true") !== "false",
+      keepAwake: (m.get("keepAwake") ?? "true") !== "false",
       loadUserPlugins: (m.get("loadUserPlugins") ?? "true") !== "false",
       browserChecks: (m.get("browserChecks") ?? "true") !== "false",
       chromeInSupervised: m.get("chromeInSupervised") === "true",
@@ -417,6 +441,51 @@ export class Repo {
       // busy project. The drawer fetches the full task when you open one.
       return { ...t, spec_md: "", cost_usd: e?.cost ?? 0, stage_states: t.pipeline.map((_, i) => e?.states.get(i) ?? "idle") };
     });
+  }
+
+  /** Cards waiting for a scheduled start, across every project. */
+  scheduledTasks(): Task[] {
+    return (this.db.prepare("SELECT * FROM tasks WHERE start_at IS NOT NULL ORDER BY start_at").all() as Row[]).map(toTask);
+  }
+
+  // ---------- schedules ----------
+  listSchedules(projectId?: string): Schedule[] {
+    const rows = projectId
+      ? this.db.prepare("SELECT * FROM schedules WHERE project_id = ? ORDER BY created_at").all(projectId)
+      : this.db.prepare("SELECT * FROM schedules ORDER BY created_at").all();
+    return (rows as Row[]).map(toSchedule);
+  }
+
+  getSchedule(id: string): Schedule | undefined {
+    const r = this.db.prepare("SELECT * FROM schedules WHERE id = ?").get(id) as Row | undefined;
+    return r && toSchedule(r);
+  }
+
+  createSchedule(s: Omit<Schedule, "id" | "created_at" | "last_run_at" | "last_task_id">): Schedule {
+    const id = newId("sc");
+    this.db
+      .prepare(
+        `INSERT INTO schedules(id, project_id, title, spec_md, mode, type, priority, pipeline_json, skills_json, days_json, time, enabled, next_run_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id, s.project_id, s.title, s.spec_md, s.mode, s.type, s.priority, JSON.stringify(s.pipeline), JSON.stringify(s.skills),
+        JSON.stringify(s.days), s.time, s.enabled ? 1 : 0, s.next_run_at, nowIso(),
+      );
+    return this.getSchedule(id)!;
+  }
+
+  updateSchedule(id: string, patch: Partial<Omit<Schedule, "id" | "project_id" | "created_at">>): Schedule {
+    const { sets, vals } = setClause(patch as Record<string, unknown>, {
+      title: str, spec_md: str, mode: str, type: str, priority: str, pipeline: js, skills: js, days: js, time: str,
+      enabled: (v) => (v ? 1 : 0), next_run_at: str, last_run_at: str, last_task_id: str,
+    });
+    if (sets.length) this.db.prepare(`UPDATE schedules SET ${sets.join(", ")} WHERE id = ?`).run(...vals, id);
+    return this.getSchedule(id)!;
+  }
+
+  deleteSchedule(id: string): void {
+    this.db.prepare("DELETE FROM schedules WHERE id = ?").run(id);
   }
 
   // ---------- attachments ----------
@@ -619,6 +688,18 @@ export class Repo {
       .prepare("SELECT * FROM (SELECT rowid AS rid, * FROM messages WHERE task_id = ? OR from_task_id = ? ORDER BY rid DESC LIMIT ?) ORDER BY rid")
       .all(taskId, taskId, limit) as Row[];
     return rows.map(toMessage);
+  }
+
+  /** The rowid of the newest message to this task, or 0. A run notes it at start to know what is "new". */
+  lastMessageRow(taskId: string): number {
+    const r = this.db.prepare("SELECT COALESCE(MAX(rowid), 0) AS m FROM messages WHERE task_id = ?").get(taskId) as { m: number };
+    return Number(r.m);
+  }
+
+  /** Messages to a task that arrived after `row`, oldest first, each with its rowid so the caller can advance. */
+  messagesAfter(taskId: string, row: number): (Message & { rid: number })[] {
+    const rows = this.db.prepare("SELECT rowid AS rid, * FROM messages WHERE task_id = ? AND rowid > ? ORDER BY rowid").all(taskId, row) as Row[];
+    return rows.map((r) => ({ ...toMessage(r), rid: Number(r.rid) }));
   }
 
   inboundMessages(taskId: string, limit = 20): Message[] {

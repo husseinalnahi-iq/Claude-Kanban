@@ -23,6 +23,7 @@ lands safely, and an honest record of what everything cost.
 | “Claude did something I didn't want.” | **Supervised** tasks turn every file change and command into an **Allow / Deny** card. **Autonomous** tasks work in their own copy and change nothing until you approve the result. Dangerous commands are blocked outright. |
 | “The best model for everything is slow and uses up my limit.” | Each task is a **pipeline**: a strong model plans, an efficient one codes, a cheap one reviews. You choose per stage — or use **free local models** (LM Studio, Ollama) and others (OpenRouter, GLM, Kimi…). |
 | “I hit my usage limit halfway through and lost the work.” | The task **pauses** and **carries on by itself** when your limit resets, in the same session. |
+| “I want Claude to work while I sleep.” | **Schedule** a card for 2 AM, for when your limit resets, or every chosen day. The computer is kept awake while work is waiting, and you wake up to it in Review. |
 | “I have no idea what that cost or where the time went.” | Every task shows its **cost, tokens and time**; the **Dashboard** adds it all up. |
 | “A big job is too much for one prompt.” | **Improve** turns a rough idea into a clear spec and splits it into subtasks with dependencies; the board runs them in the right order. |
 | “Setting all this up is fiddly.” | The **Setup** page checks your computer and fixes what is missing, mostly in one click. |
@@ -92,6 +93,20 @@ opens that page for you if not). A ZIP copy does not update itself — the one-l
 
 The **Tour** tab explains every feature in a few minutes.
 
+## Let it work while you sleep
+
+- **Start a card later:** when you create a task, pick **Later** (a date and time) or **After reset**
+  (when your Claude 5-hour usage window next resets). On an existing card, open it and press
+  **⏰ Schedule**. The card waits in Backlog with a clock on it, then queues itself.
+- **Repeat:** pick **Repeat**, tick the days and set a time, for example every night at 03:00. Each time,
+  a fresh copy of the card is made and queued, so earlier results are never overwritten.
+- **See everything that is set:** the **⏰ Schedules** button on the board lists repeating schedules
+  (pause, change the days or time, run now, delete) and cards waiting to start.
+- **Keep the board open.** Nothing runs while it is closed. If the computer was off at the time, a
+  missed schedule runs once as soon as you open the board. **Keep this computer awake** (Settings → Runs
+  & limits, on by default) stops the computer sleeping while work is waiting; the screen can still turn
+  off.
+
 ## Update or remove
 
 - **Update:** run the install line again. Your projects and tasks are kept — they live in
@@ -116,6 +131,9 @@ shows your 5-hour and weekly usage in the top bar and what each task cost.
   open a new one, and paste the install line again.
 - **The browser says the page cannot be reached:** the board is not running — double-click the icon.
 - **Something is missing or red:** open the **Setup** tab; it checks everything and offers a fix.
+- **A scheduled task did not run overnight:** the board has to be open, and the computer awake. A laptop
+  can still sleep when its lid is closed: in Windows, Control Panel → Power Options → *Choose what
+  closing the lid does* → *Do nothing* (when plugged in).
 - **Still stuck?** [Open an issue](https://github.com/husseinalnahi-iq/Claude-Kanban/issues) with what
   the window says.
 
@@ -494,7 +512,9 @@ What stops an unattended run from doing damage, in Settings → *Runs & limits*:
   in both modes and cannot be switched off. A real run once "stopped its dev server" that way and took
   every Node process on the machine with it, the board included. Killing your own PID is fine, and the
   board itself stops whatever a stage leaves running on its reserved port.
-- **A per-task cost ceiling** on top of the per-stage one. Three stages at $5 was already $15.
+- **A per-task cost ceiling** on top of the per-stage one. Three stages at $5 was already $15. Reaching
+  either ceiling **pauses the task and asks you** — *Continue* lets it spend one more stage's worth in the
+  same session; *Stop* keeps what it did. Nothing is thrown away for money.
 - **Loop detection** — a stage repeating the same tool call is stopped and the reason recorded.
 - **Run ceilings** — max turns and cost per stage, and a bounded blast radius for subagents.
 - **Desktop notifications** when a task needs approval, is ready for review, or fails.
@@ -523,10 +543,35 @@ survives a restart of the board; and **now** on the card tries immediately if yo
 wait. A genuine error is never disguised as a pause — only a usage limit pauses. Turn it off in
 Settings → *Runs & limits* and a limit fails the task as before, for you to Retry.
 
+## Schedules
+
+A card can carry a **scheduled start** (`start_at`): an ISO time, or `reset` for the next reset of the
+5-hour window plus the same 90-second margin auto-resume uses. A **repeating schedule** is a template
+(title, spec, mode, pipeline, skills) with days of the week and an `HH:MM` time in the computer's
+local time; each time it comes round it creates a fresh card, titled with the date, and queues it.
+
+- One scheduler ticks every 20 seconds rather than setting exact timers. A minute's accuracy is
+  plenty, and a tick survives sleep, clock changes and restarts without any bookkeeping.
+- Everything goes through the normal queue, so caps, dependencies, usage limits and approvals all
+  apply. A card that cannot start (blocked by a dependency, say) keeps a note saying why and loses its
+  schedule rather than being retried forever.
+- Missed runs are caught up **once**: the next run is always worked out from now, so three nights
+  with the computer off make one card, not three. A card started by hand drops its scheduled start.
+- **Keep awake** holds the operating system's own sleep inhibitor while anything is queued, running
+  or scheduled: `SetThreadExecutionState` on Windows, `caffeinate` on macOS, `systemd-inhibit` on
+  Linux. The helper process watches the board's process and exits with it, so a crashed board never
+  leaves the computer unable to sleep.
+- API: `POST /api/tasks/:id/schedule`, `GET /api/projects/:id/schedules`, `POST /api/schedules`,
+  `PATCH` / `DELETE /api/schedules/:id`, `POST /api/schedules/:id/run`.
+
 ## What a task costs
 
 Click the cost figure on a task for the breakdown: input and output tokens, cost and time **per
 stage**, and an approximate share of your **five-hour subscription window**.
+
+A task that hits a ceiling shows **needs you · cost** in rose on the board, with what it spent so far.
+**Continue** on the card, or in the task, carries on from the same session with one more stage's worth
+of budget; **Stop** keeps what it did and marks it failed so Retry still works later.
 
 Two currencies, on purpose. The dollar figure is the SDK's estimate of equivalent API price — good for
 comparing stages, but **not a bill**, because runs go through your Claude subscription. The window
@@ -557,6 +602,12 @@ load); cheaper models and lower effort per stage; switch unused skills off.
 
 Each stage is its own session. Within a task, stages hand results forward and the **Chat** tab resumes
 the latest one, so you can say "also rename that variable" while the work is fresh.
+
+**While a stage is running, Chat still works.** Type on the Chat tab and the message is handed to Claude
+at its next step — it does not stop, and nothing already done is redone. Use it for "use the header's
+blue", "skip the tests for now", "also rename that". Your message appears in the transcript, so you can
+see it was read. Stages delegated to another provider's CLI or HTTP API cannot take a message mid-run;
+the box says so.
 
 **Days later, use ↪ Follow-up task instead.** An autonomous task's worktree is deleted when you
 approve it, so its session has no working directory to resume into; the repository has moved on; and

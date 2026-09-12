@@ -3,6 +3,7 @@ import type { Approval, Mode, Stage } from "../../../server/src/types.ts";
 import { api, type TaskDetail } from "../lib/api.ts";
 import { useWs, watchTask } from "../lib/ws.ts";
 import { navigate } from "../lib/router.ts";
+import { ScheduleModal, startLabel } from "../components/SchedulesPanel.tsx";
 import { useAppData } from "../lib/store.tsx";
 import { Markdown } from "../lib/markdown.tsx";
 import { ago, cost, costLabel, duration, modelLabel, PRIORITY_META, shortModel, STATUS_META, TYPE_META } from "../lib/format.ts";
@@ -342,7 +343,16 @@ function TranscriptTab({ d, chat }: { d: TaskDetail; chat?: boolean }) {
         </div>
       ) : (
         <div className="text-[12px] text-ink-400">
-          Follow-up chat resumes the latest session (<span className="font-mono">{run?.stage} · {run && modelLabel(run)}</span>) with your message.
+          {d.busy ? (
+            <>
+              It is working right now. <b className="text-ink-200">Type what you want it to know</b> — "use the header's blue", "skip the
+              tests for now" — and it reads it at its next step and carries on. Your message shows below once sent.
+            </>
+          ) : (
+            <>
+              Continue this session (<span className="font-mono">{run?.stage} · {run && modelLabel(run)}</span>) with your message.
+            </>
+          )}
         </div>
       )}
       {run?.error ? <div className="font-mono text-[11.5px] text-rust">{run.error}</div> : null}
@@ -361,14 +371,14 @@ function TranscriptTab({ d, chat }: { d: TaskDetail; chat?: boolean }) {
         >
           <textarea
             className={`${inputCls} min-h-[44px] flex-1`}
-            placeholder={d.busy ? "Wait for the current run to finish…" : "Continue this session… (Ctrl+Enter to send)"}
+            placeholder={d.busy ? "Tell it something while it works… (Ctrl+Enter to send)" : "Continue this session… (Ctrl+Enter to send)"}
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) (e.currentTarget.form as HTMLFormElement).requestSubmit();
             }}
           />
-          <Button type="submit" variant="primary" busy={busy} disabled={d.busy || !latest?.session_id}>Send</Button>
+          <Button type="submit" variant="primary" busy={busy} disabled={!d.busy && !latest?.session_id}>Send</Button>
         </form>
       ) : null}
       {chat ? <ErrorLine error={error} /> : null}
@@ -486,6 +496,7 @@ function Actions({ d }: { d: TaskDetail }) {
   const hasWork = !!(t.branch || t.worktree_path);
   const live = d.busy;
   const retry = () => run(() => api.retry(t.id, stageIdx === "" ? undefined : stageIdx));
+  const [scheduling, setScheduling] = useState(false);
   return (
     <div className="border-b border-ink-800 px-5 py-2.5">
       <div className="flex flex-wrap items-center gap-2">
@@ -503,7 +514,31 @@ function Actions({ d }: { d: TaskDetail }) {
             ) : null}
           </>
         ) : null}
+        {(t.status === "backlog" || t.status === "failed") && !live ? (
+          <Button
+            className={t.start_at ? "border-cyan/60 text-cyan" : ""}
+            onClick={() => setScheduling(true)}
+            title="Start it later: at a time, after your usage limit resets, or on repeating days"
+          >
+            ⏰ {t.start_at ? startLabel(t.start_at) : "Schedule"}
+          </Button>
+        ) : null}
         {live ? <Button variant="danger" busy={busy} onClick={() => run(() => api.stop(t.id))}>■ Stop</Button> : null}
+        {t.status === "paused" && t.pause_reason === "cost" && !live ? (
+          <>
+            <Button
+              variant="go"
+              busy={busy}
+              onClick={() => run(() => api.continueTask(t.id))}
+              title={`Let it spend up to $${(settings?.maxCostPerStageUsd ?? 0).toFixed(2)} more, in the same session — nothing already done is redone`}
+            >
+              ▶ Continue (+${(settings?.maxCostPerStageUsd ?? 0).toFixed(2)})
+            </Button>
+            <Button variant="danger" busy={busy} onClick={() => run(() => api.stopPaused(t.id))} title="Stop here. What it did so far is kept, and Retry is still possible later.">
+              ■ Stop
+            </Button>
+          </>
+        ) : null}
         {t.status === "review" && !live ? (
           <>
             <Button variant="go" busy={busy} onClick={() => run(() => api.approve(t.id))} title={t.mode === "autonomous" ? `Merge ${t.branch} --no-ff into the project's current branch` : "Mark done"}>
@@ -553,6 +588,7 @@ function Actions({ d }: { d: TaskDetail }) {
           ) : null}
         </div>
       </div>
+      {scheduling ? <ScheduleModal task={t} onClose={() => setScheduling(false)} /> : null}
       {error ? (
         <div className="mt-2 flex items-start gap-2 rounded-md border border-rust/40 bg-rust/10 px-3 py-2 text-[12.5px] text-rust">
           <span className="flex-1">{error}</span>
@@ -592,6 +628,7 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
   }, [onClose]);
 
   const totalCost = d?.runs.reduce((s, r) => s + r.cost_usd, 0) ?? 0;
+  const costPaused = d?.task.status === "paused" && d.task.pause_reason === "cost";
   // Time actually spent running, not wall-clock since the first attempt.
   const workedMs = d?.runs.reduce((s, r) => s + Math.max(0, (r.ended_at ? Date.parse(r.ended_at) : Date.now()) - Date.parse(r.started_at)), 0) ?? 0;
 
@@ -605,8 +642,10 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
             <div className="flex items-start gap-3 border-b border-ink-800 px-5 pt-4 pb-3">
               <div className="min-w-0 flex-1">
                 <div className="mb-1 flex items-center gap-2">
-                  <span className={`h-2 w-2 rounded-full ${STATUS_META[d.task.status].dot} ${d.busy ? "breathe" : ""}`} />
-                  <span className={`text-[11px] font-semibold uppercase tracking-[0.08em] ${STATUS_META[d.task.status].text}`}>{STATUS_META[d.task.status].label}</span>
+                  <span className={`h-2 w-2 rounded-full ${costPaused ? "bg-rose" : STATUS_META[d.task.status].dot} ${d.busy ? "breathe" : ""}`} />
+                  <span className={`text-[11px] font-semibold uppercase tracking-[0.08em] ${costPaused ? "text-rose" : STATUS_META[d.task.status].text}`}>
+                    {costPaused ? "Needs you · cost" : STATUS_META[d.task.status].label}
+                  </span>
                   <ModeChip mode={d.task.mode} />
                   <Chip className={PRIORITY_META[d.task.priority].tone} title={PRIORITY_META[d.task.priority].title}>{d.task.priority}</Chip>
                   <Chip className={TYPE_META[d.task.type].tone}>{TYPE_META[d.task.type].short}</Chip>

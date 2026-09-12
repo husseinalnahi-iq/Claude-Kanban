@@ -94,7 +94,8 @@ export function Modal({ title, onClose, children, width = "max-w-xl" }: { title:
     return () => window.removeEventListener("keydown", k);
   }, [onClose]);
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-ink-950/75 backdrop-blur-[2px] p-6 pt-[8vh]" onMouseDown={onClose}>
+    // The overlay scrolls, so a form taller than the window (a long pipeline) still reaches its buttons.
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink-950/75 backdrop-blur-[2px] p-6 pt-[8vh]" onMouseDown={onClose}>
       <div className={`rise w-full ${width} rounded-xl border border-ink-700 bg-ink-900 shadow-2xl shadow-black/60`} onMouseDown={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-ink-700 px-5 py-3">
           <h2 className="text-[14px] font-semibold text-ink-100">{title}</h2>

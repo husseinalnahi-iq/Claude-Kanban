@@ -71,6 +71,10 @@ interface Active {
   runId: string;
   abort: AbortController;
   stageStatus: TaskStatus;
+  /** Newest message rowid already in this stage's prompt; anything later is handed over live. */
+  messageCursor: number;
+  /** True for a Claude SDK run, whose hooks can carry a message in. CLI / HTTP providers cannot. */
+  steerable: boolean;
 }
 
 /** A pipeline from queue start to its last stage; `stopped` is honoured between stages too. */
@@ -452,13 +456,10 @@ export class TaskRunner {
         task = this.repo.getTask(taskId)!;
         // A per-stage cap alone lets a 3-stage task cost 3x it, and a parent with six subtasks far
         // more. Check the task's whole spend before starting another stage.
-        const capped = this.repo.getSettings().maxCostPerTaskUsd;
+        const capped = this.taskCeiling(task);
         const spent = this.repo.taskCost(taskId);
         if (spent >= capped) {
-          this.setTask(taskId, {
-            status: "failed",
-            error: `Stopped at $${spent.toFixed(2)}: this task has reached its ceiling of $${capped.toFixed(2)}. Raise it in Settings → Runs & limits, or split the work.`,
-          });
+          this.pauseForCost(taskId, spent, capped, "this task reached its ceiling");
           return;
         }
         const stage = task.pipeline[i];
@@ -493,6 +494,11 @@ export class TaskRunner {
           await this.commitWorktree(task, `kanban(${stage.stage})${outcome.ok ? "" : " [failed]"}: ${task.title}`);
         }
         if (!outcome.ok) {
+          // Money, not a fault: wait for Continue or Stop rather than fail (D185).
+          if (outcome.budgetStop) {
+            this.pauseForCost(taskId, this.repo.taskCost(taskId), this.taskCeiling(task), outcome.error ?? "the stage reached its ceiling");
+            return;
+          }
           // The pause timer is tied to Claude's usage windows; a foreign provider's 429 just fails (D135).
           if (outcome.providerId === ANTHROPIC_PROVIDER_ID && this.pauseForLimit(taskId, outcome.error)) return;
           this.setTask(taskId, { status: "failed", error: outcome.error });
@@ -729,18 +735,21 @@ export class TaskRunner {
     promptEvent?: boolean;
     /** When set, the model can't end its turn while this command fails. */
     verifyCommand?: string | null;
-  }): Promise<{ ok: boolean; error: string | null; providerId: string }> {
+  }): Promise<{ ok: boolean; error: string | null; providerId: string; budgetStop: boolean }> {
     const { task, run } = a;
     const abort = new AbortController();
-    this.active.set(task.id, { runId: run.id, abort, stageStatus: a.stageStatus });
+    // Who runs this: Claude through your login, or one of the providers in Settings (D121).
+    const res: Resolved = this.providers.resolve(run.provider);
+    const foreign = res.id !== ANTHROPIC_PROVIDER_ID;
+    this.active.set(task.id, {
+      runId: run.id, abort, stageStatus: a.stageStatus,
+      messageCursor: this.repo.lastMessageRow(task.id), steerable: !(res.adapter.run && res.provider),
+    });
     // A Stop can land between the status change and here, before this controller existed; honour it.
     if (a.ctl.stopped) abort.abort();
 
     const settings = this.repo.getSettings();
     const autonomous = task.mode === "autonomous";
-    // Who runs this: Claude through your login, or one of the providers in Settings (D121).
-    const res: Resolved = this.providers.resolve(run.provider);
-    const foreign = res.id !== ANTHROPIC_PROVIDER_ID;
     // The board's own browser, one per session; see browser.ts for why not the Playwright plugin's.
     const browserDir = join(tmpdir(), "claude-kanban-browser", run.id);
     // Board tools are always allowed; handled here rather than via allowedTools so nothing shadows this callback.
@@ -776,6 +785,7 @@ export class TaskRunner {
       return autonomous ? autonomousGate(toolName, input, a.cwd) : this.askApproval(run, task.id, toolName, input, o);
     };
     const chrome = settings.chromeInSupervised && !autonomous;
+    const steer = this.steerHooks(task.id, run.id);
 
     // Claude's fast mode, per stage. Only Opus 5 / 4.8 support it; on anything else the flag is not
     // sent at all, so a stage moved to a cheaper model does not start failing.
@@ -794,8 +804,11 @@ export class TaskRunner {
       canUseTool,
       hooks: {
         ...(autonomous ? {} : { PreToolUse: FORCE_ASK }),
-        // Deterministic gate: a code stage can't end while the project's own check fails.
-        ...(a.verifyCommand ? { Stop: this.verifyStopHook(a.verifyCommand, a.cwd, run.id, task.id) } : {}),
+        // A message typed while the stage runs is handed over at the next tool call (D184).
+        PostToolUse: steer.PostToolUse,
+        // A waiting message holds the turn open first; then the deterministic gate: a code stage
+        // can't end while the project's own check fails.
+        Stop: [...steer.Stop, ...(a.verifyCommand ? this.verifyStopHook(a.verifyCommand, a.cwd, run.id, task.id) : [])],
       },
       env: {
         ...process.env,
@@ -862,6 +875,7 @@ export class TaskRunner {
 
     let result: { ok: boolean; text: string | null; error: string | null; cost: number; inTok: number; outTok: number } | null = null;
     let thrown: string | null = null;
+    let budgetStop = false;
     try {
       for await (const msg of stream) {
         const sid = (msg as { session_id?: string }).session_id;
@@ -881,8 +895,9 @@ export class TaskRunner {
                 cacheCreationInputTokens: u.cache_creation_input_tokens ?? 0, outputTokens: u.output_tokens ?? 0,
               }, this.catalog.priceOf(res.provider, run.model)).usd;
               if (metered > settings.maxCostPerStageUsd) {
-                thrown = `Stopped at $${metered.toFixed(2)}: the estimated cost passed the per-stage ceiling of $${settings.maxCostPerStageUsd.toFixed(2)} (Settings → Runs & limits). The SDK cannot price ${run.model} itself, so the board metered it from your price table.`;
-                this.log(run.id, `\n[board] ${thrown}\n`);
+                thrown = `the estimated cost passed the per-stage ceiling of $${settings.maxCostPerStageUsd.toFixed(2)} — the SDK cannot price ${run.model} itself, so the board metered it from your price table`;
+                budgetStop = true;
+                this.log(run.id, `\n[board] Stopped at $${metered.toFixed(2)}: ${thrown}\n`);
                 abort.abort();
                 break;
               }
@@ -917,6 +932,8 @@ export class TaskRunner {
           const window = Math.max(0, ...Object.values(r.modelUsage ?? {}).map((u) => u.contextWindow ?? 0));
           if (window) this.setRun(run.id, { context_window: window });
           const ok = r.subtype === "success" && !r.is_error;
+          // The SDK's own per-stage ceiling: the session is intact and can be resumed after Continue.
+          if (r.subtype === "error_max_budget_usd") budgetStop = true;
           // Where the dollar figure comes from is kept on the run: prices can be edited later (D123).
           let cost = r.total_cost_usd ?? 0;
           let costSource: Run["cost_source"] = "sdk";
@@ -929,7 +946,7 @@ export class TaskRunner {
           result = {
             ok,
             text: r.subtype === "success" ? r.result : null,
-            error: ok ? null : r.subtype === "success" ? r.result || "error result" : (r.errors ?? []).join("\n") || r.subtype,
+            error: ok ? null : r.subtype === "error_max_budget_usd" ? `this stage reached its own ceiling of $${settings.maxCostPerStageUsd.toFixed(2)}` : r.subtype === "success" ? r.result || "error result" : (r.errors ?? []).join("\n") || r.subtype,
             cost,
             inTok,
             outTok,
@@ -968,7 +985,33 @@ export class TaskRunner {
       error,
     });
     this.bus.publish({ type: "run.finished", run: finished });
-    return { ok: !error, error, providerId: res.id };
+    return { ok: !error, error, providerId: res.id, budgetStop: budgetStop && !a.ctl.stopped };
+  }
+
+  /**
+   * Live steering (D184): a message posted while a stage runs is handed to Claude at its next tool
+   * call as extra context, and a turn is not allowed to end while one is still waiting. The cursor
+   * advances synchronously before any await, so parallel tool calls cannot deliver a message twice.
+   */
+  private steerHooks(taskId: string, runId: string): { PostToolUse: HookCallbackMatcher[]; Stop: HookCallbackMatcher[] } {
+    const take = (): string | null => {
+      const active = this.active.get(taskId);
+      if (!active || active.runId !== runId) return null;
+      const fresh = this.repo.messagesAfter(taskId, active.messageCursor);
+      if (!fresh.length) return null;
+      active.messageCursor = fresh[fresh.length - 1].rid;
+      const lines = fresh.map((m) => {
+        const from = m.from_task_id ? `task ${m.from_task_id} (${this.repo.getTask(m.from_task_id)?.title ?? "?"})` : "the user";
+        return `From ${from}, sent while you were working:\n${m.body}`;
+      });
+      const event = this.repo.insertEvent(runId, "board:steer", { type: "steer", count: fresh.length });
+      this.bus.publish({ type: "event", runId, taskId, event });
+      return `${lines.join("\n\n")}\n\nTake this into account from here on, and say in your next message how you are acting on it.`;
+    };
+    return {
+      PostToolUse: [{ hooks: [async () => { const ctx = take(); return ctx ? { hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: ctx } } : {}; }] }],
+      Stop: [{ hooks: [async () => { const ctx = take(); return ctx ? { decision: "block" as const, reason: ctx } : {}; }] }],
+    };
   }
 
   /**
@@ -1450,12 +1493,50 @@ export class TaskRunner {
     const at = this.resumeTime();
     this.setTask(taskId, {
       status: "paused",
+      pause_reason: "limit",
       resume_at: at.toISOString(),
       error: null,
       note: `Paused by your Claude usage limit. Resumes by itself at ${at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}, in the same session, from the stage it was on.`,
     });
     this.armResume();
     return true;
+  }
+
+  /** The per-task ceiling for this task: the global figure plus whatever Continue has granted it. */
+  private taskCeiling(task: Task): number {
+    return this.repo.getSettings().maxCostPerTaskUsd + (task.budget_extra_usd ?? 0);
+  }
+
+  /**
+   * Money ran out: pause for a decision rather than fail (D185). Unlike a usage limit there is no
+   * resume time — the person picks Continue (one more stage ceiling) or Stop. The session is kept,
+   * so nothing done so far is redone.
+   */
+  private pauseForCost(taskId: string, spent: number, ceiling: number, detail: string): void {
+    const grant = this.repo.getSettings().maxCostPerStageUsd;
+    this.setTask(taskId, {
+      status: "paused",
+      pause_reason: "cost",
+      resume_at: null,
+      error: null,
+      note: `Stopped at $${spent.toFixed(2)}: ${detail} (ceiling $${ceiling.toFixed(2)}). Continue lets it spend up to $${grant.toFixed(2)} more, in the same session; Stop keeps what it did so far.`,
+    });
+  }
+
+  /** Continue a task paused at its cost ceiling: grant one more stage ceiling and resume where it stopped. */
+  continueTask(taskId: string): Task {
+    const { task } = this.load(taskId);
+    if (task.status !== "paused" || task.pause_reason !== "cost") throw new ConflictError("Only a task paused at its cost ceiling can be continued.");
+    const grant = this.repo.getSettings().maxCostPerStageUsd;
+    this.setTask(taskId, { status: "backlog", pause_reason: null, note: null, budget_extra_usd: (task.budget_extra_usd ?? 0) + grant });
+    return this.retryTask(taskId);
+  }
+
+  /** Give up on a task paused at its cost ceiling: it fails with the reason, so Retry and Back to backlog work as usual. */
+  stopPaused(taskId: string): Task {
+    const { task } = this.load(taskId);
+    if (task.status !== "paused" || task.pause_reason !== "cost") throw new ConflictError("Only a task paused at its cost ceiling can be stopped this way.");
+    return this.setTask(taskId, { status: "failed", pause_reason: null, error: task.note ?? "Stopped at its cost ceiling.", note: null });
   }
 
   /**
@@ -1519,7 +1600,7 @@ export class TaskRunner {
     const resumed: string[] = [];
     for (const t of this.repo.tasksInStatus(["paused"])) {
       if (!t.resume_at || Date.parse(t.resume_at) > now) continue;
-      this.setTask(t.id, { status: "backlog", resume_at: null, note: null });
+      this.setTask(t.id, { status: "backlog", resume_at: null, pause_reason: null, note: null });
       try {
         this.retryTask(t.id);
         resumed.push(t.id);
@@ -1540,6 +1621,7 @@ export class TaskRunner {
   resumeNow(taskId: string): void {
     const { task } = this.load(taskId);
     if (task.status !== "paused") throw new ConflictError("Only a paused task can be resumed.");
+    if (task.pause_reason === "cost") throw new ConflictError("This task is waiting on Continue, not on a usage window.");
     this.repo.updateTask(taskId, { resume_at: new Date(0).toISOString() });
     this.resumeDue();
   }
@@ -1618,6 +1700,16 @@ export class TaskRunner {
   /** Follow-up chat: resume the latest run's session with the user's text. */
   chat(taskId: string, text: string): Run {
     const { task, project } = this.load(taskId);
+    const live = this.active.get(taskId);
+    if (live) {
+      // The stage is running: keep the message and let the hooks hand it over at the next step (D184).
+      if (!live.steerable) throw new ConflictError("This stage runs on another provider, which cannot take a message mid-run. Wait for it to finish, or Stop it.");
+      this.repo.insertMessage({ task_id: taskId, from_task_id: null, from_run_id: null, body: text });
+      const run = this.repo.getRun(live.runId)!;
+      const event = this.repo.insertEvent(run.id, "user:chat", { type: "user_chat", text, live: true });
+      this.bus.publish({ type: "event", runId: run.id, taskId, event });
+      return run;
+    }
     if (this.isBusy(taskId)) throw new ConflictError("Task is busy; wait for the current run to finish.");
     const last = this.repo.latestRun(taskId);
     if (!last?.session_id) throw new ConflictError("No session to continue yet — queue the task first.");

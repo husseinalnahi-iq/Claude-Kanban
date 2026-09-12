@@ -253,6 +253,15 @@ export interface Task {
   archived_at: string | null;
   /** When a task paused by a usage limit will pick up again (ISO time), or null. */
   resume_at: string | null;
+  /** Why the task is paused: a usage limit (resumes by itself) or a cost ceiling (waits for Continue). */
+  pause_reason: "limit" | "cost" | null;
+  /** Extra dollars granted to this task by pressing Continue, on top of the global per-task ceiling. */
+  budget_extra_usd: number;
+  /**
+   * A scheduled start for a Backlog card: an ISO time, or "reset" for when the Claude 5-hour usage
+   * window next resets. Cleared once it fires (or the card is started by hand).
+   */
+  start_at: string | null;
   /** Set on the tasks the board creates to set a project up; approval reads a verify command out of them. */
   onboarding: "init" | "bootstrap" | null;
   /**
@@ -283,6 +292,31 @@ export interface Task {
   position: number;
   created_at: string;
   updated_at: string;
+}
+
+/**
+ * A repeating schedule: a card template. Each time it comes round, a fresh card is made from it and
+ * queued — the template itself never runs, so earlier results are never overwritten.
+ */
+export interface Schedule {
+  id: string;
+  project_id: string;
+  title: string;
+  spec_md: string;
+  mode: Mode;
+  type: TaskType;
+  priority: Priority;
+  pipeline: Stage[];
+  skills: string[];
+  /** Days of the week it runs on, 0 = Sunday … 6 = Saturday, in the computer's local time. */
+  days: number[];
+  /** "HH:MM", 24-hour, local time. */
+  time: string;
+  enabled: boolean;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  last_task_id: string | null;
+  created_at: string;
 }
 
 export interface Run {
@@ -521,6 +555,8 @@ export interface Settings {
    * session, from the stage it was on — once the window resets, instead of marking it failed.
    */
   autoResume: boolean;
+  /** Tell the OS not to sleep while anything is queued, running or scheduled. The screen may still turn off. */
+  keepAwake: boolean;
   /**
    * Give runs their own browser (Playwright, headless, one per session) and ask the code and review
    * stages to look at anything visible they changed. Local pages only unless you approve otherwise.
@@ -597,6 +633,8 @@ export type WsMessage =
   | { type: "event"; runId: string; taskId: string; event: EventRow }
   | { type: "task.updated"; task: Task }
   | { type: "task.deleted"; taskId: string }
+  | { type: "schedule.updated"; schedule: Schedule }
+  | { type: "schedule.deleted"; id: string; project_id: string }
   | { type: "run.updated"; run: Run }
   | { type: "run.finished"; run: Run }
   | { type: "approval.requested"; approval: Approval }

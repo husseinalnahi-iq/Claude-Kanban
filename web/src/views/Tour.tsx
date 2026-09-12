@@ -63,7 +63,7 @@ export function Tour({ hasProjects, onAddProject }: { hasProjects: boolean; onAd
     {
       n: "3",
       title: "Queue it and walk away",
-      body: "The bell calls you when it needs a decision. Approve what lands; Retry or Chat what doesn't.",
+      body: "The bell calls you when it needs a decision: something to allow, a plan to pick, or a task at its cost ceiling. Approve what lands; Retry or Chat what doesn't.",
       action: null,
     },
   ];
@@ -172,8 +172,8 @@ export function Tour({ hasProjects, onAddProject }: { hasProjects: boolean; onAd
                 autonomous runs there. It never edits the repository's own rules.
               </li>
               <li>
-                <b className="text-ink-200">Same task, same day: Chat.</b> New symptom days later: ↪ Follow-up task, which starts fresh from the
-                repository as it is now.
+                <b className="text-ink-200">Same task, same day: Chat.</b> While it is running, Chat hands your message over live — it does not stop.
+                New symptom days later: ↪ Follow-up task, which starts fresh from the repository as it is now.
               </li>
               <li>
                 <b className="text-ink-200">Sound needs one click first.</b> Browsers stay silent until you've clicked the page once. The bell's ▾ has

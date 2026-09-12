@@ -28,6 +28,8 @@ import { claudeMdRoutes } from "./routes/claudeMd.ts";
 import { providerRoutes } from "./routes/providers.ts";
 import { searchRoutes } from "./routes/search.ts";
 import { wsRoutes } from "./routes/ws.ts";
+import { scheduleRoutes } from "./routes/schedules.ts";
+import { Scheduler } from "./engine/scheduler.ts";
 
 export interface AppDeps {
   repo: Repo;
@@ -39,6 +41,8 @@ export interface AppDeps {
   allowedHosts?: string[];
   /** The Setup page's checks and fixes. Tests pass one with a fake machine. */
   setup?: SetupService;
+  /** Starts cards on time. index.ts starts its timer; tests get one that only ticks when asked. */
+  scheduler?: Scheduler;
 }
 
 export function defaultAllowedHosts(): string[] {
@@ -72,6 +76,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
 
   await app.register(websocket);
   const setup = deps.setup ?? new SetupService({ repo: deps.repo, bus: deps.bus, runner: deps.runner, stateDir: join(STATE_DIR, "setup") });
+  const scheduler = deps.scheduler ?? new Scheduler({ repo: deps.repo, bus: deps.bus, runner: deps.runner });
   await app.register(async (api) => {
     await projectRoutes(api, deps);
     await taskRoutes(api, deps);
@@ -90,6 +95,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     await attachmentRoutes(api, deps);
     await claudeMdRoutes(api, deps);
     await providerRoutes(api, deps);
+    await scheduleRoutes(api, { ...deps, scheduler });
   }, { prefix: "/api" });
   await wsRoutes(app, deps);
 

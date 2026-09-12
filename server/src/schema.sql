@@ -154,3 +154,24 @@ CREATE TABLE IF NOT EXISTS attachments (
   created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS attachments_task ON attachments(task_id, created_at);
+
+-- Repeating schedules: a card template turned into a fresh card each time it comes round.
+CREATE TABLE IF NOT EXISTS schedules (
+  id            TEXT PRIMARY KEY,
+  project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  title         TEXT NOT NULL,
+  spec_md       TEXT NOT NULL DEFAULT '',
+  mode          TEXT NOT NULL DEFAULT 'supervised',
+  type          TEXT NOT NULL DEFAULT 'feature',
+  priority      TEXT NOT NULL DEFAULT 'p2',
+  pipeline_json TEXT NOT NULL DEFAULT '[]',
+  skills_json   TEXT NOT NULL DEFAULT '[]',
+  days_json     TEXT NOT NULL DEFAULT '[]',
+  time          TEXT NOT NULL,
+  enabled       INTEGER NOT NULL DEFAULT 1,
+  next_run_at   TEXT,
+  last_run_at   TEXT,
+  last_task_id  TEXT,
+  created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS schedules_project ON schedules(project_id);

@@ -60,7 +60,7 @@ test("the blocklist matches what agents actually type, and leaves ordinary comma
   for (const c of fine) assert.equal(blockedCommand(c, DEFAULT_BLOCKED_COMMANDS), null, `should allow: ${c}`);
 });
 
-test("a task is stopped once it reaches its own cost ceiling, not just the per-stage one", async () => {
+test("a task pauses for a decision once it reaches its own cost ceiling, not just the per-stage one", async () => {
   const q: QueryFn = () =>
     (async function* () {
       yield { type: "result", subtype: "success", is_error: false, result: "ok", total_cost_usd: 4, session_id: "s1", modelUsage: {} } as never;
@@ -73,9 +73,10 @@ test("a task is stopped once it reaches its own cost ceiling, not just the per-s
       pipeline: [ONE_STAGE[0], { stage: "review", model: "m", effort: "low" }, { stage: "custom", model: "m", effort: "low" }],
     });
     s.runner.queueTask(task.id);
-    await until(() => s.repo.getTask(task.id)!.status === "failed");
+    await until(() => s.repo.getTask(task.id)!.status === "paused");
     const after = s.repo.getTask(task.id)!;
-    assert.match(after.error ?? "", /reached its ceiling of \$6\.00/);
+    assert.equal(after.pause_reason, "cost");
+    assert.match(after.note ?? "", /reached its ceiling \(ceiling \$6\.00\)/);
     assert.equal(s.repo.runsForTask(task.id).length, 2, "it ran until the cap, then stopped before the next stage");
     assert.equal(s.repo.taskCost(task.id), 8);
   } finally {

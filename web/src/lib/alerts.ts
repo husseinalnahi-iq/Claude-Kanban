@@ -194,6 +194,7 @@ function onTask(t: Task) {
   if (prev !== cur) {
     if (cur === "done") taskAlert("done", t, "");
     else if (cur === "failed" && t.error !== "stopped by user") taskAlert("failed", t, firstLine(t.error));
+    else if (cur === "paused" && t.pause_reason === "cost") taskAlert("approval", t, "reached its cost ceiling — Continue or Stop");
     else if (cur === "paused") taskAlert("paused", t, t.resume_at ? `resumes ${until(t.resume_at)} · ${clock(t.resume_at)}` : "resumes when the window resets");
     else if (prev === "paused" && ACTIVE.has(cur)) taskAlert("resumed", t, "");
     else if ((prev === "queued" || prev === "backlog" || prev === "failed") && (cur === "planning" || cur === "running")) taskAlert("started", t, "");

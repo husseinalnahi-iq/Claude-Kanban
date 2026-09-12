@@ -5,6 +5,7 @@ import { useAppData } from "../lib/store.tsx";
 import { navigate } from "../lib/router.ts";
 import { Button, ErrorLine, Field, inputCls, Modal, useAction, ModeHelp } from "./ui.tsx";
 import { PipelineEditor } from "./PipelineEditor.tsx";
+import { defaultWhen, startAtOf, WhenPicker, whenInvalid, type When } from "./WhenPicker.tsx";
 
 export function autonomousBlocked(p: ProjectWithGit): string | null {
   if (p.policy.autonomous === "forbidden") return "This project's policy forbids autonomous runs.";
@@ -13,18 +14,35 @@ export function autonomousBlocked(p: ProjectWithGit): string | null {
   return null;
 }
 
-export function NewTaskForm({ project, parentId, milestoneId, onClose }: { project: ProjectWithGit; parentId?: string; milestoneId?: string | null; onClose: () => void }) {
+export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClose }: {
+  project: ProjectWithGit;
+  parentId?: string;
+  milestoneId?: string | null;
+  /** Opened from the Schedules panel: start on Repeat. */
+  initialWhen?: When["kind"];
+  onClose: () => void;
+}) {
   const { settings } = useAppData();
   const blocked = autonomousBlocked(project);
   const [title, setTitle] = useState("");
   const [spec, setSpec] = useState("");
   const [mode, setMode] = useState<Mode>("supervised");
   const [pipeline, setPipeline] = useState<Stage[]>(project.policy.defaultPipeline?.length ? project.policy.defaultPipeline : settings?.defaultPipeline ?? []);
+  const [when, setWhen] = useState<When>(defaultWhen(initialWhen ?? "now"));
   const { busy, error, run } = useAction();
+  const invalid = whenInvalid(when);
 
   const submit = () =>
     run(async () => {
+      if (when.kind === "repeat") {
+        // A repeating schedule is a template: no card now, a fresh one each time it comes round.
+        await api.createSchedule({ project_id: project.id, title, spec_md: spec, mode, pipeline, days: when.days, time: when.time });
+        onClose();
+        return;
+      }
       const t = await api.createTask({ project_id: project.id, title, spec_md: spec, mode, pipeline, parent_id: parentId ?? null, milestone_id: milestoneId ?? null });
+      const startAt = startAtOf(when);
+      if (startAt) await api.scheduleTask(t.id, startAt);
       onClose();
       navigate({ taskId: t.id });
     });
@@ -75,10 +93,17 @@ export function NewTaskForm({ project, parentId, milestoneId, onClose }: { proje
         >
           <PipelineEditor value={pipeline} onChange={setPipeline} models={settings?.models ?? []} />
         </Field>
+        {!parentId ? (
+          <Field group label="When">
+            <WhenPicker value={when} onChange={setWhen} />
+          </Field>
+        ) : null}
         <ErrorLine error={error} />
         <div className="flex justify-end gap-2">
           <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button type="submit" variant="primary" busy={busy} disabled={!title.trim()}>Create task</Button>
+          <Button type="submit" variant="primary" busy={busy} disabled={!title.trim() || !!invalid} title={invalid ?? undefined}>
+            {when.kind === "repeat" ? "Create schedule" : when.kind === "now" ? "Create task" : "Create & schedule"}
+          </Button>
         </div>
       </form>
     </Modal>

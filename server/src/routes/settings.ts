@@ -69,6 +69,7 @@ const patchSchema = z.object({
   delegateTimeoutMin: z.number().int().min(1).max(240).optional(),
   autoSizing: z.boolean().optional(),
   autoResume: z.boolean().optional(),
+  keepAwake: z.boolean().optional(),
   loadUserPlugins: z.boolean().optional(),
   browserChecks: z.boolean().optional(),
   chromeInSupervised: z.boolean().optional(),

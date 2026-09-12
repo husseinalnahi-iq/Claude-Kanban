@@ -1,6 +1,6 @@
 import type {
   Approval, Attachment, DiffFile, EventRow, FastModeStatus, Message, MergePolicy, Milestone, Mode, Note, Policy, Project, ProjectEnv, Run, RunListItem, SessionTools, Settings, SkillInfo, Stage, Task, TaskCard, UsageLimit,
-  Provider, ProviderTestResult, SetupCheckResult, ModelCatalogResult,
+  Provider, ProviderTestResult, SetupCheckResult, ModelCatalogResult, Schedule,
 } from "../../../server/src/types.ts";
 import type { ProviderPreset } from "../../../server/src/engine/providers/presets.ts";
 import type { LocalModelsStatus } from "../../../server/src/setup/local.ts";
@@ -15,6 +15,8 @@ import type { TriageResult } from "../../../server/src/engine/triage.ts";
 import type { SearchHit } from "../../../server/src/routes/search.ts";
 
 export type ProjectWithGit = Project & { isGit: boolean };
+export type ScheduleBody = Partial<Pick<Schedule, "spec_md" | "mode" | "type" | "priority" | "pipeline" | "skills" | "enabled">> &
+  Pick<Schedule, "title" | "days" | "time">;
 /** What is in a folder before it is registered: nothing, code, or no folder at all. */
 export type FolderProbe = { path: string; kind: "empty" | "code" | "missing"; hasClaudeMd: boolean };
 export type OnboardingAnswers = { goal: string; stack: string; verify: string };
@@ -104,6 +106,13 @@ export const api = {
   ) =>
     req<Task>("PATCH", `/tasks/${id}`, b),
   deleteTask: (id: string) => req<{ ok: true }>("DELETE", `/tasks/${id}`),
+  /** Start a Backlog card later: an ISO time, "reset" for when the usage window resets, or null to cancel. */
+  scheduleTask: (id: string, start_at: string | null) => req<Task>("POST", `/tasks/${id}/schedule`, { start_at }),
+  schedules: (projectId: string) => req<Schedule[]>("GET", `/projects/${projectId}/schedules`),
+  createSchedule: (b: ScheduleBody & { project_id: string }) => req<Schedule>("POST", "/schedules", b),
+  patchSchedule: (id: string, b: Partial<ScheduleBody>) => req<Schedule>("PATCH", `/schedules/${id}`, b),
+  deleteSchedule: (id: string) => req<{ ok: true }>("DELETE", `/schedules/${id}`),
+  runSchedule: (id: string) => req<Task>("POST", `/schedules/${id}/run`),
   /** `force` starts the task beside whatever is running, outside the concurrency caps. */
   queue: (id: string, force?: boolean) => req<Task>("POST", `/tasks/${id}/queue`, { force }),
   retry: (id: string, stage_index?: number, force?: boolean) => req<Task>("POST", `/tasks/${id}/retry`, { stage_index, force }),
@@ -147,6 +156,9 @@ export const api = {
   fastMode: (force = false) => req<FastModeStatus>("GET", `/fast-mode${force ? "?force=1" : ""}`),
   sessionTools: (force = false) => req<SessionTools>("GET", `/session-tools${force ? "?force=1" : ""}`),
   resumeTask: (id: string) => req<Task>("POST", `/tasks/${id}/resume`),
+  /** A task paused at its cost ceiling: spend one more stage's worth, or give up. */
+  continueTask: (id: string) => req<Task>("POST", `/tasks/${id}/continue`),
+  stopPaused: (id: string) => req<Task>("POST", `/tasks/${id}/stop-paused`),
   refreshLimits: () => req<UsageLimit[]>("POST", "/limits/refresh"),
   acceptSuggestion: (id: string, what: { fields?: boolean; pipeline?: boolean }) => req<Task>("POST", `/tasks/${id}/accept-suggestion`, what),
   planDecision: (id: string, b: { choice: "original" | "revised" | "custom"; text?: string }) => req<Task>("POST", `/tasks/${id}/plan-decision`, b),

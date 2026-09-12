@@ -9,6 +9,7 @@ import { Button, Chip, ModeChip, inputCls } from "../components/ui.tsx";
 import { NewTaskForm } from "../components/forms.tsx";
 import { LimitBanner, SerialSwitch } from "../components/QueueControls.tsx";
 import { DepGraph } from "../components/DepGraph.tsx";
+import { SchedulesPanel, startLabel, useSchedules } from "../components/SchedulesPanel.tsx";
 import { COLUMN_SIZES, setViewPrefs, useViewPrefs } from "../lib/view.ts";
 
 const DOT: Record<StageState, string> = {
@@ -36,6 +37,7 @@ const COLUMNS: { id: string; statuses: TaskStatus[]; label: string; color: strin
 /** The in-progress badge: which stage is running, or why it is waiting. */
 function phase(card: TaskCard): { text: string; tone: string; title: string } {
   if (card.status === "approval") return { text: "needs you", tone: "border-rose/60 text-rose", title: "Waiting for you to allow or deny something — open the task" };
+  if (card.status === "paused" && card.pause_reason === "cost") return { text: "needs you · cost", tone: "border-rose/60 text-rose", title: "It reached its cost ceiling — open the task and press Continue or Stop" };
   if (card.status === "paused") return { text: "paused · limit", tone: "border-iris/50 text-iris", title: "Paused by your Claude usage limit; it carries on by itself" };
   if (card.status === "planning") return { text: "planning", tone: "border-cyan/50 text-cyan", title: "The plan stage is running" };
   const i = card.stage_states.indexOf("running");
@@ -148,7 +150,40 @@ const Card = memo(function Card({
       {card.summary ? <div className="mt-1.5 line-clamp-2 text-[12px] leading-snug text-ink-300">{card.summary}</div> : null}
       {card.error && card.status === "failed" ? <div className="mt-1.5 line-clamp-2 font-mono text-[11px] text-rust">{card.error}</div> : null}
       {card.note && card.status === "backlog" ? <div className="mt-1.5 line-clamp-2 text-[11.5px] italic text-ink-400">“{card.note}”</div> : null}
-      {card.status === "paused" && card.resume_at ? (
+      {card.start_at && (card.status === "backlog" || card.status === "failed") ? (
+        <div className="rise mt-1.5 flex items-center gap-2 rounded-md border border-cyan/40 bg-cyan/5 px-2 py-1 text-[11.5px] text-cyan">
+          <span className="min-w-0 leading-tight" title={`Scheduled: it queues itself ${startLabel(card.start_at)}`}>
+            ⏰ {card.start_at === "reset" ? "after limit reset" : startLabel(card.start_at)}
+          </span>
+          <button
+            className="ml-auto shrink-0 cursor-pointer rounded border border-cyan/40 px-1.5 py-px font-mono text-[10.5px] hover:bg-cyan/10"
+            title="Start it now instead of waiting"
+            onClick={(e) => act(e, async () => { await api.scheduleTask(card.id, null); await api.queue(card.id); })}
+          >
+            now
+          </button>
+          <button
+            className="shrink-0 cursor-pointer px-0.5 text-cyan/70 hover:text-cyan"
+            title="Cancel the scheduled start. The card stays in Backlog."
+            onClick={(e) => act(e, () => api.scheduleTask(card.id, null))}
+          >
+            ×
+          </button>
+        </div>
+      ) : null}
+      {card.status === "paused" && card.pause_reason === "cost" ? (
+        <div className="mt-1.5 flex items-center gap-2 rounded-md border border-rose/40 bg-rose/5 px-2 py-1 text-[11.5px] text-rose">
+          <span title={card.note ?? undefined}>reached its cost ceiling</span>
+          <button
+            className="ml-auto cursor-pointer rounded border border-rose/40 px-1.5 py-px font-mono text-[10.5px] hover:bg-rose/10"
+            title="Let it spend one more stage's worth and carry on from where it stopped"
+            onClick={(e) => act(e, () => api.continueTask(card.id))}
+          >
+            continue
+          </button>
+        </div>
+      ) : null}
+      {card.status === "paused" && card.pause_reason !== "cost" && card.resume_at ? (
         <div className="mt-1.5 flex items-center gap-2 rounded-md border border-iris/40 bg-iris/5 px-2 py-1 text-[11.5px] text-iris">
           <span title="Paused by your Claude usage limit; it continues in the same session, from the stage it was on">
             resumes {until(card.resume_at)} · {clock(card.resume_at)}
@@ -222,7 +257,10 @@ export function Board({ project }: { project: ProjectWithGit }) {
   const { cards } = useTaskCards(project.id);
   const { pending, settings } = useAppData();
   const { columns } = useViewPrefs();
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState<false | "now" | "repeat">(false);
+  const [schedulesOpen, setSchedulesOpen] = useState(false);
+  const schedules = useSchedules(project.id);
+  const scheduledCount = schedules.filter((s) => s.enabled).length + cards.filter((c) => c.start_at).length;
   const [dropTarget, setDropTarget] = useState<TaskStatus | null>(null);
   const [dragError, setDragError] = useState<string | null>(null);
   const [filter, setFilter] = useState({ q: "", type: "", priority: "", label: "" });
@@ -262,8 +300,9 @@ export function Board({ project }: { project: ProjectWithGit }) {
     const colOf = new Map<TaskStatus, string>(COLUMNS.flatMap((col) => col.statuses.map((s) => [s, col.id] as const)));
     for (const c of visible) m.get(colOf.get(c.status) ?? "")?.push(c);
     // Inside In progress, what needs you comes first and what is paused last; then the most urgent first.
-    const rank = (s: TaskStatus) => (IN_PROGRESS.includes(s) ? IN_PROGRESS.indexOf(s) : 0);
-    for (const list of m.values()) list.sort((a, b) => rank(a.status) - rank(b.status) || a.priority.localeCompare(b.priority) || a.position - b.position);
+    // A cost pause waits on a person, like an approval, so it ranks with "needs you" rather than last.
+    const rank = (c: TaskCard) => (c.status === "paused" && c.pause_reason === "cost" ? 0 : IN_PROGRESS.includes(c.status) ? IN_PROGRESS.indexOf(c.status) : 0);
+    for (const list of m.values()) list.sort((a, b) => rank(a) - rank(b) || a.priority.localeCompare(b.priority) || a.position - b.position);
     return m;
   }, [visible]);
   const projectPending = pending.filter((a) => cards.some((c) => c.id === a.task_id));
@@ -313,7 +352,11 @@ export function Board({ project }: { project: ProjectWithGit }) {
               {projectPending.length} awaiting approval
             </Button>
           ) : null}
-          <Button variant="primary" onClick={() => setCreating(true)}>+ New task</Button>
+          <Button onClick={() => setSchedulesOpen(true)} title="Work set to start later, or on repeat, so it runs while you are away">
+            ⏰ Schedules
+            {scheduledCount ? <span className="rounded-full bg-cyan px-1.5 font-mono text-[10px] text-ink-950">{scheduledCount}</span> : null}
+          </Button>
+          <Button variant="primary" onClick={() => setCreating("now")}>+ New task</Button>
         </div>
       </header>
       <LimitBanner />
@@ -412,7 +455,7 @@ export function Board({ project }: { project: ProjectWithGit }) {
                 <span className={`text-[11.5px] font-semibold uppercase tracking-[0.08em] ${meta.text}`}>{meta.label}</span>
                 <span className="font-mono text-[11px] text-ink-500">{list.length}</span>
                 {status === "backlog" ? (
-                  <button className="ml-auto text-ink-400 hover:text-amber cursor-pointer" onClick={() => setCreating(true)} title="New task">+</button>
+                  <button className="ml-auto text-ink-400 hover:text-amber cursor-pointer" onClick={() => setCreating("now")} title="New task">+</button>
                 ) : null}
                 {status === "done" && list.some((c) => !c.archived_at) ? (
                   <button
@@ -463,7 +506,10 @@ export function Board({ project }: { project: ProjectWithGit }) {
         })}
       </div>
       )}
-      {creating ? <NewTaskForm project={project} onClose={() => setCreating(false)} /> : null}
+      {creating ? <NewTaskForm project={project} initialWhen={creating} onClose={() => setCreating(false)} /> : null}
+      {schedulesOpen ? (
+        <SchedulesPanel project={project} cards={cards} schedules={schedules} onClose={() => setSchedulesOpen(false)} onNew={() => setCreating("repeat")} />
+      ) : null}
     </div>
   );
 }

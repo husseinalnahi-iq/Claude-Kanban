@@ -103,6 +103,30 @@ body::before {
 }
 .slide-in { animation: slide-in 0.22s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
 
+/* side panels (Schedules, Chat): in from the right edge, back out the same way */
+@keyframes slide-in-right {
+  from { transform: translateX(100%); }
+  to { transform: none; }
+}
+@keyframes slide-out-right {
+  from { transform: none; }
+  to { transform: translateX(100%); }
+}
+.slide-in-right { animation: slide-in-right 0.26s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.slide-out-right { animation: slide-out-right 0.18s cubic-bezier(0.4, 0, 1, 1) both; }
+
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes fade-out {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: translateX(12px) scale(0.98); }
+}
+.fade-in { animation: fade-in 0.2s ease-out both; }
+.fade-out { animation: fade-out 0.18s ease-in both; pointer-events: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .rise, .slide-in, .slide-in-right, .slide-out-right, .fade-in, .fade-out { animation-duration: 1ms !important; }
+}
+
 /* rendered markdown */
 .md { line-height: 1.6; color: var(--color-ink-200); overflow-wrap: anywhere; }
 .md > * + * { margin-top: 0.6em; }

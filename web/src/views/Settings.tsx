@@ -350,6 +350,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [blocked, setBlocked] = useState("");
   const [loadPlugins, setLoadPlugins] = useState(true);
   const [autoResume, setAutoResume] = useState(true);
+  const [keepAwake, setKeepAwake] = useState(true);
   const [browserChecks, setBrowserChecks] = useState(true);
   const [chrome, setChrome] = useState(false);
   const [checklist, setChecklist] = useState("");
@@ -385,6 +386,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
     setBlocked(settings.blockedCommands.join(String.fromCharCode(10)));
     setLoadPlugins(settings.loadUserPlugins);
     setAutoResume(settings.autoResume);
+    setKeepAwake(settings.keepAwake);
     setBrowserChecks(settings.browserChecks);
     setChrome(settings.chromeInSupervised);
     setChecklist(settings.onboardingChecklist);
@@ -406,6 +408,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           blockedCommands: blocked.split(/\r?\n/).map((l) => l.trim()).filter(Boolean),
           loadUserPlugins: loadPlugins,
           autoResume,
+          keepAwake,
           browserChecks,
           chromeInSupervised: chrome,
           onboardingChecklist: checklist,
@@ -627,6 +630,17 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
                 A task stopped by the limit goes to <b className="text-iris">Paused</b> instead of Failed, and continues by itself when the
                 window resets — in the same session, from the stage it was on, so nothing already done is redone. Off: it fails, and you
                 press Retry.
+              </span>
+            </span>
+          </label>
+          <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
+            <input type="checkbox" className="mt-1 accent-amber" checked={keepAwake} onChange={(e) => setKeepAwake(e.target.checked)} />
+            <span>
+              Keep this computer awake while work is waiting
+              <span className="block text-[11.5px] text-ink-400">
+                While anything is queued, running or scheduled, the computer is asked not to go to sleep, so night work actually
+                happens. The screen can still turn off. The board has to stay open, and closing a laptop's lid may still put it to
+                sleep (Windows: Control Panel, Power Options, "Choose what closing the lid does").
               </span>
             </span>
           </label>

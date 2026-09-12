@@ -89,6 +89,9 @@ const LATER_COLUMNS: { table: string; column: string; ddl: string }[] = [
   { table: "tasks", column: "plan_gate_json", ddl: "plan_gate_json TEXT" },
   { table: "tasks", column: "onboarding", ddl: "onboarding TEXT" },
   { table: "projects", column: "system", ddl: "system INTEGER NOT NULL DEFAULT 0" },
+  { table: "tasks", column: "start_at", ddl: "start_at TEXT" },
+  { table: "tasks", column: "pause_reason", ddl: "pause_reason TEXT" },
+  { table: "tasks", column: "budget_extra_usd", ddl: "budget_extra_usd REAL NOT NULL DEFAULT 0" },
 ];
 
 export function nowIso(): string {
@@ -130,6 +133,7 @@ export function openDb(file: string): DatabaseSync {
   seed.run("delegateTimeoutMin", "30");
   seed.run("autoSizing", "true");
   seed.run("autoResume", "true");
+  seed.run("keepAwake", "true");
   seed.run("loadUserPlugins", "true");
   seed.run("browserChecks", "true");
   seed.run("chromeInSupervised", "false");

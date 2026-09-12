@@ -94,8 +94,9 @@ test("the board meters a foreign stage itself and stops it past the per-stage ce
     s.repo.updateSettings({ maxCostPerStageUsd: 25 });
     const task = s.repo.createTask({ project_id: s.project.id, title: "pricey", spec_md: "x", mode: "supervised", pipeline: [{ stage: "code", model: "glm-4.7", effort: "low", provider: "zai" }] });
     s.runner.queueTask(task.id);
-    await until(() => s.repo.getTask(task.id)!.status === "failed");
-    assert.match(s.repo.getTask(task.id)!.error ?? "", /estimated cost passed the per-stage ceiling/);
+    await until(() => s.repo.getTask(task.id)!.status === "paused");
+    assert.equal(s.repo.getTask(task.id)!.pause_reason, "cost");
+    assert.match(s.repo.getTask(task.id)!.note ?? "", /estimated cost passed the per-stage ceiling/);
     assert.ok(f.calls[0].options.abortController.signal.aborted, "the session was aborted");
   } finally {
     s.cleanup();

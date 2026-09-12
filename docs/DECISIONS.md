@@ -316,7 +316,6 @@ Registering a project sets it up for Claude: `/init` on a folder with code, a bo
 | D164 | The bootstrap checklist is a **setting** shipped with a researched default; empty restores it | House rules ("TypeScript strict", "always Supabase") belong to the user, not the code, and should be written once |
 | D165 | After an onboarding task is approved the board **sets the verify command** if the project has none — from the bootstrap's `VERIFY:` line, else by the cheap intake model reading CLAUDE.md, told never to invent one — and posts what it set on the task and in project memory | The gate is the board's main safety check and was off until someone found the field. A wrong guess bounces tasks visibly and is one field to fix; an invented one would do the same silently, hence null over a guess. Runs after approval returns, so approval never waits on a model |
 
-<<<<<<< HEAD
 ## Serial queue and the usage-limit gate (2026-09-12)
 
 Running one task at a time, forcing one past that, and not feeding a whole backlog into a shut Claude window.
@@ -342,7 +341,6 @@ Requested: a first-run guide showing every feature and why it is good, a close b
 | D175 | The Skip button dodges a **mouse** twice (left, then back home), then gives up with 😂 and a note; **keyboard users are never teased** (Enter, Space and Esc close at once); a click within 0.6 s of it giving up is ignored | The joke is for pointer users. A trap for someone on a keyboard or a screen reader is not a joke. The pause lets the person read the punchline instead of closing on the same click that ended the chase |
 | D176 | The dodge count lives in a **ref**, not only in state, with a 350 ms cooldown | Found in testing: one quick approach delivers the hover and the click before React re-renders, so it counted as two escapes and pushed the offset out of range |
 | D177 | Seen-ness is stored **per machine** (localStorage) with a version number; storage that cannot be read counts as seen | Same reasoning as D144. Bumping the version re-introduces the board after a big release; treating blocked storage as "seen" stops the welcome opening on every load in a locked-down browser |
->>>>>>> main
 
 ## Setup checklist (2026-09-12)
 
@@ -354,4 +352,13 @@ Requested: a first-run guide showing every feature and why it is good, a close b
 | D181 | Login and its status use the **SDK's bundled Claude binary**; `ANTHROPIC_API_KEY` counts as logged in | The old banner shelled out to a global `claude` and said "logged out" when it simply was not installed — while runs, which use the bundled binary, worked |
 | D182 | Browser checks launch **Chrome, else Edge, else Playwright's Chromium**, passing `--browser` to the MCP server; Chromium is installed with `@playwright/mcp install-browser` | The server defaults to Chrome, which many machines lack; Edge ships with Windows. Installing through the MCP package matches its own Playwright version |
 | D183 | On Windows the server **re-reads PATH** (Machine + User) after every fix | An installer updates the registry, not the running board; without this, git installed from Setup would still be "not found" until a restart |
-=======
+
+## Steering and the cost ceiling (2026-09-12)
+
+Two things Replit and Lovable users take for granted: telling the agent something while it works, and not losing a task to a spending limit.
+
+| # | Decision | Why |
+|---|---|---|
+| D184 | A message typed on a running task is delivered by a **PostToolUse hook as `additionalContext`**, and a **Stop hook blocks the turn's end** while one is undelivered; a cursor on the run's active record (last message rowid) decides what is new, and it advances synchronously | The SDK's streaming input cannot interrupt a turn in progress; hooks are the one path that reaches the model mid-turn without restarting the session. The Stop guard means a message never waits for a tool call that never comes. Parallel tool calls run PostToolUse concurrently, so the cursor moves before any await |
+| D185 | Cost ceilings **pause for a decision** (`pause_reason: "cost"`, no `resume_at`) instead of failing; **Continue** grants **one per-stage ceiling** to the task (`budget_extra_usd`) and resumes the same session; **Stop** fails it with the note as the error | A task stopped at 90 % for money and thrown away is the most expensive outcome there is. Granting one stage at a time keeps the decision small and repeatable; keeping the session means nothing finished is redone. The limit-resume timer keys on `resume_at`, so a cost pause is invisible to it |
+| D186 | A cost pause is reported as **needs you**, sorts with approvals, and is left out of the usage panel's paused list | It waits for a person; the limit pause waits for a clock. The colour, the sound and the list should say which |
