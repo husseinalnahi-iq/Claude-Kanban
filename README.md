@@ -11,6 +11,8 @@ lands safely, and an honest record of what everything cost.
 
 **Install on Windows in one line** — see [Install](#install-windows). Free and open source (MIT).
 
+![The board: tasks move from Backlog to Done; In progress shows what each one is doing — planning, coding, or waiting for you](docs/images/board.png)
+
 ---
 
 ## What problems it solves
@@ -24,6 +26,10 @@ lands safely, and an honest record of what everything cost.
 | “I have no idea what that cost or where the time went.” | Every task shows its **cost, tokens and time**; the **Dashboard** adds it all up. |
 | “A big job is too much for one prompt.” | **Improve** turns a rough idea into a clear spec and splits it into subtasks with dependencies; the board runs them in the right order. |
 | “Setting all this up is fiddly.” | The **Setup** page checks your computer and fixes what is missing, mostly in one click. |
+
+| Nothing risky happens without you | Free AI on your own computer, set up step by step |
+|---|---|
+| ![A supervised task asks before editing a file: the change is shown, with Allow and Deny](docs/images/approval.png) | ![The local AI guide reads your computer, suggests models that fit it, and ticks off each step](docs/images/local-ai-guide.png) |
 
 **Who it is for:** anyone with a Claude **Pro or Max** subscription (or an Anthropic API key) who uses
 Claude to build things — developers who want to run more at once, and non-developers who want Claude's
