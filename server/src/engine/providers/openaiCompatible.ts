@@ -1,4 +1,6 @@
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { readFileSync } from "node:fs";
+import { extname } from "node:path";
 import type { Provider, ProviderTestResult } from "../../types.ts";
 import type { ProviderAdapter, StageInvocation } from "./types.ts";
 
@@ -21,6 +23,13 @@ interface ChatResponse {
 }
 
 const isOpenRouter = (url: string) => /openrouter\.ai/i.test(url);
+
+const MIME: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" };
+/** An image as a chat-completions content part: inlined, since the endpoint cannot read our disk. */
+function imagePart(path: string) {
+  const ext = extname(path).slice(1).toLowerCase();
+  return { type: "image_url", image_url: { url: `data:${MIME[ext] ?? "image/png"};base64,${readFileSync(path).toString("base64")}` } };
+}
 
 function textOf(r: ChatResponse): string {
   const c = r.choices?.[0]?.message?.content;
@@ -76,7 +85,7 @@ export async function* runOpenAiCompatible(inv: StageInvocation): AsyncIterable<
       body: JSON.stringify({
         model: inv.model,
         stream: false,
-        messages: [{ role: "system", content: SYSTEM }, { role: "user", content: inv.prompt }],
+        messages: [{ role: "system", content: SYSTEM }, { role: "user", content: inv.images?.length ? [{ type: "text", text: inv.prompt }, ...inv.images.map(imagePart)] : inv.prompt }],
         ...(isOpenRouter(base) ? { usage: { include: true } } : {}),
       }),
     });

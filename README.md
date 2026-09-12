@@ -433,6 +433,14 @@ to 10 MB. What the run gets depends on the file, and in every case it should not
 
 The path is always there too, so a stage can read the file when the summary is not enough.
 
+**Which model looks at images** is set in Settings → Models & pipeline → *Intake models*. The default
+is **Claude Haiku 4.5 at low effort** — Claude's cheapest model that can see, well under a cent per
+screenshot — sent the image directly with a short brief and none of your MCP servers or plugins, so
+nothing else is paid for. Any provider whose model can see works too: Kimi or GLM through Claude Code,
+a vision model on OpenRouter, Ollama or LM Studio (free, local), or the Codex and Gemini CLIs (your
+ChatGPT or Google plan). **Try it** shows it a sample screenshot first. If the model you picked cannot
+describe an image, Claude's default does it instead; each file says which model saw it.
+
 The same tab collects what the sessions **produced** — reports, pages, spreadsheets, diagrams,
 screenshots — copied into the board's storage so they outlive the worktree. Click one to open it: CSV
 renders as a table, HTML renders as a page, text as text, anything else downloads. Source files are

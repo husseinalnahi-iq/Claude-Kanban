@@ -179,6 +179,8 @@ export const api = {
   providerPresets: () => req<ProviderPreset[]>("GET", "/providers/presets"),
   setProviderSecret: (id: string, value: string) => req<{ hasSecret: boolean }>("PUT", `/providers/${id}/secret`, { value }),
   deleteProviderSecret: (id: string) => req<{ hasSecret: boolean }>("DELETE", `/providers/${id}/secret`),
+  testVision: (provider: string, model: string) =>
+    req<{ ok: boolean; text: string | null; latencyMs: number; error: string | null }>("POST", "/settings/vision/test", { provider, model }),
   localModels: () => req<LocalModelsStatus>("GET", "/setup/local-models"),
   providerModels: (id: string) => req<ModelCatalogResult>("GET", `/providers/${encodeURIComponent(id)}/models`),
   testProvider: (id: string, model?: string) => req<ProviderTestResult>("POST", `/providers/${id}/test`, { model }),

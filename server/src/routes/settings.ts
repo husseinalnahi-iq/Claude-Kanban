@@ -4,6 +4,10 @@ import type { AppDeps } from "../app.ts";
 import { mergeSchema, stageSchema } from "./projects.ts";
 import { ANTHROPIC_PROVIDER_ID, EFFORTS } from "../types.ts";
 import { PROVIDER_PRESETS } from "../engine/providers/presets.ts";
+import { fileURLToPath } from "node:url";
+
+/** A real screenshot with text in it, shipped with the board (the README's approval card). */
+const VISION_SAMPLE = fileURLToPath(new URL("../../../docs/images/approval.png", import.meta.url));
 
 const tierRef = z.object({ provider: z.string().trim().min(1).max(40), model: z.string().trim().min(1) });
 
@@ -58,6 +62,7 @@ const patchSchema = z.object({
   autoTriage: z.boolean().optional(),
   triageModel: z.string().trim().min(1).optional(),
   visionModel: z.string().trim().min(1).optional(),
+  visionProvider: z.string().trim().min(1).max(64).optional(),
   tiers: z.object({ cheap: tierRef, balanced: tierRef, strong: tierRef }).optional(),
   providers: z.array(providerSchema).max(30).optional(),
   debate: z.object({ enabled: z.boolean(), critic: tierRef.extend({ effort: z.enum(EFFORTS as [string, ...string[]]) }) }).optional(),
@@ -77,6 +82,15 @@ const patchSchema = z.object({
 
 export async function settingsRoutes(app: FastifyInstance, { repo, bus, runner }: AppDeps) {
   app.get("/settings", async () => repo.getSettings());
+
+  /**
+   * Intake models → Try it: the README's approval screenshot, described by exactly this provider and
+   * model (no fallback), so you know it can see before an attachment depends on it.
+   */
+  app.post("/settings/vision/test", async (req) => {
+    const { provider, model } = z.object({ provider: z.string().trim().min(1).max(64), model: z.string().trim().min(1).max(200) }).parse(req.body ?? {});
+    return runner.testVision(provider, model, VISION_SAMPLE);
+  });
   app.patch("/settings", async (req) => {
     const patch = patchSchema.parse(req.body);
     // Some endpoints want a fixed placeholder token (Ollama ignores it). It is not a secret, so a

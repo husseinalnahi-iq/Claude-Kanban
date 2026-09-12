@@ -34,7 +34,10 @@ function buildInvocation(inv: StageInvocation): { command: string; args: string[
         args: [
           "exec", "--json", "--skip-git-repo-check", "-C", inv.cwd, "-m", inv.model,
           "-s", inv.readOnly ? "read-only" : "workspace-write", "-a", "never",
-          "-c", `model_reasoning_effort=${EFFORT_TO_CODEX[inv.effort]}`, "-o", lastMsgFile, ...extra, "-",
+          "-c", `model_reasoning_effort=${EFFORT_TO_CODEX[inv.effort]}`, "-o", lastMsgFile,
+          // Codex attaches images to the first message itself.
+          ...(inv.images ?? []).flatMap((p) => ["-i", p]),
+          ...extra, "-",
         ],
         stdin: inv.prompt,
         lastMsgFile,
@@ -44,7 +47,8 @@ function buildInvocation(inv: StageInvocation): { command: string; args: string[
       return {
         command: "gemini",
         args: ["--output-format", "stream-json", "--approval-mode", inv.readOnly ? "plan" : "auto_edit", "-m", inv.model, ...extra],
-        stdin: inv.prompt,
+        // Gemini reads a file named with @ in the prompt, images included.
+        stdin: inv.images?.length ? `${inv.images.map((p) => `@${p}`).join(" ")}\n\n${inv.prompt}` : inv.prompt,
       };
     case "kimi":
       return {

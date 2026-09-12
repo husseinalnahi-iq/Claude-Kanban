@@ -389,6 +389,8 @@ export interface Attachment {
    * to open it. null while it is still being described, or if describing failed.
    */
   description: string | null;
+  /** Which provider and model wrote the description ("claude · claude-haiku-4-5…"), and whether it was the fallback. */
+  described_by?: string | null;
   created_at: string;
 }
 
@@ -499,6 +501,8 @@ export interface Settings {
   triageModel: string;
   /** Cheap model that looks at attached images once and writes down what is in them. */
   visionModel: string;
+  /** Where the vision model runs: "anthropic" (Claude, the default) or a provider id from Settings → Providers. */
+  visionProvider: string;
   /**
    * What "cheap / balanced / strong" mean here. Sizing picks a tier, never a model id, so it cannot
    * invent one — and changing model here changes every future sizing at once.

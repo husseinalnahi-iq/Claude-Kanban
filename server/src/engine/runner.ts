@@ -5,7 +5,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync }
 import { tmpdir } from "node:os";
 import { basename, extname, isAbsolute, join } from "node:path";
 import * as gitOps from "../git/worktree.ts";
-import { nowIso } from "../db.ts";
+import { DEFAULT_VISION_MODEL, nowIso } from "../db.ts";
 import type { Repo } from "../repo.ts";
 import type { Bus } from "../bus.ts";
 import type { Approval, ApprovalDecision, Project, Run, SessionTools, Stage, StageName, Task, TaskStatus, TierRef, UsageLimit } from "../types.ts";
@@ -23,7 +23,8 @@ import { buildStagePrompt } from "./prompts.ts";
 import { autonomousGate, blockedCommand, isSafeMcp, killsByName, READ_ONLY_TOOLS, serverRule } from "./gate.ts";
 import { allowedMode, createBoardServer } from "./boardMcp.ts";
 import { CONFIDENCE_TO_APPLY, serialiseFileConflicts, triageTask, type Sizing, type TriageResult, type TriageSubtask } from "./triage.ts";
-import { describeImage } from "./vision.ts";
+import { describeImage, describeImageVia } from "./vision.ts";
+import { LEAN } from "./lean.ts";
 import { applyOnboardingResult } from "./onboarding.ts";
 import { buildCriticPrompt, buildRevisionPrompt, extractRevisedPlan, parseCritique } from "./debate.ts";
 import { BROWSER_SERVER, PLAYWRIGHT_PLUGIN_TOOLS, browserDecision, browserServer } from "./browser.ts";
@@ -83,6 +84,8 @@ const PLAN_DISALLOWED = ["Edit", "Write", "NotebookEdit", "MultiEdit"];
 const ALWAYS_DISALLOWED = ["AskUserQuestion"];
 /** Bounded so one chatty session cannot fill the disk. */
 const MAX_ARTIFACTS_PER_RUN = 20;
+/** One image, one description: a CLI that has not answered in three minutes is not going to. */
+const VISION_TIMEOUT_MS = 3 * 60_000;
 const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 /** Never keep a copy of something that is not the run's own output. */
 const IGNORED_DIRS = /(^|[\\/])(node_modules|\.git|\.kanban|dist|build|\.next|coverage|vendor)([\\/]|$)/i;
@@ -1245,7 +1248,7 @@ export class TaskRunner {
     if (this.fastStatus && !force && Date.now() - Date.parse(this.fastStatus.checked_at) < 15 * 60_000) return this.fastStatus;
     const abort = new AbortController();
     const options: Options = {
-      model: "claude-opus-5", cwd: process.cwd(), maxTurns: 1, permissionMode: "dontAsk", settingSources: [],
+      model: "claude-opus-5", cwd: process.cwd(), maxTurns: 1, permissionMode: "dontAsk", ...LEAN,
       settings: { fastMode: true }, abortController: abort,
     };
     let state: FastModeStatus["state"] = "off";
@@ -1405,7 +1408,7 @@ export class TaskRunner {
     const model = this.repo.getSettings().triageModel;
     const options: Options = {
       model, effort: "low", cwd: process.cwd(), maxTurns: 1, maxBudgetUsd: 0.05,
-      permissionMode: "dontAsk", settingSources: [],
+      permissionMode: "dontAsk", ...LEAN,
       systemPrompt: { type: "preset", preset: "claude_code", excludeDynamicSections: true },
     };
     for await (const msg of this.queryFn({ prompt: userMessage("Reply with: ok"), options })) {
@@ -1803,10 +1806,43 @@ export class TaskRunner {
     const at = this.repo.getAttachment(attachmentId);
     if (!at || at.description) return at?.description ?? null;
     const settings = this.repo.getSettings();
-    const described = await describeImage({ path: at.path, model: settings.visionModel }, this.queryFn as never);
-    const updated = this.repo.describeAttachment(at.id, described?.text ?? null);
-    if (updated && described) this.bus.publish({ type: "attachment.added", attachment: updated });
-    return described?.text ?? null;
+    const r = await this.describeWithFallback(at.path, settings.visionProvider, settings.visionModel);
+    const updated = this.repo.describeAttachment(at.id, r.described?.text ?? null, r.described ? r.by : null);
+    if (updated && r.described) this.bus.publish({ type: "attachment.added", attachment: updated });
+    return r.described?.text ?? null;
+  }
+
+  /**
+   * The chosen vision provider first; if it is missing, switched off, or cannot see (not every model
+   * can), Claude's default vision model does it instead, and the attachment says so.
+   */
+  private async describeWithFallback(path: string, providerId: string, model: string): Promise<{ described: { text: string } | null; by: string }> {
+    const label = (id: string, m: string) => `${id === ANTHROPIC_PROVIDER_ID ? "claude" : id} · ${m}`;
+    const onClaudeDefault = (providerId || ANTHROPIC_PROVIDER_ID) === ANTHROPIC_PROVIDER_ID;
+    let described: { text: string } | null = null;
+    try {
+      const res = this.providers.resolve(providerId);
+      described = await describeImageVia(res, model, path, { queryFn: this.queryFn as never, timeoutMs: VISION_TIMEOUT_MS });
+    } catch {
+      described = null;
+    }
+    if (described || onClaudeDefault) return { described, by: label(providerId || ANTHROPIC_PROVIDER_ID, model) };
+    const fallback = await describeImage({ path, model: DEFAULT_VISION_MODEL }, this.queryFn as never);
+    return { described: fallback, by: `${label(ANTHROPIC_PROVIDER_ID, DEFAULT_VISION_MODEL)} (fallback: ${label(providerId, model)} could not describe it)` };
+  }
+
+  /** Settings → Intake models → Try it: one sample image through exactly this provider and model, no fallback. */
+  async testVision(providerId: string, model: string, samplePath: string): Promise<{ ok: boolean; text: string | null; latencyMs: number; error: string | null }> {
+    const t0 = Date.now();
+    try {
+      const res = this.providers.resolve(providerId);
+      const d = await describeImageVia(res, model, samplePath, { queryFn: this.queryFn as never, timeoutMs: VISION_TIMEOUT_MS });
+      return d
+        ? { ok: true, text: d.text, latencyMs: Date.now() - t0, error: null }
+        : { ok: false, text: null, latencyMs: Date.now() - t0, error: "It answered, but not with a description — this model may not be able to see images. Images would go to Claude's default instead." };
+    } catch (err) {
+      return { ok: false, text: null, latencyMs: Date.now() - t0, error: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   /** Saves an (optionally edited) refine proposal: the task itself, then its subtasks and their dependencies. */

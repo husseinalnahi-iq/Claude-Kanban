@@ -45,6 +45,13 @@ export const SEED_TIERS: Settings["tiers"] = {
   strong: { provider: "anthropic", model: "claude-opus-5" },
 };
 
+/**
+ * Looks at each attached image once. Haiku is Claude's cheapest model that can see, and reads text in
+ * screenshots well; describing an image is looking, not reasoning, so it runs at low effort. It is
+ * also the fallback when another provider chosen for vision cannot see.
+ */
+export const DEFAULT_VISION_MODEL = "claude-haiku-4-5-20251001";
+
 export const SEED_DEBATE: Settings["debate"] = {
   enabled: false,
   critic: { provider: "anthropic", model: "claude-sonnet-5", effort: "medium" },
@@ -73,6 +80,7 @@ const LATER_COLUMNS: { table: string; column: string; ddl: string }[] = [
   { table: "tasks", column: "archived_at", ddl: "archived_at TEXT" },
   { table: "tasks", column: "resume_at", ddl: "resume_at TEXT" },
   { table: "attachments", column: "description", ddl: "description TEXT" },
+  { table: "attachments", column: "described_by", ddl: "described_by TEXT" },
   { table: "runs", column: "limit_before", ddl: "limit_before REAL" },
   { table: "runs", column: "limit_after", ddl: "limit_after REAL" },
   { table: "runs", column: "provider", ddl: "provider TEXT" },
@@ -115,7 +123,7 @@ export function openDb(file: string): DatabaseSync {
   seed.run("defaultMaxConcurrent", "3");
   seed.run("serial", fresh ? "true" : "false");
   seed.run("maxForcedParallel", "3");
-  seed.run("visionModel", "claude-haiku-4-5-20251001");
+  seed.run("visionModel", DEFAULT_VISION_MODEL);
   seed.run("tiers", JSON.stringify(SEED_TIERS));
   seed.run("providers", "[]");
   seed.run("debate", JSON.stringify(SEED_DEBATE));

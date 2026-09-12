@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { Bus } from "../bus.ts";
 import type { Repo } from "../repo.ts";
+import { LEAN } from "./lean.ts";
 
 export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => AsyncIterable<SDKMessage>;
 
@@ -104,7 +105,7 @@ export async function extractVerifyCommand(claudeMd: string, model: string, cwd:
     model,
     effort: "low",
     cwd,
-    settingSources: [],
+    ...LEAN,
     permissionMode: "dontAsk",
     tools: [],
     maxTurns: 1,

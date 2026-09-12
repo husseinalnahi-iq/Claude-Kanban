@@ -1,6 +1,7 @@
 import { query, type Options, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { Effort, Priority, Stage, StageName, TaskType } from "../types.ts";
 import { EFFORTS, PRIORITIES, TASK_TYPES } from "../types.ts";
+import { LEAN } from "./lean.ts";
 
 export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => AsyncIterable<SDKMessage>;
 
@@ -207,8 +208,8 @@ export async function triageTask(input: TriageInput, queryFn: QueryFn = query as
     model: input.model,
     effort: "low",
     cwd: input.cwd,
-    // Intake reads nothing and writes nothing: no repo access, no tools, no user plugins or hooks.
-    settingSources: [],
+    // Intake reads nothing and writes nothing: no repo access, no tools, no user plugins, hooks or MCP servers.
+    ...LEAN,
     permissionMode: "dontAsk",
     tools: [],
     maxTurns: 2,

@@ -7,6 +7,7 @@ import { Repo } from "./repo.ts";
 import { Bus } from "./bus.ts";
 import { TaskRunner } from "./engine/runner.ts";
 import { buildApp } from "./app.ts";
+import { openBrowser } from "./openBrowser.ts";
 
 const repo = new Repo(openDb(DB_PATH));
 const bus = new Bus();
@@ -27,6 +28,8 @@ const webDist = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "web",
 const app = await buildApp({ repo, bus, runner, webDist, logger: process.env.KANBAN_LOG === "1" });
 await app.listen({ host: HOST, port: PORT });
 console.log(`Claude Kanban server on http://${HOST}:${PORT}  (db: ${DB_PATH})`);
+// The launcher asks for this: open the board only now that it answers, never before.
+if (process.env.KANBAN_OPEN_BROWSER === "1") openBrowser(`http://${HOST}:${PORT}`);
 
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, async () => {

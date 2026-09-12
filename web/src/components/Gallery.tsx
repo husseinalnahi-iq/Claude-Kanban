@@ -227,9 +227,16 @@ export function Gallery({ taskId, attachments, onChange }: { taskId: string; att
             </button>
           </div>
           {a.source === "user" && kind === "image" ? (
-            <div className={`mt-0.5 line-clamp-2 leading-snug ${a.description ? "text-ink-500" : "text-ink-600 italic"}`} title={a.description ?? undefined}>
-              {a.description ?? "describing…"}
-            </div>
+            <>
+              <div className={`mt-0.5 line-clamp-2 leading-snug ${a.description ? "text-ink-500" : "text-ink-600 italic"}`} title={a.description ?? undefined}>
+                {a.description ?? "describing…"}
+              </div>
+              {a.described_by ? (
+                <div className={`mt-0.5 truncate font-mono text-[10px] ${a.described_by.includes("fallback") ? "text-amber" : "text-ink-600"}`} title={`Described by ${a.described_by}`}>
+                  seen by {a.described_by}
+                </div>
+              ) : null}
+            </>
           ) : (
             <div className="mt-0.5 text-ink-600">{ago(a.created_at)}</div>
           )}
@@ -252,7 +259,8 @@ export function Gallery({ taskId, attachments, onChange }: { taskId: string; att
         {busy ? "Uploading…" : <>Drop a file here, <span className="text-ink-200">paste</span> a screenshot, or click to choose.</>}
         <div className="mt-1 text-[11px] text-ink-500">
           Images, PDF, Word, Excel, PowerPoint, CSV and text — up to 10 MB. An image is described once by the cheap vision
-          model; text and spreadsheets go into the prompt as a preview, so runs read them without opening them.
+          model (Settings → Models &amp; pipeline → Intake models); text and spreadsheets go into the prompt as a preview, so
+          runs read them without opening them.
         </div>
         <input ref={input} type="file" accept={EXTS.join(",")} multiple className="hidden" onChange={(e) => { upload(e.target.files); e.target.value = ""; }} />
       </div>

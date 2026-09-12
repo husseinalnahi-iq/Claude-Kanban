@@ -254,9 +254,9 @@ test("an attached image is described once by the cheap vision model, and the sta
     const calls: any[] = [];
     const vision: QueryFn = (params) =>
       (async function* () {
-        let prompt = "";
-        for await (const m of params.prompt) prompt += typeof m.message.content === "string" ? m.message.content : "";
-        calls.push({ prompt, options: params.options });
+        const content: any[] = [];
+        for await (const m of params.prompt) content.push(...(Array.isArray(m.message.content) ? m.message.content : [{ type: "text", text: m.message.content }]));
+        calls.push({ content, options: params.options });
         yield {
           type: "result", subtype: "success", is_error: false, result: "ok", total_cost_usd: 0.001, session_id: "v", modelUsage: {},
           structured_output: { description: "A screenshot of a login form with the submit button overlapping the footer.", text_in_image: "Sign in" },
@@ -270,7 +270,10 @@ test("an attached image is described once by the cheap vision model, and the sta
     assert.match(text ?? "", /submit button overlapping the footer/);
     assert.match(text ?? "", /Text in the image: Sign in/, "text in the image is kept verbatim");
     assert.equal(calls[0].options.model, s.repo.getSettings().visionModel, "it uses the cheap vision model, not a stage model");
-    assert.deepEqual(calls[0].options.tools, ["Read"], "and gets exactly one tool");
+    assert.equal(calls[0].content[0].type, "image", "the picture is in the message, so there is no file to open");
+    assert.deepEqual(calls[0].options.tools, [], "and it needs no tools");
+    assert.equal(calls[0].options.strictMcpConfig, true, "none of your MCP servers ride along (they were ~60k tokens a call)");
+    assert.equal(typeof calls[0].options.systemPrompt, "string", "a short brief, not Claude Code's full system prompt");
     assert.equal(s.repo.getAttachment(at.id)!.description, text);
 
     // Asking again is free: the description is stored, not recomputed.

@@ -38,7 +38,10 @@ REM First run from a download: put the Claude Kanban icon on the Desktop and in 
 powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\create-shortcut.ps1" -IfMissing >nul 2>&1
 
 echo Starting the server on http://127.0.0.1:4310
-start "" "http://127.0.0.1:4310"
+echo Your browser opens the board as soon as it is ready.
+REM The server opens the browser itself once it is listening - opening it here first showed
+REM "This site can't be reached" for the few seconds the server takes to start.
+set KANBAN_OPEN_BROWSER=1
 call npm run start -w server
 
 REM The server only ends on its own when something went wrong: keep the message on screen.

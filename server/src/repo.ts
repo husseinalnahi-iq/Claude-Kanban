@@ -1,12 +1,12 @@
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import { mkdirSync } from "node:fs";
-import { DEFAULT_BLOCKED_COMMANDS, SEED_DEBATE, SEED_TIERS, newId, nowIso } from "./db.ts";
+import { DEFAULT_BLOCKED_COMMANDS, DEFAULT_VISION_MODEL, SEED_DEBATE, SEED_TIERS, newId, nowIso } from "./db.ts";
 import type {
   Approval, ApprovalDecision, EventRow, Message, Milestone, Mode, Policy, Project, Run, RunListItem, RunStatus,
   Attachment, Note, MergePolicy, Priority, ProjectEnv, Settings, Stage, StageName, Task, TaskCard, TaskStatus, TaskType, UsageLimit,
   Provider, RunRole, CostSource, TierRef,
 } from "./types.ts";
-import { DEFAULT_MERGE, EMPTY_ENV } from "./types.ts";
+import { ANTHROPIC_PROVIDER_ID, DEFAULT_MERGE, EMPTY_ENV } from "./types.ts";
 import { DEFAULT_CHECKLIST } from "./engine/onboarding.ts";
 
 type Row = Record<string, SQLInputValue>;
@@ -113,6 +113,7 @@ const toAttachment = (r: Row): Attachment => ({
   path: r.path as string,
   note: (r.note as string) ?? null,
   description: (r.description as string) ?? null,
+  described_by: (r.described_by as string) ?? null,
   created_at: r.created_at as string,
 });
 
@@ -265,7 +266,8 @@ export class Repo {
       cacheableSystemPrompt: (m.get("cacheableSystemPrompt") ?? "true") !== "false",
       autoTriage: (m.get("autoTriage") ?? "true") !== "false",
       triageModel: m.get("triageModel") ?? "claude-haiku-4-5-20251001",
-      visionModel: m.get("visionModel") ?? "claude-haiku-4-5-20251001",
+      visionModel: m.get("visionModel") ?? DEFAULT_VISION_MODEL,
+      visionProvider: m.get("visionProvider") ?? ANTHROPIC_PROVIDER_ID,
       tiers: normaliseTiers(json<Record<string, unknown>>(m.get("tiers"), {})),
       providers: json<Provider[]>(m.get("providers"), []).map(normaliseProvider),
       debate: { ...SEED_DEBATE, ...json<Partial<Settings["debate"]>>(m.get("debate"), {}) },
@@ -436,8 +438,8 @@ export class Repo {
   }
 
   /** Written once by the cheap vision model, so every later stage reads words instead of pixels. */
-  describeAttachment(id: string, description: string | null): Attachment | undefined {
-    this.db.prepare("UPDATE attachments SET description = ? WHERE id = ?").run(description, id);
+  describeAttachment(id: string, description: string | null, by: string | null = null): Attachment | undefined {
+    this.db.prepare("UPDATE attachments SET description = ?, described_by = ? WHERE id = ?").run(description, by, id);
     return this.getAttachment(id);
   }
 

@@ -19,6 +19,8 @@ export interface StageInvocation {
   abort: AbortSignal;
   timeoutMs: number;
   secret: string | null;
+  /** Image files to show the model with the prompt (the vision job). Text adapters inline them; CLIs attach them. */
+  images?: string[];
   /** Board-side events (`delegate:command`, …). The runner stores and broadcasts them; payloads must already be redacted. */
   emit: (type: string, payload: unknown) => void;
   log: (line: string) => void;

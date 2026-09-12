@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { EFFORTS, type ModelEntry, type Note, type Provider, type Settings as SettingsShape, type Stage } from "../../../server/src/types.ts";
+import { ANTHROPIC_PROVIDER_ID, EFFORTS, type ModelEntry, type Note, type Provider, type Settings as SettingsShape, type Stage, type TierRef } from "../../../server/src/types.ts";
 import { api, type ProjectWithGit, type WorktreeRow } from "../lib/api.ts";
 import { ago } from "../lib/format.ts";
 import { useAppData } from "../lib/store.tsx";
@@ -254,6 +254,53 @@ function AppearanceSettings() {
   );
 }
 
+/** Intake models → Try it: a sample screenshot through the chosen vision model, and what it saw. */
+function VisionTry({ vision, saved }: { vision: TierRef; saved: boolean }) {
+  const [r, setR] = useState<{ ok: boolean; text: string | null; latencyMs: number; error: string | null } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const onClaude = vision.provider === ANTHROPIC_PROVIDER_ID;
+  return (
+    <div className="mt-2">
+      <div className="flex items-center gap-2">
+        <Button
+          size="sm"
+          busy={busy}
+          disabled={!vision.model || (!onClaude && !saved)}
+          title={!onClaude && !saved ? "Save settings first: another provider is tested through the saved settings" : "Shows a sample screenshot to this model and prints what it saw"}
+          onClick={() =>
+            void (async () => {
+              setBusy(true);
+              setR(null);
+              try {
+                setR(await api.testVision(vision.provider, vision.model));
+              } catch (err) {
+                setR({ ok: false, text: null, latencyMs: 0, error: err instanceof Error ? err.message : String(err) });
+              } finally {
+                setBusy(false);
+              }
+            })()
+          }
+        >
+          Try it
+        </Button>
+        <span className="text-[11px] text-ink-500">{!onClaude && !saved ? "save first, then try it" : "shows it a sample screenshot"}</span>
+      </div>
+      {r ? (
+        <div className={`mt-2 rounded-md border px-3 py-2 text-[12px] ${r.ok ? "border-moss/40 text-ink-300" : "border-rust/50 text-rust"}`}>
+          {r.ok ? (
+            <>
+              <div className="mb-1 text-moss">It can see · {(r.latencyMs / 1000).toFixed(1)} s</div>
+              <div className="whitespace-pre-wrap">{r.text}</div>
+            </>
+          ) : (
+            <>Could not describe it: {r.error}</>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 type Tab = "appearance" | "models" | "providers" | "runs" | "tools" | "git" | "project" | "claudemd" | "memory" | "worktrees";
 const TABS: { id: Tab; label: string; needsProject?: boolean }[] = [
   { id: "appearance", label: "Appearance" },
@@ -289,7 +336,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [subMax, setSubMax] = useState(5);
   const [cacheable, setCacheable] = useState(true);
   const [triageModel, setTriageModel] = useState("");
-  const [visionModel, setVisionModel] = useState("");
+  const [vision, setVision] = useState<TierRef>({ provider: ANTHROPIC_PROVIDER_ID, model: "" });
   const [autoSizing, setAutoSizing] = useState(true);
   const [tiers, setTiers] = useState<SettingsShape["tiers"]>({
     cheap: { provider: "anthropic", model: "" }, balanced: { provider: "anthropic", model: "" }, strong: { provider: "anthropic", model: "" },
@@ -326,7 +373,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
     setSubMax(settings.maxConcurrentSubagents);
     setCacheable(settings.cacheableSystemPrompt);
     setTriageModel(settings.triageModel);
-    setVisionModel(settings.visionModel);
+    setVision({ provider: settings.visionProvider || ANTHROPIC_PROVIDER_ID, model: settings.visionModel });
     setAutoSizing(settings.autoSizing);
     setTiers(settings.tiers);
     setProviders(settings.providers);
@@ -351,7 +398,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           models, defaultPipeline: pipeline, globalCap, serial, maxForcedParallel: forced, defaultMaxConcurrent: defMax,
           maxTurnsPerStage: maxTurns, maxCostPerStageUsd: maxCost,
           maxSubagentDepth: subDepth, maxConcurrentSubagents: subMax, cacheableSystemPrompt: cacheable,
-          triageModel, visionModel, autoSizing, tiers,
+          triageModel, visionModel: vision.model, visionProvider: vision.provider, autoSizing, tiers,
           providers: providers.map((p) => ({ ...p, models: p.models.filter((m) => m.id.trim()).map((m) => ({ ...m, label: m.label.trim() || m.id })) })),
           delegateTimeoutMin: delegateTimeout,
           debate,
@@ -499,11 +546,15 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
               </select>
             </Field>
             <Field label="Vision model" hint="Looks at each attached image once and writes down what is in it, so the stages that follow read words instead of pixels.">
-              <select className={`${inputCls} font-mono`} value={visionModel} onChange={(e) => setVisionModel(e.target.value)}>
-                {models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-              </select>
+              <ProviderPicker compact value={vision} models={models} providers={providers} onChange={setVision} />
             </Field>
           </div>
+          <VisionTry vision={vision} saved={settings.visionProvider === vision.provider && settings.visionModel === vision.model} />
+          <p className="mt-2 text-[11.5px] text-ink-500">
+            The default, <span className="font-mono">claude · haiku-4-5</span> at low effort, is Claude's cheapest model that can see — a fraction of a cent per
+            image. Another provider works if its model can see images: Kimi or GLM (through Claude Code), a vision model on OpenRouter, Ollama or LM Studio,
+            or the Codex and Gemini CLIs. If the one you pick cannot describe an image, Claude's default does it instead, and the file says so.
+          </p>
         </Section>
 
         <Section
