@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { Task } from "../../../server/src/types.ts";
+import type { ProviderOut, Task } from "../../../server/src/types.ts";
 import { api } from "../lib/api.ts";
 import { useAppData } from "../lib/store.tsx";
 import { useWs } from "../lib/ws.ts";
@@ -45,11 +45,18 @@ export function SerialSwitch() {
  * running stages delegated to other providers — which is not obvious from a card sitting in queued.
  */
 export function LimitBanner() {
+  const { settings } = useAppData();
   const [paused, setPaused] = useState<Task[]>([]);
+  const [outs, setOuts] = useState<ProviderOut[]>([]);
   const load = () => void api.pausedTasks().then(setPaused, () => {});
-  useEffect(load, []);
+  const loadOuts = () => void api.providerOuts().then(setOuts, () => {});
+  useEffect(() => {
+    load();
+    loadOuts();
+  }, []);
   useWs((m) => {
     if (m.type === "task.updated" && (m.task.status === "paused" || paused.some((p) => p.id === m.task.id))) load();
+    if (m.type === "providers.out") setOuts(m.out);
   });
   // Re-render every half minute so the countdown stays true without a request.
   const [, tick] = useState(0);
@@ -59,17 +66,40 @@ export function LimitBanner() {
   }, []);
 
   const now = Date.now();
-  const waiting = paused.filter((t) => t.resume_at && Date.parse(t.resume_at) > now);
-  if (!waiting.length) return null;
-  const opens = Math.max(...waiting.map((t) => Date.parse(t.resume_at!)));
+  // Tasks paused for another provider are that provider's business, not Claude's window.
+  const waiting = paused.filter((t) => t.pause_reason !== "provider" && t.resume_at && Date.parse(t.resume_at) > now);
+  const away = outs.filter((o) => !o.resets_at || Date.parse(o.resets_at) > now);
+  if (!waiting.length && !away.length) return null;
+  const opens = waiting.length ? Math.max(...waiting.map((t) => Date.parse(t.resume_at!))) : 0;
+  const label = (id: string) => settings?.providers.find((p) => p.id === id)?.label ?? id;
 
   return (
-    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-iris/30 bg-iris/10 px-6 py-1.5 text-[12px] text-ink-200">
-      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-iris" />
-      <span>
-        Claude limit reached. Claude work resumes <span className="font-mono text-iris">{until(opens)}</span> · {clock(opens)}.
-      </span>
-      <span className="text-ink-400">Queued Claude tasks wait for the window; stages delegated to other providers keep running.</span>
+    <div className="flex flex-col gap-1 border-b border-iris/30 bg-iris/10 px-6 py-1.5 text-[12px] text-ink-200">
+      {waiting.length ? (
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-iris" />
+          <span>
+            Claude limit reached. Claude work resumes <span className="font-mono text-iris">{until(opens)}</span> · {clock(opens)}.
+          </span>
+          <span className="text-ink-400">Queued Claude tasks wait for the window; stages delegated to other providers keep running.</span>
+        </div>
+      ) : null}
+      {away.map((o) => (
+        <div key={o.provider_id} className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${o.kind === "credit" ? "bg-rust" : "bg-iris"}`} />
+          {o.kind === "credit" ? (
+            <span>
+              <b className="text-rust">{label(o.provider_id)} is out of credit.</b>{" "}
+              <span className="text-ink-400">Its paused tasks wait for you: open one to switch provider, or top up and press Try again.</span>
+            </span>
+          ) : (
+            <span>
+              {label(o.provider_id)} is out until <span className="font-mono text-iris">{until(o.resets_at)}</span> · {clock(o.resets_at!)}.{" "}
+              <span className="text-ink-400">Its work waits and carries on by itself; everything else keeps running.</span>
+            </span>
+          )}
+        </div>
+      ))}
     </div>
   );
 }

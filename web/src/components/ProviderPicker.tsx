@@ -1,5 +1,7 @@
 import { ANTHROPIC_PROVIDER_ID, type CatalogModel, type ModelCatalogResult, type ModelEntry, type Provider, type TierRef } from "../../../server/src/types.ts";
 import { useCatalog } from "../lib/catalog.ts";
+import { claudeOptions, claudeWarning, useClaudeModels } from "../lib/claudeModels.ts";
+import { claudeModelStatus } from "../../../server/src/engine/claudeModels.ts";
 import { isLocal } from "../../../server/src/engine/providers/catalog.ts";
 import { ModelCombobox, type ModelOption } from "./ModelCombobox.tsx";
 import { inputCls } from "./ui.tsx";
@@ -51,6 +53,15 @@ function optionsFor(p: Provider, r: ModelCatalogResult | null): ModelOption[] {
     }));
 }
 
+/** A provider's model that its live list does not have (a typo, or one that was removed). */
+function providerWarning(p: Provider | undefined, r: ModelCatalogResult | null, model: string): { text: string; tone: "amber" } | undefined {
+  if (!p || !r || r.source !== "live" || !model) return undefined;
+  const m = r.models.find((x) => x.id === model);
+  if (!m) return { text: `${p.label} does not list this model — check the spelling, or pick one from the list`, tone: "amber" };
+  if (m.installed === false && m.group !== "cloud") return { text: "Not on this computer yet — download or pull it first", tone: "amber" };
+  return undefined;
+}
+
 /**
  * Where a stage runs and on what: a provider (Claude, or one from Settings → Providers) and then a
  * model — from the provider's live list when it has one (Ollama, OpenRouter), else from your list.
@@ -70,9 +81,9 @@ export function ProviderPicker({
   const isClaude = !value.provider || value.provider === ANTHROPIC_PROVIDER_ID;
   const current = enabled.find((p) => p.id === value.provider);
   const { result, loading } = useCatalog(isClaude ? undefined : current);
-  const options: ModelOption[] = isClaude
-    ? models.map((m) => ({ id: m.id, label: m.note ?? m.id, group: "Claude · uses your Claude plan" }))
-    : current ? optionsFor(current, result) : [];
+  const claude = useClaudeModels();
+  const options: ModelOption[] = isClaude ? claudeOptions(models, claude.result) : current ? optionsFor(current, result) : [];
+  const warn = isClaude ? claudeWarning(claudeModelStatus(value.model, claude.result)) : providerWarning(current, result, value.model);
 
   const pickProvider = (id: string) => {
     if (id === ADD_PROVIDER) {
@@ -111,8 +122,13 @@ export function ProviderPicker({
         value={value.model}
         onChange={(model) => onChange({ ...value, model })}
         options={options}
-        loading={!isClaude && loading}
-        note={!isClaude && result?.error ? `${result.error.replace(/\.?$/, ".")} Showing your list from Settings → Providers.` : null}
+        warn={warn}
+        loading={isClaude ? claude.loading && !claude.result : loading}
+        note={
+          isClaude
+            ? claude.result?.error ? `Could not ask Claude Code for its models (${claude.result.error}). Showing your list.` : null
+            : result?.error ? `${result.error.replace(/\.?$/, ".")} Showing your list from Settings → Providers.` : null
+        }
       />
     </div>
   );

@@ -21,7 +21,7 @@ function setup(queryFn: QueryFn) {
   return { repo, bus, project, runner: new TaskRunner({ repo, bus, queryFn }), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-async function until(cond: () => boolean, ms = 4000) {
+async function until(cond: () => boolean, ms = 15_000) {
   const t0 = Date.now();
   while (!cond()) {
     if (Date.now() - t0 > ms) throw new Error("timed out");

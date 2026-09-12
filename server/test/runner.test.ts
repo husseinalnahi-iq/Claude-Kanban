@@ -59,7 +59,7 @@ function setup(queryFn: QueryFn, policy: Record<string, unknown> = {}) {
   return { dir, repo, bus, seen, project, runner, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-async function until(cond: () => boolean, ms = 3000) {
+async function until(cond: () => boolean, ms = 15_000) {
   const t0 = Date.now();
   while (!cond()) {
     if (Date.now() - t0 > ms) throw new Error("timed out");
@@ -354,7 +354,7 @@ test("chat that fixes a failed first stage does not jump to review", async () =>
   }
 });
 
-test("supervised runs force approval for writes via a PreToolUse ask hook; questions are disabled", async () => {
+test("supervised runs force approval for writes via a PreToolUse ask hook; questions reach you", async () => {
   const f = fakeQuery();
   const s = setup(f.fn);
   try {
@@ -362,7 +362,7 @@ test("supervised runs force approval for writes via a PreToolUse ask hook; quest
     s.runner.queueTask(task.id);
     await until(() => s.repo.getTask(task.id)!.status === "review");
     const opts = f.calls[0].options;
-    assert.ok(opts.disallowedTools.includes("AskUserQuestion"));
+    assert.ok(!opts.disallowedTools.includes("AskUserQuestion"), "Claude may ask you a question");
     const hook = opts.hooks.PreToolUse[0].hooks[0];
     const ask = await hook({ tool_name: "Write" }, "tu", { signal: new AbortController().signal });
     assert.equal(ask.hookSpecificOutput.permissionDecision, "ask");

@@ -5,6 +5,8 @@ import { useAppData } from "../lib/store.tsx";
 import { navigate } from "../lib/router.ts";
 import { ago } from "../lib/format.ts";
 import { Button, Empty, ErrorLine, inputCls, useAction } from "../components/ui.tsx";
+import { QuestionCard } from "../components/QuestionCard.tsx";
+import { isQuestion } from "../lib/questions.ts";
 
 function inputSummary(a: Approval): string {
   const i = (a.input ?? {}) as Record<string, unknown>;
@@ -13,6 +15,11 @@ function inputSummary(a: Approval): string {
 }
 
 function Row({ a, focused }: { a: Approval; focused: boolean }) {
+  if (isQuestion(a)) return <QuestionCard a={a} focused={focused} />;
+  return <ToolRow a={a} focused={focused} />;
+}
+
+function ToolRow({ a, focused }: { a: Approval; focused: boolean }) {
   const [note, setNote] = useState("");
   const { busy, error, run } = useAction();
   const i = (a.input ?? {}) as Record<string, unknown>;
@@ -60,7 +67,8 @@ export function Approvals() {
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       const top = pending[0];
-      if (!top) return;
+      // y / n are for approvals; a question is answered on its own card.
+      if (!top || isQuestion(top)) return;
       if (e.key === "y") void run(() => api.decide(top.id, "allow"));
       if (e.key === "n") void run(() => api.decide(top.id, "deny"));
     };
@@ -75,7 +83,7 @@ export function Approvals() {
           <h1 className="text-[17px] font-semibold tracking-tight text-ink-100">Approvals</h1>
           <span className="font-mono text-[12px] text-ink-400">{pending.length} waiting{pending.length ? " · y = allow, n = deny the top one" : ""}</span>
         </div>
-        {!pending.length ? <Empty>Nothing waiting. Supervised runs stop here before every write.</Empty> : null}
+        {!pending.length ? <Empty>Nothing waiting. Supervised runs stop here before every write, and questions Claude asks you land here too.</Empty> : null}
         {pending.map((a, i) => (
           <div key={a.id} className="space-y-1">
             <div className="px-1 font-mono text-[10.5px] text-ink-500">

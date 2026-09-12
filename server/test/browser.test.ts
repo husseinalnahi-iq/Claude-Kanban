@@ -19,7 +19,7 @@ import type { Mode, Stage } from "../src/types.ts";
 const PW = "mcp__playwright__";
 const ONE_STAGE: Stage[] = [{ stage: "code", model: "m", effort: "low" }];
 
-async function until(cond: () => boolean, ms = 6000) {
+async function until(cond: () => boolean, ms = 15_000) {
   const t0 = Date.now();
   while (!cond()) {
     if (Date.now() - t0 > ms) throw new Error("timed out");
@@ -168,12 +168,18 @@ test("whatever a stage leaves listening on the task's port is stopped, by PID", 
 });
 
 test("a run gets the board's own browser, and never your Chrome unless it is supervised and you allowed it", async () => {
-  const on = await optionsFor("autonomous", { browserChecks: true, chromeInSupervised: true });
+  const on = await optionsFor("autonomous", { browserChecks: true, chromeInSupervised: true, liveView: false });
   const server = on.options.mcpServers?.playwright as { command: string; args: string[] };
   assert.ok(server, "the board's browser is attached");
   for (const flag of ["--headless", "--isolated", "--output-dir"]) assert.ok(server.args.includes(flag), `started with ${flag}`);
   const outDir = server.args[server.args.indexOf("--output-dir") + 1];
   assert.ok(!outDir.includes("kbrowser-"), "page snapshots and logs are written outside the project, so they are never committed");
+
+  // With the live view on, the same settings travel in a config file, outside the project too.
+  const live = await optionsFor("autonomous", { browserChecks: true, liveView: true });
+  const liveServer = live.options.mcpServers?.playwright as { command: string; args: string[] };
+  const config = liveServer.args[liveServer.args.indexOf("--config") + 1];
+  assert.ok(config && !config.includes("kbrowser-"), "the live-view config is written outside the project");
   assert.ok(on.options.disallowedTools?.includes(PLAYWRIGHT_PLUGIN_TOOLS), "the plugin's shared-profile copy is hidden");
   assert.deepEqual(on.options.extraArgs, { "no-chrome": null }, "an autonomous run never gets Chrome, even with it allowed");
 

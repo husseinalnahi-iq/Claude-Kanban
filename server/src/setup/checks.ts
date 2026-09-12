@@ -1,14 +1,24 @@
 import { z } from "zod";
-import type { CliPreset, Provider, SetupCheckResult, Settings } from "../types.ts";
+import type { ClaudeModelsResult, CliPreset, Provider, ProviderOut, SetupCheckResult, Settings } from "../types.ts";
+import { badClaudePicks } from "../engine/claudeModels.ts";
 import { pickBrowser, type Probe } from "./probe.ts";
 import { isLmStudio, isLocal, isOllama } from "../engine/providers/catalog.ts";
 import { hardware, lmsPath, PICKS, SETUP_PICKS, verdictFor, verdictText, type Pick } from "./local.ts";
 import { join } from "node:path";
+import { loadPty, pwshPath } from "../terminal.ts";
+import { fileURLToPath } from "node:url";
+
+/** The Claude Kanban folder (package.json with both workspaces). */
+const BOARD_DIR = join(fileURLToPath(new URL(".", import.meta.url)), "..", "..", "..");
 
 export interface CheckCtx {
   probe: Probe;
   settings: Settings;
   hasSecret: (name: string) => boolean;
+  /** The Claude models your login can use (free to read); absent in tests that do not need it. */
+  claudeModels?: () => Promise<ClaudeModelsResult>;
+  /** Delegated providers that ran out. */
+  providerOuts?: () => ProviderOut[];
 }
 
 export interface Detected {
@@ -23,6 +33,8 @@ export interface FixCommand {
   command: string;
   args: string[];
   timeoutMs?: number;
+  /** Where to run it; the board's own folder for its own parts. */
+  cwd?: string;
 }
 
 export interface FormField {
@@ -298,6 +310,38 @@ const keyCheck = (p: Provider): SetupCheck => ({
   },
 });
 
+const terminal: SetupCheck = {
+  id: "terminal",
+  title: "The built-in terminal",
+  level: "recommended",
+  why: "The Terminal panel (Ctrl + `) is your own terminal inside the board. Without its terminal part it still runs commands, but not programs that take over the screen (editors, pickers, Claude Code itself), and colours and arrow keys are limited.",
+  // npm installs whatever part is missing — here the optional node-pty — and leaves the rest alone.
+  run: () => [{ command: "npm", args: ["install", "--no-audit", "--no-fund"], cwd: BOARD_DIR, timeoutMs: 10 * MIN }],
+  runLabel: "Repair",
+  manual: everywhere("In the Claude Kanban folder: npm install  (or run the install line again)"),
+  async detect() {
+    return (await loadPty()) ? ok("Full terminal") : bad("Basic mode: commands work, full-screen programs don't");
+  },
+};
+
+const pwsh: SetupCheck = {
+  id: "pwsh",
+  title: "PowerShell 7 for the terminal",
+  level: "optional",
+  why: "The terminal uses PowerShell 7 when it is installed: quicker, clearer colours and errors, better Tab completion, and it reads and writes every language's letters by default. Windows PowerShell, which every PC has, works too.",
+  run: () => [{
+    command: "winget",
+    args: ["install", "--id", "Microsoft.PowerShell", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"],
+    timeoutMs: 15 * MIN,
+  }],
+  manual: { win32: "winget install --id Microsoft.PowerShell -e" },
+  link: { label: "About PowerShell 7", href: "https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows" },
+  async detect({ probe }) {
+    const p = pwshPath(probe.env, probe.exists);
+    return p ? ok(`Installed — new terminals use it`) : bad("Not installed (optional) — the terminal uses Windows PowerShell");
+  },
+};
+
 const plugins: SetupCheck = {
   id: "plugins",
   title: "Plugins and skills",
@@ -309,9 +353,48 @@ const plugins: SetupCheck = {
   },
 };
 
+const claudeModelIds: SetupCheck = {
+  id: "claude-models",
+  title: "Claude models in your settings",
+  level: "recommended",
+  why: "Stages, tiers, the plan critic and the intake jobs each name a Claude model. A misspelt one is only noticed when a run on it fails, so each is checked against the models your Claude login has.",
+  link: { label: "Open Models & pipeline", href: "#/settings?tab=models" },
+  manual: everywhere("Settings → Models & pipeline: pick each model from the list, and remove rows marked in red"),
+  async detect({ settings, claudeModels }) {
+    const list = claudeModels ? await claudeModels() : null;
+    const bad = badClaudePicks(settings, list);
+    if (bad.length) {
+      const shown = bad.slice(0, 3).map((p) => `${p.where}: “${p.id}”`).join(" · ");
+      return { ok: false, detail: `${bad.length === 1 ? "1 model is" : `${bad.length} models are`} not on your Claude login's list — ${shown}${bad.length > 3 ? " …" : ""}` };
+    }
+    if (!list || list.source !== "live") return ok("Not checked: Claude Code could not be asked for its list");
+    return ok(`Every pick is one of your ${list.models.length} Claude models`);
+  },
+};
+
+const providerCredit: SetupCheck = {
+  id: "provider-credit",
+  title: "Credit left on your other providers",
+  level: "recommended",
+  why: "A stage on a provider whose plan or credit ran out cannot run. A used-up usage window comes back by itself and tasks wait for it; credit that ran out needs topping up, or a fallback in Settings → Providers.",
+  link: { label: "Open Providers", href: "#/settings?tab=providers" },
+  manual: everywhere("Top up the provider, or set “When it runs out” on it in Settings → Providers"),
+  async detect({ settings, providerOuts }) {
+    const label = (id: string) => settings.providers.find((p) => p.id === id)?.label ?? id;
+    const outs = (providerOuts?.() ?? []).filter((o) => settings.providers.some((p) => p.id === o.provider_id && p.enabled));
+    const broke = outs.filter((o) => o.kind === "credit");
+    if (broke.length) return { ok: false, detail: broke.map((o) => `${label(o.provider_id)}: ${o.reason}`).join(" · ") };
+    const waiting = outs.filter((o) => o.resets_at);
+    if (waiting.length) {
+      return ok(waiting.map((o) => `${label(o.provider_id)} is out until ${new Date(o.resets_at!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}; its tasks wait`).join(" · "));
+    }
+    return ok("None has run out");
+  },
+};
+
 /** The checks that apply right now: always the core, then only what your settings switch on. */
 export function buildChecks(settings: Settings): SetupCheck[] {
-  const list: SetupCheck[] = [node, claudeLogin, git, gitIdentity];
+  const list: SetupCheck[] = [node, claudeLogin, claudeModelIds, git, gitIdentity];
   if (settings.browserChecks) list.push(browser);
   const enabled = settings.providers.filter((p) => p.enabled);
   const local = enabled.filter(isOllama);
@@ -349,6 +432,8 @@ export function buildChecks(settings: Settings): SetupCheck[] {
     }
   }
   for (const p of enabled) if (p.kind !== "cli" && p.authRef && !isLocal(p)) list.push(keyCheck(p));
-  list.push(plugins);
+  if (enabled.some((p) => !isLocal(p))) list.push(providerCredit);
+  list.push(plugins, terminal);
+  if (process.platform === "win32") list.push(pwsh);
   return list;
 }

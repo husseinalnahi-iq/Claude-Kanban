@@ -4,12 +4,17 @@ import { api, type TaskDetail } from "../lib/api.ts";
 import { useWs, watchTask } from "../lib/ws.ts";
 import { navigate } from "../lib/router.ts";
 import { ScheduleModal, startLabel } from "../components/SchedulesPanel.tsx";
+import { QuestionCard, QuestionHistory } from "../components/QuestionCard.tsx";
+import { isQuestion } from "../lib/questions.ts";
+import { openTerminal } from "../components/TerminalDock.tsx";
+import { LiveBrowser } from "../components/LiveBrowser.tsx";
 import { useAppData } from "../lib/store.tsx";
 import { Markdown } from "../lib/markdown.tsx";
 import { ago, cost, costLabel, duration, modelLabel, PRIORITY_META, shortModel, STATUS_META, TYPE_META } from "../lib/format.ts";
 import type { Stage as PipelineStage } from "../../../server/src/types.ts";
 import { PRIORITIES, TASK_TYPES } from "../../../server/src/types.ts";
 import { RefineModal } from "../components/RefineModal.tsx";
+import { SpecSection } from "../components/SpecSection.tsx";
 import { Button, Chip, Empty, ErrorLine, inputCls, ModeChip, ModeHelp, useAction } from "../components/ui.tsx";
 import { PipelineEditor } from "../components/PipelineEditor.tsx";
 import { Transcript } from "../components/Transcript.tsx";
@@ -18,10 +23,23 @@ import { DepGraph } from "../components/DepGraph.tsx";
 import { Gallery } from "../components/Gallery.tsx";
 import { CostPanel } from "../components/CostPanel.tsx";
 import { PlanGate } from "../components/PlanGate.tsx";
+import { OutOfUsage } from "../components/OutOfUsage.tsx";
 import { autonomousBlocked, NewTaskForm } from "../components/forms.tsx";
 
-type Tab = "spec" | "pipeline" | "transcript" | "approvals" | "diff" | "subtasks" | "files" | "messages" | "chat";
-const TABS: Tab[] = ["spec", "pipeline", "transcript", "approvals", "diff", "subtasks", "files", "messages", "chat"];
+type Tab = "spec" | "pipeline" | "transcript" | "approvals" | "browser" | "diff" | "subtasks" | "files" | "messages" | "chat";
+const TABS: Tab[] = ["spec", "pipeline", "transcript", "approvals", "browser", "diff", "subtasks", "files", "messages", "chat"];
+
+/** Open a task's drawer on a given tab (the board's "live" chip opens the Browser tab). */
+let requestedTab: { taskId: string; tab: Tab } | null = null;
+export function openTaskOn(taskId: string, tab: Tab) {
+  requestedTab = { taskId, tab };
+  navigate({ taskId });
+}
+const takeRequested = (taskId: string): Tab | null => {
+  const t = requestedTab?.taskId === taskId ? requestedTab.tab : null;
+  requestedTab = null;
+  return t;
+};
 /** Two pipelines are the same when every stage, model and effort matches. */
 const samePipeline = (a: PipelineStage[], b: PipelineStage[]) =>
   a.length === b.length && a.every((s, i) => s.stage === b[i].stage && s.model === b[i].model && s.effort === b[i].effort);
@@ -87,6 +105,11 @@ function ApprovalInput({ a }: { a: Approval }) {
 }
 
 function PendingApproval({ a }: { a: Approval }) {
+  if (isQuestion(a)) return <QuestionCard a={a} focused />;
+  return <PendingToolApproval a={a} />;
+}
+
+function PendingToolApproval({ a }: { a: Approval }) {
   const [note, setNote] = useState("");
   const { busy, error, run } = useAction();
   return (
@@ -111,14 +134,7 @@ function PendingApproval({ a }: { a: Approval }) {
 function SpecTab({ d }: { d: TaskDetail }) {
   const { projects } = useAppData();
   const project = projects.find((p) => p.id === d.task.project_id);
-  const [editing, setEditing] = useState(false);
-  const [spec, setSpec] = useState(d.task.spec_md);
   const { busy, error, run } = useAction();
-  // Never overwrite what the user is typing: a server-side change during an edit would silently
-  // throw their work away.
-  useEffect(() => {
-    if (!editing) setSpec(d.task.spec_md);
-  }, [d.task.spec_md, editing]);
   const blocked = project ? autonomousBlocked(project) : null;
   const [refining, setRefining] = useState(false);
   const t = d.task;
@@ -138,7 +154,7 @@ function SpecTab({ d }: { d: TaskDetail }) {
             <button className="ml-1 cursor-pointer text-ink-500 hover:text-rust" onClick={() => run(() => api.patchTask(t.id, { labels: t.labels.filter((x) => x !== l) }))}>×</button>
           </Chip>
         ))}
-        <Button size="sm" onClick={() => setRefining(true)} title="Claude rewrites this into a spec with checkable outcomes, and proposes subtasks">✧ Improve</Button>
+        <Button size="sm" onClick={() => setRefining(true)} title="Quick intake: a cheap model tidies the request, suggests type and priority, and proposes subtasks. For a deeper spec that reads the code, use ✦ Rewrite on the Spec below.">✧ Improve</Button>
       </div>
       {sug && (sug.priority !== t.priority || sug.type !== t.type) ? (
         <div className="flex flex-wrap items-center gap-2 rounded-lg border border-cyan/40 bg-cyan/5 px-3 py-2 text-[12.5px] text-ink-200">
@@ -267,26 +283,7 @@ function SpecTab({ d }: { d: TaskDetail }) {
           </div>
         </div>
       ) : null}
-      <div>
-        <div className="mb-1.5 flex items-center justify-between">
-          <div className="text-[11px] uppercase tracking-wider text-ink-500">Spec</div>
-          {editing ? (
-            <div className="flex gap-1.5">
-              <Button size="sm" variant="ghost" onClick={() => (setSpec(t.spec_md), setEditing(false))}>Cancel</Button>
-              <Button size="sm" variant="primary" busy={busy} onClick={() => run(async () => (await api.patchTask(t.id, { spec_md: spec }), setEditing(false)))}>Save</Button>
-            </div>
-          ) : (
-            <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>Edit</Button>
-          )}
-        </div>
-        {editing ? (
-          <textarea className={`${inputCls} min-h-[260px] font-mono text-[12.5px]`} value={spec} onChange={(e) => setSpec(e.target.value)} autoFocus />
-        ) : t.spec_md.trim() ? (
-          <Markdown text={t.spec_md} />
-        ) : (
-          <Empty>No spec yet — the title is all Claude gets. Click Edit.</Empty>
-        )}
-      </div>
+      <SpecSection task={t} busy={d.busy} />
       <ErrorLine error={error} />
     </div>
   );
@@ -576,6 +573,13 @@ function Actions({ d }: { d: TaskDetail }) {
           </Button>
         ) : null}
         <div className="ml-auto flex gap-2">
+          <Button
+            variant="ghost"
+            onClick={() => openTerminal({ projectId: t.project_id, taskId: t.id })}
+            title={t.worktree_path ? "A terminal in this task's own copy of the project (its worktree)" : "A terminal in the project's folder"}
+          >
+            <span className="font-mono">&gt;_</span> Terminal here
+          </Button>
           {hasWork && !live ? (
             <Button variant="danger" busy={busy} onClick={() => confirm(`Discard ${t.branch}? Removes the worktree and deletes the branch with its changes.`) && run(() => api.discard(t.id))}>
               Discard work
@@ -588,6 +592,13 @@ function Actions({ d }: { d: TaskDetail }) {
           ) : null}
         </div>
       </div>
+      {t.status === "paused" && t.pause_reason !== "cost" && !live && settings ? (
+        <OutOfUsage
+          task={t}
+          settings={settings}
+          states={t.pipeline.map((_, i) => d.runs.filter((r) => r.stage_index === i && r.role === "stage").at(-1)?.status ?? "idle")}
+        />
+      ) : null}
       {scheduling ? <ScheduleModal task={t} onClose={() => setScheduling(false)} /> : null}
       {error ? (
         <div className="mt-2 flex items-start gap-2 rounded-md border border-rust/40 bg-rust/10 px-3 py-2 text-[12.5px] text-rust">
@@ -615,12 +626,18 @@ function TitleEditor({ d }: { d: TaskDetail }) {
 
 export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () => void }) {
   const { detail: d, missing, reload } = useTaskDetail(taskId);
-  const [tab, setTab] = useState<Tab | null>(null);
+  const [tab, setTab] = useState<Tab | null>(() => takeRequested(taskId));
   const [showCost, setShowCost] = useState(false);
   const pending = d?.approvals.filter((a) => !a.decision) ?? [];
   const current: Tab = tab ?? (d?.task.plan_gate ? "spec" : pending.length ? "approvals" : d && ["planning", "running"].includes(d.task.status) ? "transcript" : "spec");
 
-  useEffect(() => setTab(null), [taskId]);
+  // Another task opened in the same drawer: its own default tab, or the one it was opened on.
+  const shownTask = useRef(taskId);
+  useEffect(() => {
+    if (shownTask.current === taskId) return;
+    shownTask.current = taskId;
+    setTab(takeRequested(taskId));
+  }, [taskId]);
   useEffect(() => {
     const k = (e: KeyboardEvent) => e.key === "Escape" && !(e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement) && onClose();
     window.addEventListener("keydown", k);
@@ -628,7 +645,8 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
   }, [onClose]);
 
   const totalCost = d?.runs.reduce((s, r) => s + r.cost_usd, 0) ?? 0;
-  const costPaused = d?.task.status === "paused" && d.task.pause_reason === "cost";
+  const creditOut = d?.task.status === "paused" && d.task.pause_reason === "provider" && !d.task.resume_at;
+  const costPaused = (d?.task.status === "paused" && d.task.pause_reason === "cost") || creditOut;
   // Time actually spent running, not wall-clock since the first attempt.
   const workedMs = d?.runs.reduce((s, r) => s + Math.max(0, (r.ended_at ? Date.parse(r.ended_at) : Date.now()) - Date.parse(r.started_at)), 0) ?? 0;
 
@@ -644,7 +662,7 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
                 <div className="mb-1 flex items-center gap-2">
                   <span className={`h-2 w-2 rounded-full ${costPaused ? "bg-rose" : STATUS_META[d.task.status].dot} ${d.busy ? "breathe" : ""}`} />
                   <span className={`text-[11px] font-semibold uppercase tracking-[0.08em] ${costPaused ? "text-rose" : STATUS_META[d.task.status].text}`}>
-                    {costPaused ? "Needs you · cost" : STATUS_META[d.task.status].label}
+                    {creditOut ? "Needs you · out of credit" : costPaused ? "Needs you · cost" : STATUS_META[d.task.status].label}
                   </span>
                   <ModeChip mode={d.task.mode} />
                   <Chip className={PRIORITY_META[d.task.priority].tone} title={PRIORITY_META[d.task.priority].title}>{d.task.priority}</Chip>
@@ -663,7 +681,10 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
                 </div>
                 <TitleEditor d={d} />
                 {d.task.error && d.task.status === "failed" ? <div className="mt-1 font-mono text-[11.5px] text-rust">{d.task.error}</div> : null}
-                {d.task.note ? <div className="mt-1 text-[12px] italic text-ink-400">Note: {d.task.note}</div> : null}
+                {/* A task that ran out says so in its own panel below, with the ways on. */}
+                {d.task.note && !(d.task.status === "paused" && d.task.pause_reason !== "cost") ? (
+                  <div className="mt-1 text-[12px] italic text-ink-400">Note: {d.task.note}</div>
+                ) : null}
               </div>
               <button className="text-xl leading-none text-ink-400 hover:text-ink-100 cursor-pointer" onClick={onClose} aria-label="Close">×</button>
             </div>
@@ -694,13 +715,19 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
               {current === "approvals" ? (
                 <div className="space-y-3">
                   {pending.map((a) => <PendingApproval key={a.id} a={a} />)}
-                  {!pending.length ? <Empty>Nothing waiting. Supervised runs ask here before every write.</Empty> : null}
+                  {!pending.length ? <Empty>Nothing waiting. Supervised runs ask here before every write, and any task can ask you a question here.</Empty> : null}
                   {d.approvals.filter((a) => a.decision).reverse().map((a) => (
                     <div key={a.id} className="flex items-center gap-2 rounded-md border border-ink-800 px-3 py-1.5 font-mono text-[11.5px]">
-                      <span className={a.decision === "allow" ? "text-moss" : a.decision === "deny" ? "text-rust" : "text-ink-500"}>{a.decision}</span>
-                      <span className="text-ink-200">{a.tool_name}</span>
-                      <span className="truncate text-ink-400">{a.title}</span>
-                      {a.note ? <span className="truncate text-ink-500 italic">“{a.note}”</span> : null}
+                      <span className={a.decision === "allow" || a.decision === "answered" ? "text-moss" : a.decision === "deny" ? "text-rust" : "text-ink-500"}>{a.decision}</span>
+                      {isQuestion(a) ? (
+                        <QuestionHistory a={a} />
+                      ) : (
+                        <>
+                          <span className="text-ink-200">{a.tool_name}</span>
+                          <span className="truncate text-ink-400">{a.title}</span>
+                          {a.note ? <span className="truncate text-ink-500 italic">“{a.note}”</span> : null}
+                        </>
+                      )}
                       <span className="ml-auto text-ink-500">{ago(a.created_at)}</span>
                     </div>
                   ))}
@@ -709,6 +736,7 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
               {current === "diff" ? <DiffView taskId={d.task.id} refreshKey={`${d.runs.length}-${d.task.status}-${d.task.updated_at}`} /> : null}
               {current === "subtasks" ? <SubtasksTab d={d} /> : null}
               {current === "files" ? <Gallery taskId={d.task.id} attachments={d.attachments} onChange={reload} /> : null}
+              {current === "browser" ? <LiveBrowser taskId={d.task.id} running={d.busy} onShowFiles={() => setTab("files")} /> : null}
               {current === "messages" ? <MessagesTab d={d} /> : null}
             </div>
           </>

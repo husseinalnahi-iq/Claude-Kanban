@@ -9,16 +9,25 @@ let connected = false;
 let socket: WebSocket | null = null;
 /** The task whose transcript this client wants; the server sends `event` messages for no other. */
 let watching: string | null = null;
+/** The side chat whose reply this client is showing; streamed words go to no one else. */
+let watchingChat: string | null = null;
 let retry = 0;
 
 function sendWatch() {
-  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ watch: watching }));
+  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ watch: watching, watchChat: watchingChat }));
 }
 
 /** Ask the server for one task's transcript events, and for no others. */
 export function watchTask(taskId: string | null) {
   if (watching === taskId) return;
   watching = taskId;
+  sendWatch();
+}
+
+/** Ask for one side chat's streamed words (`chat.delta`). */
+export function watchChat(chatId: string | null) {
+  if (watchingChat === chatId) return;
+  watchingChat = chatId;
   sendWatch();
 }
 

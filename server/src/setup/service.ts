@@ -61,7 +61,13 @@ export class SetupService {
   }
 
   private ctx(): CheckCtx {
-    return { probe: this.probe, settings: this.deps.repo.getSettings(), hasSecret: (n) => this.deps.runner.secrets.has(n) };
+    return {
+      probe: this.probe,
+      settings: this.deps.repo.getSettings(),
+      hasSecret: (n) => this.deps.runner.secrets.has(n),
+      claudeModels: () => this.deps.runner.claudeModels(),
+      providerOuts: () => this.deps.repo.providerOuts(),
+    };
   }
 
   private find(id: string): SetupCheck {
@@ -144,7 +150,7 @@ export class SetupService {
       try {
         for (const cmd of commands) {
           out(`$ ${[cmd.command, ...cmd.args].join(" ")}\n`);
-          const code = await this.probe.stream(cmd.command, cmd.args, { timeoutMs: cmd.timeoutMs ?? 2 * 60_000 }, out);
+          const code = await this.probe.stream(cmd.command, cmd.args, { timeoutMs: cmd.timeoutMs ?? 2 * 60_000, cwd: cmd.cwd }, out);
           if (code !== 0) {
             out(`\n[exited with ${code ?? "an error: the program could not start"}]\n`);
             break;

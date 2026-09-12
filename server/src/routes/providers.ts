@@ -15,6 +15,10 @@ export async function providerRoutes(app: FastifyInstance, { repo, runner, bus }
 
   app.get("/providers/presets", async () => PROVIDER_PRESETS);
 
+  /** Each provider's usage: what it says is left of its plan (where it will say), what the board sent, whether it is out. */
+  app.get("/providers/usage", async (req) => runner.providerUsage((req.query as { force?: string }).force === "1"));
+  app.get("/providers/out", async () => repo.providerOuts());
+
   app.put("/providers/:id/secret", async (req) => {
     const { id } = req.params as { id: string };
     const { value } = z.object({ value: z.string().min(1).max(4000) }).parse(req.body);

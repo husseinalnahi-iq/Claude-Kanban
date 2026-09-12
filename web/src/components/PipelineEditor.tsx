@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import {
-  ANTHROPIC_PROVIDER_ID, DEFAULT_EFFORT, EFFORT_NOTES, EFFORTS, supportsFastMode,
+  ANTHROPIC_PROVIDER_ID, DEFAULT_EFFORT, supportsFastMode,
   type FastModeStatus, type ModelEntry, type Provider, type Stage, type StageName,
 } from "../../../server/src/types.ts";
 import { api } from "../lib/api.ts";
 import { useAppData } from "../lib/store.tsx";
 import { Help, inputCls } from "./ui.tsx";
 import { ProviderPicker } from "./ProviderPicker.tsx";
+import { EffortSelect } from "./ClaudeModelPicker.tsx";
 
 /** Fast-mode availability is per account and changes rarely, so every editor on screen shares one check. */
 let fastCache: Promise<FastModeStatus> | null = null;
@@ -77,19 +78,9 @@ export function PipelineEditor({ value, onChange, models, providers: providersPr
               providers={providers}
               onChange={(v) => set(i, { model: v.model, provider: v.provider === ANTHROPIC_PROVIDER_ID ? undefined : v.provider, ...(v.provider === ANTHROPIC_PROVIDER_ID ? {} : { fast: undefined }) })}
             />
-            <select
-              className={`${inputCls} font-mono`}
-              value={s.effort}
-              disabled={!onClaude(s)}
-              onChange={(e) => set(i, { effort: e.target.value as Stage["effort"] })}
-              title={onClaude(s) ? `Effort: ${EFFORT_NOTES[s.effort]}` : "Effort is a Claude control; it is not sent to other providers"}
-            >
-              {EFFORTS.map((ef) => (
-                <option key={ef} value={ef}>
-                  {ef} — {EFFORT_NOTES[ef]}
-                </option>
-              ))}
-            </select>
+            <span className="block min-w-0" title={onClaude(s) ? undefined : "Effort is a Claude control; it is not sent to other providers"}>
+              <EffortSelect notes model={s.model} value={s.effort} disabled={!onClaude(s)} onChange={(effort) => set(i, { effort })} />
+            </span>
             {(() => {
               // Fast mode is Opus 5 / 4.8 only, and only when the account allows it. When it cannot run,
               // the toggle says why instead of silently doing nothing.

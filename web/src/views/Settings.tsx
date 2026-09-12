@@ -7,6 +7,10 @@ import { navigate } from "../lib/router.ts";
 import { Button, ErrorLine, Field, Help, ModeHelp, Switch, inputCls, useAction } from "../components/ui.tsx";
 import { PipelineEditor } from "../components/PipelineEditor.tsx";
 import { ProviderPicker } from "../components/ProviderPicker.tsx";
+import { ClaudeModelPicker, EffortSelect } from "../components/ClaudeModelPicker.tsx";
+import { ClaudeModelList } from "./settings/ClaudeModelList.tsx";
+import { useClaudeModels } from "../lib/claudeModels.ts";
+import { badClaudePicks } from "../../../server/src/engine/claudeModels.ts";
 import { ProviderSettings } from "./settings/ProviderSettings.tsx";
 import { GitSettings } from "./settings/GitSettings.tsx";
 import { ClaudeMdSettings } from "./settings/ClaudeMdSettings.tsx";
@@ -336,6 +340,10 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [subMax, setSubMax] = useState(5);
   const [cacheable, setCacheable] = useState(true);
   const [triageModel, setTriageModel] = useState("");
+  const [chatModel, setChatModel] = useState("claude-sonnet-5");
+  const [chatEffort, setChatEffort] = useState<SettingsShape["chatEffort"]>("medium");
+  const [specModel, setSpecModel] = useState("claude-opus-5");
+  const [specEffort, setSpecEffort] = useState<SettingsShape["specEffort"]>("high");
   const [vision, setVision] = useState<TierRef>({ provider: ANTHROPIC_PROVIDER_ID, model: "" });
   const [autoSizing, setAutoSizing] = useState(true);
   const [tiers, setTiers] = useState<SettingsShape["tiers"]>({
@@ -350,13 +358,15 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [blocked, setBlocked] = useState("");
   const [loadPlugins, setLoadPlugins] = useState(true);
   const [autoResume, setAutoResume] = useState(true);
+  const [claudeFallback, setClaudeFallback] = useState<TierRef | null>(null);
   const [keepAwake, setKeepAwake] = useState(true);
+  const [questionWait, setQuestionWait] = useState(0);
   const [browserChecks, setBrowserChecks] = useState(true);
   const [chrome, setChrome] = useState(false);
+  const [liveView, setLiveView] = useState(true);
   const [checklist, setChecklist] = useState("");
   const [notif, setNotif] = useState(notifyState());
-  const [newId, setNewId] = useState("");
-  const [newLabel, setNewLabel] = useState("");
+  const claude = useClaudeModels();
   const { busy, error, run } = useAction();
   const [saved, setSaved] = useState(false);
 
@@ -374,6 +384,10 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
     setSubMax(settings.maxConcurrentSubagents);
     setCacheable(settings.cacheableSystemPrompt);
     setTriageModel(settings.triageModel);
+    setChatModel(settings.chatModel);
+    setChatEffort(settings.chatEffort);
+    setSpecModel(settings.specModel);
+    setSpecEffort(settings.specEffort);
     setVision({ provider: settings.visionProvider || ANTHROPIC_PROVIDER_ID, model: settings.visionModel });
     setAutoSizing(settings.autoSizing);
     setTiers(settings.tiers);
@@ -386,9 +400,12 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
     setBlocked(settings.blockedCommands.join(String.fromCharCode(10)));
     setLoadPlugins(settings.loadUserPlugins);
     setAutoResume(settings.autoResume);
+    setClaudeFallback(settings.claudeFallback);
     setKeepAwake(settings.keepAwake);
+    setQuestionWait(settings.questionWaitMin);
     setBrowserChecks(settings.browserChecks);
     setChrome(settings.chromeInSupervised);
+    setLiveView(settings.liveView);
     setChecklist(settings.onboardingChecklist);
   }, [settings]);
 
@@ -400,7 +417,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           models, defaultPipeline: pipeline, globalCap, serial, maxForcedParallel: forced, defaultMaxConcurrent: defMax,
           maxTurnsPerStage: maxTurns, maxCostPerStageUsd: maxCost,
           maxSubagentDepth: subDepth, maxConcurrentSubagents: subMax, cacheableSystemPrompt: cacheable,
-          triageModel, visionModel: vision.model, visionProvider: vision.provider, autoSizing, tiers,
+          triageModel, chatModel, chatEffort, specModel, specEffort, visionModel: vision.model, visionProvider: vision.provider, autoSizing, tiers,
           providers: providers.map((p) => ({ ...p, models: p.models.filter((m) => m.id.trim()).map((m) => ({ ...m, label: m.label.trim() || m.id })) })),
           delegateTimeoutMin: delegateTimeout,
           debate,
@@ -408,9 +425,12 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           blockedCommands: blocked.split(/\r?\n/).map((l) => l.trim()).filter(Boolean),
           loadUserPlugins: loadPlugins,
           autoResume,
+          claudeFallback: claudeFallback?.model && claudeFallback.provider !== ANTHROPIC_PROVIDER_ID ? claudeFallback : null,
           keepAwake,
+          questionWaitMin: questionWait,
           browserChecks,
           chromeInSupervised: chrome,
+          liveView,
           onboardingChecklist: checklist,
         }),
       );
@@ -450,34 +470,42 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
         </div>
         <ErrorLine error={error} />
 
+        {(() => {
+          // Picks a run would fail on, or likely typos — said before they cost a failed run.
+          if (!GLOBAL_TABS.includes(tab) || !settings) return null;
+          const bad = badClaudePicks({ models, defaultPipeline: pipeline, tiers, debate, triageModel, chatModel, specModel, visionModel: vision.model, visionProvider: vision.provider }, claude.result);
+          if (!bad.length) return null;
+          const fails = bad.some((b) => b.status === "invalid");
+          return (
+            <div className={`fade-in rounded-lg border px-3 py-2 text-[12px] ${fails ? "border-rust/50 bg-rust/5 text-rust" : "border-amber/40 bg-amber/5 text-amber"}`}>
+              <div className="font-medium">
+                ⚠ {bad.length === 1 ? "1 Claude model isn't" : `${bad.length} Claude models aren't`} on your Claude login's list
+                {fails ? " — a run on a red one fails" : " — check the spelling"}
+              </div>
+              <ul className="mt-1 space-y-0.5 text-ink-300">
+                {bad.map((b, i) => (
+                  <li key={i}>
+                    {b.where}: <span className={`font-mono ${b.status === "invalid" ? "text-rust" : "text-amber"}`}>{b.id}</span>
+                  </li>
+                ))}
+              </ul>
+              {tab !== "models" ? (
+                <button type="button" className="mt-1 cursor-pointer text-ink-300 underline-offset-2 hover:text-ink-100 hover:underline" onClick={() => setTab("models")}>
+                  Fix in Models &amp; pipeline
+                </button>
+              ) : null}
+            </div>
+          );
+        })()}
+
         {tab === "appearance" ? <AppearanceSettings /> : null}
 
         {tab === "models" ? (<>
-        <Section title="Models" hint="Any model id works — this list only feeds the pickers. Add new ids the day they ship.">
-          <div className="space-y-1.5">
-            {models.map((m, i) => (
-              <div key={i} className="grid grid-cols-[1fr_140px_1fr_auto] items-center gap-2">
-                <input className={`${inputCls} font-mono`} value={m.id} onChange={(e) => setModels(models.map((x, j) => (j === i ? { ...x, id: e.target.value } : x)))} />
-                <input className={inputCls} value={m.label} onChange={(e) => setModels(models.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)))} />
-                <input className={inputCls} value={m.note ?? ""} placeholder="use for…" onChange={(e) => setModels(models.map((x, j) => (j === i ? { ...x, note: e.target.value } : x)))} />
-                <button className="px-1.5 text-ink-400 hover:text-rust cursor-pointer" onClick={() => setModels(models.filter((_, j) => j !== i))} title="Remove">×</button>
-              </div>
-            ))}
-            <form
-              className="grid grid-cols-[1fr_140px_auto] gap-2 pt-2"
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (!newId.trim()) return;
-                setModels([...models, { id: newId.trim(), label: newLabel.trim() || newId.trim() }]);
-                setNewId("");
-                setNewLabel("");
-              }}
-            >
-              <input className={`${inputCls} font-mono`} placeholder="new model id, e.g. claude-opus-5-1" value={newId} onChange={(e) => setNewId(e.target.value)} />
-              <input className={inputCls} placeholder="label" value={newLabel} onChange={(e) => setNewLabel(e.target.value)} />
-              <Button type="submit">Add</Button>
-            </form>
-          </div>
+        <Section
+          title="Claude models"
+          hint="The Claude models the pickers offer, checked against your Claude login — a misspelt id shows here in red instead of failing a run. Add a new one from the list the day it ships."
+        >
+          <ClaudeModelList models={models} onChange={setModels} providers={providers} onOpenProviders={() => setTab("providers")} />
         </Section>
 
         <Section title="Default pipeline" hint="New tasks start with this (a project can override it).">
@@ -498,9 +526,13 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           <Field label="Critic" hint="The model that argues against the plan. A different family from the planner tends to catch more.">
             <div className="flex items-center gap-2">
               <ProviderPicker compact value={{ provider: debate.critic.provider, model: debate.critic.model }} models={models} providers={providers} onChange={(v) => setDebate({ ...debate, critic: { ...debate.critic, ...v } })} />
-              <select className={`${inputCls} w-auto! font-mono`} value={debate.critic.effort} onChange={(e) => setDebate({ ...debate, critic: { ...debate.critic, effort: e.target.value as typeof debate.critic.effort } })}>
-                {EFFORTS.map((ef) => <option key={ef} value={ef}>{ef}</option>)}
-              </select>
+              <EffortSelect
+                className="w-auto!"
+                model={debate.critic.model}
+                disabled={Boolean(debate.critic.provider) && debate.critic.provider !== ANTHROPIC_PROVIDER_ID}
+                value={debate.critic.effort}
+                onChange={(effort) => setDebate({ ...debate, critic: { ...debate.critic, effort } })}
+              />
             </div>
           </Field>
         </Section>
@@ -543,10 +575,8 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           hint="Small jobs the board does for you before a task ever runs. Keep these cheap — they are called often and never write code."
         >
           <div className="grid gap-3 md:grid-cols-2">
-            <Field label="Triage model" hint="Classifies a new task and writes the improved spec.">
-              <select className={`${inputCls} font-mono`} value={triageModel} onChange={(e) => setTriageModel(e.target.value)}>
-                {models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-              </select>
+            <Field group label="Triage model" hint="Classifies a new task and writes the improved spec.">
+              <ClaudeModelPicker value={triageModel} onChange={setTriageModel} models={models} />
             </Field>
             <Field label="Vision model" hint="Looks at each attached image once and writes down what is in it, so the stages that follow read words instead of pixels.">
               <ProviderPicker compact value={vision} models={models} providers={providers} onChange={setVision} />
@@ -558,6 +588,36 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
             image. Another provider works if its model can see images: Kimi or GLM (through Claude Code), a vision model on OpenRouter, Ollama or LM Studio,
             or the Codex and Gemini CLIs. If the one you pick cannot describe an image, Claude's default does it instead, and the file says so.
           </p>
+        </Section>
+
+        <Section
+          title="Spec rewrite"
+          hint="The ✦ Rewrite button on a task's Spec: Claude reads the code the request is about, then rewrites it into a clear spec with checkable outcomes. Your text is always kept, and each task can try another model."
+        >
+          <div className="grid gap-3 md:grid-cols-2">
+            <Field group label="Model" hint="Opus by default: it is one call per rewrite, and a spec that names the right files saves a whole run going the wrong way.">
+              <ClaudeModelPicker value={specModel} onChange={setSpecModel} models={models} />
+            </Field>
+            <Field label="Effort" hint="High is Claude's default. Lower is quicker and cheaper for short requests.">
+              <EffortSelect model={specModel} value={specEffort} onChange={setSpecEffort} />
+            </Field>
+          </div>
+          <p className="mt-2 text-[11.5px] text-ink-500">It only reads — it cannot change a file — and it stops at $3 per rewrite. Its cost shows on the version and on the dashboard.</p>
+        </Section>
+
+        <Section
+          title="Side chat"
+          hint="The ✦ Chat panel: talk about a project, and have Claude write the task cards. It reads code and never changes it."
+        >
+          <div className="grid gap-3 md:grid-cols-2">
+            <Field group label="Model for new chats" hint="Sonnet is the balance: sharp enough to explain code and plan work, a fraction of Opus's price.">
+              <ClaudeModelPicker value={chatModel} onChange={setChatModel} models={models} />
+            </Field>
+            <Field label="Effort" hint="How hard it thinks before answering. Medium suits questions; high for hard design talks.">
+              <EffortSelect model={chatModel} value={chatEffort} onChange={setChatEffort} />
+            </Field>
+          </div>
+          <p className="mt-2 text-[11.5px] text-ink-500">Each chat can switch model and effort from its own panel; this is only where new chats start.</p>
         </Section>
 
         <Section
@@ -629,10 +689,38 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
               <span className="block text-[11.5px] text-ink-400">
                 A task stopped by the limit goes to <b className="text-iris">Paused</b> instead of Failed, and continues by itself when the
                 window resets — in the same session, from the stage it was on, so nothing already done is redone. Off: it fails, and you
-                press Retry.
+                press Retry. The same goes for another provider's plan running out (Settings → Providers → “When it runs out”).
               </span>
             </span>
           </label>
+          <div className="mt-3 text-[12.5px] text-ink-200">
+            When Claude's usage runs out mid-task
+            <div className="mt-1.5 flex flex-wrap items-center gap-2">
+              <select
+                className={`${inputCls} w-auto!`}
+                value={claudeFallback ? "move" : "wait"}
+                onChange={(e) => {
+                  if (e.target.value === "wait") return setClaudeFallback(null);
+                  const p = providers.find((x) => x.enabled && x.kind === "anthropic-compatible") ?? providers.find((x) => x.enabled);
+                  setClaudeFallback(p ? { provider: p.id, model: p.models[0]?.id ?? "" } : null);
+                }}
+              >
+                <option value="wait">Wait for it to reset</option>
+                <option value="move" disabled={!providers.some((p) => p.enabled)}>Carry the stage on with another provider</option>
+              </select>
+              {claudeFallback ? (
+                <div className="min-w-[300px] flex-1">
+                  <ProviderPicker value={claudeFallback} onChange={setClaudeFallback} models={models} providers={providers} compact />
+                </div>
+              ) : null}
+            </div>
+            <span className="mt-1 block text-[11.5px] text-ink-400">
+              {providers.some((p) => p.enabled)
+                ? "Carrying on elsewhere keeps night work moving: the next model is told what Claude did and finds its changes in place. Claude stages go back to Claude on the next task."
+                : "Add a provider (Settings → Providers) to be able to carry on elsewhere."}
+            </span>
+            {claudeFallback?.provider === ANTHROPIC_PROVIDER_ID ? <span className="mt-1 block text-[11.5px] text-rust">Pick another provider: Claude cannot stand in for itself.</span> : null}
+          </div>
           <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
             <input type="checkbox" className="mt-1 accent-amber" checked={keepAwake} onChange={(e) => setKeepAwake(e.target.checked)} />
             <span>
@@ -644,6 +732,21 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
               </span>
             </span>
           </label>
+          <div className="mt-4 text-[12.5px] text-ink-200">
+            When Claude asks you a question mid-task
+            <div className="mt-1.5 flex flex-wrap items-center gap-2">
+              <select className={`${inputCls} w-auto!`} value={questionWait} onChange={(e) => setQuestionWait(Number(e.target.value))}>
+                <option value={0}>Wait for my answer, however long it takes</option>
+                {[15, 30, 60, 120, 240].map((m) => (
+                  <option key={m} value={m}>Wait {m < 60 ? `${m} minutes` : `${m / 60} hour${m > 60 ? "s" : ""}`}, then let Claude decide</option>
+                ))}
+              </select>
+            </div>
+            <span className="mt-1 block text-[11.5px] text-ink-400">
+              The task shows <b className="text-iris">asks you</b> and plays the “needs you” sound. Waiting is safest for decisions that
+              matter; a time limit keeps night work moving: Claude picks the most sensible option and says which in its summary.
+            </span>
+          </div>
         </Section>
 
         <Section
@@ -730,6 +833,16 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
               </tbody>
             </table>
           </div>
+          <label className="mt-4 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
+            <input type="checkbox" className="mt-1 accent-amber" checked={liveView} onChange={(e) => setLiveView(e.target.checked)} />
+            <span>
+              Live view: watch a task use its browser
+              <span className="block text-[11.5px] text-ink-400">
+                A task's <b>Browser</b> tab shows its page as it clicks and types, and a <b className="text-rose">live</b> chip appears on its
+                card. The picture is streamed only while you are watching; nothing is recorded beyond the screenshots in Files.
+              </span>
+            </span>
+          </label>
           <label className="mt-4 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
             <input type="checkbox" className="mt-1 accent-amber" checked={chrome} onChange={(e) => setChrome(e.target.checked)} />
             <span>

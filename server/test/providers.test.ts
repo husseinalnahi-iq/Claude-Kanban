@@ -120,7 +120,7 @@ test("a stage naming a missing or disabled provider is refused at queue time", a
   }
 });
 
-test("a foreign 429 fails the task instead of pausing it, and its rate-limit events are ignored", async () => {
+test("a foreign quota error pauses the task on that provider (not Claude's window), and its rate-limit events are ignored", async () => {
   const f = fakeQuery({
     fail: "429 quota exceeded" as never,
     extra: [{ type: "rate_limit_event", rate_limit_info: { status: "rejected", rateLimitType: "five_hour", unifiedWindows: { five_hour: { utilization: 100 } } } }],
@@ -132,7 +132,9 @@ test("a foreign 429 fails the task instead of pausing it, and its rate-limit eve
     const task = s.repo.createTask({ project_id: s.project.id, title: "limit", spec_md: "x", mode: "supervised", pipeline: [{ stage: "code", model: "glm-4.7", effort: "low", provider: "zai" }] });
     s.runner.queueTask(task.id);
     await until(() => ["failed", "paused"].includes(s.repo.getTask(task.id)!.status));
-    assert.equal(s.repo.getTask(task.id)!.status, "failed");
+    assert.equal(s.repo.getTask(task.id)!.status, "paused");
+    assert.equal(s.repo.getTask(task.id)!.pause_reason, "provider", "paused for z.ai (D194), not for Claude");
+    assert.equal(s.runner.limitedUntil(), null, "Claude work is not held");
     assert.equal(s.repo.usageLimits().length, 0, "no Claude window was recorded from a foreign endpoint");
     assert.equal(s.repo.runsForTask(task.id)[0].limit_before, null);
   } finally {

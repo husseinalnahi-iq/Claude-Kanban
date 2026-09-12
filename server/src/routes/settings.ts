@@ -37,6 +37,8 @@ export const providerSchema = z
       })
       .optional(),
     mayEditFiles: z.boolean(),
+    authStyle: z.enum(["bearer", "api-key"]).optional(),
+    fallback: tierRef.nullable().optional(),
   })
   .superRefine((p, ctx) => {
     if (p.kind !== "cli" && !p.baseUrl) ctx.addIssue({ code: "custom", path: ["baseUrl"], message: "an HTTP provider needs a base URL" });
@@ -44,6 +46,7 @@ export const providerSchema = z
     if (p.kind === "cli" && p.cli?.preset === "custom" && !p.cli.command?.includes("{prompt_file}")) {
       ctx.addIssue({ code: "custom", path: ["cli", "command"], message: "a custom command must contain {prompt_file}" });
     }
+    if (p.fallback && p.fallback.provider === p.id) ctx.addIssue({ code: "custom", path: ["fallback"], message: "a provider cannot fall back to itself" });
   });
 
 const patchSchema = z.object({
@@ -69,10 +72,17 @@ const patchSchema = z.object({
   delegateTimeoutMin: z.number().int().min(1).max(240).optional(),
   autoSizing: z.boolean().optional(),
   autoResume: z.boolean().optional(),
+  claudeFallback: tierRef.nullable().refine((v) => !v || v.provider !== ANTHROPIC_PROVIDER_ID, "Claude cannot fall back to Claude").optional(),
   keepAwake: z.boolean().optional(),
+  questionWaitMin: z.number().int().min(0).max(24 * 60).optional(),
+  chatModel: z.string().trim().min(1).max(120).optional(),
+  chatEffort: z.enum(EFFORTS as [string, ...string[]]).optional(),
+  specModel: z.string().trim().min(1).max(120).optional(),
+  specEffort: z.enum(EFFORTS as [string, ...string[]]).optional(),
   loadUserPlugins: z.boolean().optional(),
   browserChecks: z.boolean().optional(),
   chromeInSupervised: z.boolean().optional(),
+  liveView: z.boolean().optional(),
   maxCostPerTaskUsd: z.number().min(0.1).max(500).optional(),
   maxRepeatedToolCalls: z.number().int().min(2).max(50).optional(),
   eventRetentionDays: z.number().int().min(1).max(365).optional(),

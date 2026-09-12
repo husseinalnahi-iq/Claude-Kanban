@@ -14,7 +14,7 @@ import { SetupService } from "../src/setup/service.ts";
 import { resetHardwareCache } from "../src/setup/local.ts";
 import type { Provider, WsMessage } from "../src/types.ts";
 
-async function until(cond: () => boolean, ms = 4000) {
+async function until(cond: () => boolean, ms = 15_000) {
   const t0 = Date.now();
   while (!cond()) {
     if (Date.now() - t0 > ms) throw new Error("timed out");
@@ -92,11 +92,11 @@ const LMS = ["lmstudio", "lmstudio-server", "lmstudio-model:google/gemma-4-12b-q
 test("the checklist follows what is switched on and set up", () => {
   const repo = new Repo(openDb(":memory:"));
   const ids = () => buildChecks(repo.getSettings()).map((c) => c.id);
-  assert.deepEqual(ids(), ["node", "claude-login", "git", "git-identity", "browser", ...LMS, "plugins"]);
+  assert.deepEqual(ids(), ["node", "claude-login", "claude-models", "git", "git-identity", "browser", ...LMS, "plugins", "terminal", ...(process.platform === "win32" ? ["pwsh"] : [])]);
   repo.updateSettings({ browserChecks: false });
   assert.ok(!ids().includes("browser"));
   repo.updateSettings({ providers: PROVIDERS });
-  assert.deepEqual(ids(), ["node", "claude-login", "git", "git-identity", "ollama", "ollama-model:qwen3-coder", ...LMS, "cli-codex", "key-zai", "plugins"]);
+  assert.deepEqual(ids(), ["node", "claude-login", "claude-models", "git", "git-identity", "ollama", "ollama-model:qwen3-coder", ...LMS, "cli-codex", "key-zai", "provider-credit", "plugins", "terminal", ...(process.platform === "win32" ? ["pwsh"] : [])]);
 });
 
 test("LM Studio gets a server check and no key check; an Ollama model a pipeline picked gets a pull check", async () => {

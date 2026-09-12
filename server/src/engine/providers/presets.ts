@@ -3,7 +3,8 @@ import type { Provider } from "../../types.ts";
 /**
  * Starting points for Settings → Providers. Dependency-free so the web can import it.
  * Prices are left for you to fill in: they change, and a wrong number is worse than "estimated".
- * URLs verified against each vendor's Claude Code integration page (September 2026).
+ * URLs verified against each vendor's Claude Code integration page (September 2026). Kimi Code and the
+ * Kimi API are different products with different keys and addresses, so they are separate presets.
  */
 export interface ProviderPreset extends Omit<Provider, "enabled"> {
   /** Shown under the name in the picker. */
@@ -19,15 +20,30 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     id: "zai", label: "GLM (z.ai)", kind: "anthropic-compatible", baseUrl: "https://api.z.ai/api/anthropic", authRef: "ZAI_API_KEY",
     models: [{ id: "glm-5.3", label: "GLM 5.3" }, { id: "glm-5.3-flash", label: "GLM 5.3 Flash" }, { id: "glm-4.7", label: "GLM 4.7" }],
     mayEditFiles: true,
-    blurb: "Z.ai coding plan or API key. Runs the real Claude Code against GLM.",
-    help: "Key from z.ai → API keys, or your GLM Coding Plan token (docs.z.ai/devpack/tool/claude).",
+    blurb: "GLM Coding Plan (a monthly subscription) or a pay-per-use key. Runs the real Claude Code against GLM. The usage panel shows the plan's 5-hour and weekly use.",
+    help: "Key from z.ai → API keys; a GLM Coding Plan key works the same (docs.z.ai/devpack/tool/claude).",
   },
   {
-    id: "kimi", label: "Kimi (Moonshot)", kind: "anthropic-compatible", baseUrl: "https://api.moonshot.ai/anthropic", authRef: "MOONSHOT_API_KEY",
+    id: "kimi-code", label: "Kimi Code (subscription)", kind: "anthropic-compatible", baseUrl: "https://api.kimi.com/coding/", authRef: "KIMI_CODE_API_KEY",
+    authStyle: "api-key",
+    models: [{ id: "k3-256k", label: "Kimi K3 · 256k" }, { id: "kimi-for-coding", label: "Kimi for Coding" }],
+    mayEditFiles: true,
+    blurb: "Kimi Code membership (a monthly subscription), through Claude Code. The usage panel shows its 5-hour and weekly use.",
+    help: "Key from kimi.com/code → Console → API Keys (kimi.com/code/docs/en/third-party-tools/claude-code.html). Not the same key as the pay-per-use Kimi API.",
+  },
+  {
+    id: "kimi", label: "Kimi API (pay per use)", kind: "anthropic-compatible", baseUrl: "https://api.moonshot.ai/anthropic", authRef: "MOONSHOT_API_KEY",
     models: [{ id: "kimi-k3", label: "Kimi K3" }, { id: "kimi-k2.7-code", label: "Kimi K2.7 Code" }],
     mayEditFiles: true,
-    blurb: "Kimi coding plan or API key, through Claude Code.",
-    help: "Key from platform.kimi.ai (platform.kimi.ai/docs/guide/claude-code-kimi).",
+    blurb: "Moonshot's pay-per-token API, through Claude Code. The usage panel shows the account balance.",
+    help: "Key from platform.kimi.ai (platform.kimi.ai/docs/guide/claude-code-kimi). For a Kimi Code subscription use “Kimi Code (subscription)” instead.",
+  },
+  {
+    id: "qwen", label: "Qwen (Alibaba Token Plan)", kind: "anthropic-compatible", baseUrl: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic", authRef: "ALIBABA_TOKEN_PLAN_KEY",
+    models: [{ id: "qwen3.8-max", label: "Qwen3.8 Max" }, { id: "qwen3.7-plus", label: "Qwen3.7 Plus" }, { id: "qwen3.6-flash", label: "Qwen3.6 Flash" }],
+    mayEditFiles: true,
+    blurb: "Alibaba Cloud's Token Plan (a monthly subscription: Qwen, plus GLM and DeepSeek), through Claude Code. Alibaba allows it for interactive use in coding tools only, so long unattended runs may break its terms.",
+    help: "Key from Model Studio (Singapore region) → Token Plan → API key (alibabacloud.com/help/en/model-studio/claude-code). An older Coding Plan key uses https://coding-intl.dashscope.aliyuncs.com/apps/anthropic as the base URL.",
   },
   {
     id: "minimax", label: "MiniMax", kind: "anthropic-compatible", baseUrl: "https://api.minimax.io/anthropic", authRef: "MINIMAX_API_KEY",
@@ -58,10 +74,12 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   },
   {
     id: "ollama", label: "Ollama (agentic)", kind: "anthropic-compatible", baseUrl: "http://localhost:11434", authRef: "OLLAMA_TOKEN",
+    // Cloud models are not listed here: the stage picker shows Ollama's whole cloud list live, and a
+    // model in this list would also become a Setup row asking you to pull it.
     models: [{ id: "qwen3-coder", label: "Qwen3 Coder" }, { id: "gpt-oss:20b", label: "GPT-OSS 20B" }],
     mayEditFiles: true, seedSecret: "ollama",
-    blurb: "Local models through Claude Code (Ollama ≥ 0.14). Free; needs a model with ≥ 64k context.",
-    help: "Run `ollama pull qwen3-coder`. The token is a placeholder Ollama ignores.",
+    blurb: "Local models through Claude Code (Ollama ≥ 0.14), free. Or Ollama's cloud models (GLM, Kimi, Qwen, DeepSeek…) on its free tier or Ollama Pro, a monthly subscription.",
+    help: "Local: run `ollama pull qwen3-coder` (needs ≥ 64k context). Cloud: run `ollama signin` once, then pick a model from the “Ollama cloud” group, e.g. glm-5.3:cloud. The token is a placeholder Ollama ignores.",
   },
   {
     id: "ollama-text", label: "Ollama (text only)", kind: "openai-compatible", baseUrl: "http://localhost:11434/v1", authRef: "OLLAMA_TOKEN",

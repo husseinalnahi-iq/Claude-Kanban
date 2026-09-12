@@ -13,7 +13,8 @@ export type Priority = "p0" | "p1" | "p2" | "p3";
 export const TASK_TYPES: TaskType[] = ["feature", "bug", "chore", "docs", "refactor"];
 export const PRIORITIES: Priority[] = ["p0", "p1", "p2", "p3"];
 export type RunStatus = "running" | "approval" | "success" | "failed";
-export type ApprovalDecision = "allow" | "deny" | "expired";
+/** "answered": a question Claude asked (AskUserQuestion) that you answered. */
+export type ApprovalDecision = "allow" | "deny" | "expired" | "answered";
 
 export const TASK_STATUSES: TaskStatus[] = ["backlog", "queued", "planning", "running", "approval", "paused", "review", "done", "failed"];
 export const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
@@ -79,6 +80,51 @@ export interface CatalogModel {
   warning?: string;
 }
 
+/** One Claude model your login can use, as Claude Code reports it (GET /claude/models). */
+export interface ClaudeModel {
+  /** The id stages use, e.g. "claude-sonnet-5". */
+  id: string;
+  /** "Sonnet 5". */
+  label: string;
+  /** What it is for, in Claude's words: "Efficient for routine tasks". */
+  blurb: string;
+  /** Effort levels it takes; empty when it has no effort setting (Haiku). */
+  efforts: Effort[];
+  /** The short names that point at it too ("sonnet", "opus[1m]"). */
+  aliases: string[];
+}
+
+export interface ClaudeModelsResult {
+  /** live: Claude Code answered. unavailable: it could not be asked — see error; ids are not checked. */
+  source: "live" | "unavailable";
+  models: ClaudeModel[];
+  checked_at: string;
+  error?: string;
+}
+
+/**
+ * One version of a task's spec. `yours` is text a person wrote (the original, or an edit made after a
+ * rewrite); `ai` is a ✦ Rewrite of the `yours` version named by `source_id`. Nothing is ever overwritten.
+ */
+export interface SpecVersion {
+  id: string;
+  task_id: string;
+  kind: "yours" | "ai";
+  spec_md: string;
+  model: string | null;
+  effort: Effort | null;
+  source_id: string | null;
+  /** What you asked the rewrite to focus on, if anything. */
+  instruction: string | null;
+  /** The rewrite's one line on what it changed. */
+  summary: string | null;
+  cost_usd: number;
+  created_at: string;
+}
+
+/** How a Claude model id compares with your login's list. */
+export type ClaudeModelStatus = "ok" | "unlisted" | "invalid" | "unchecked";
+
 export interface ModelCatalogResult {
   /** live: asked the provider. saved: your list only (no list to ask, or asking failed — see error). */
   source: "live" | "saved";
@@ -100,6 +146,60 @@ export interface Provider {
   cli?: { preset: CliPreset; command?: string; extraArgs?: string[]; envPassthrough?: string[] };
   /** cli only: may it run on code stages and change files? Off by default — see D129. */
   mayEditFiles: boolean;
+  /**
+   * anthropic-compatible only: how the key is sent. Most endpoints take `Authorization: Bearer`
+   * (ANTHROPIC_AUTH_TOKEN); Kimi Code wants it as an API key (ANTHROPIC_API_KEY).
+   */
+  authStyle?: "bearer" | "api-key";
+  /** When this provider runs out mid-task, carry on here instead of waiting (D194). Unset: wait, or ask. */
+  fallback?: TierRef | null;
+}
+
+/** A provider that ran out: a usage window, its credit, or its patience (D194). */
+export interface ProviderOut {
+  provider_id: string;
+  kind: "window" | "credit" | "busy";
+  /** The provider's own words. */
+  reason: string;
+  /** When it comes back, if known. */
+  resets_at: string | null;
+  updated_at: string;
+}
+
+/** One usage window a provider reports about its own plan. */
+export interface QuotaWindow {
+  label: string;
+  /** 0..1, or null when it only says whether it is out. */
+  used: number | null;
+  resets_at: string | null;
+  /** Running out of this one does not stop runs (z.ai's monthly web-tool calls). */
+  soft?: boolean;
+}
+
+/** What the board's own runs sent to a provider in a window of time. */
+export interface UsageTotals {
+  runs: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+}
+
+/** A provider's usage, for the usage panel and Settings (D195). */
+export interface ProviderUsage {
+  provider_id: string;
+  label: string;
+  /** Runs on this computer: nothing to run out of. */
+  local: boolean;
+  /** "live": the provider said; "board": only what this board counted. */
+  source: "live" | "board";
+  windows: QuotaWindow[];
+  balance: { amount: number; currency: string; label: string } | null;
+  plan: string | null;
+  /** Why asking the provider failed. */
+  error: string | null;
+  board: { h5: UsageTotals; d7: UsageTotals };
+  out: ProviderOut | null;
+  checked_at: string;
 }
 
 export type TierRef = { provider: string; model: string };
@@ -253,8 +353,12 @@ export interface Task {
   archived_at: string | null;
   /** When a task paused by a usage limit will pick up again (ISO time), or null. */
   resume_at: string | null;
-  /** Why the task is paused: a usage limit (resumes by itself) or a cost ceiling (waits for Continue). */
-  pause_reason: "limit" | "cost" | null;
+  /**
+   * Why the task is paused: Claude's usage limit (resumes by itself), a cost ceiling (waits for
+   * Continue), or a delegated provider that ran out (resumes by itself when resume_at is set, else
+   * waits for you to switch or top up).
+   */
+  pause_reason: "limit" | "cost" | "provider" | null;
   /** Extra dollars granted to this task by pressing Continue, on top of the global per-task ceiling. */
   budget_extra_usd: number;
   /**
@@ -317,6 +421,35 @@ export interface Schedule {
   last_run_at: string | null;
   last_task_id: string | null;
   created_at: string;
+}
+
+/** A side-chat conversation about one project: one resumable Claude session. */
+export interface Chat {
+  id: string;
+  project_id: string;
+  title: string;
+  session_id: string | null;
+  model: string;
+  effort: Effort;
+  cost_usd: number;
+  archived_at: string | null;
+  created_at: string;
+  updated_at: string;
+  /** True while a reply is being written (not stored). */
+  busy?: boolean;
+}
+
+/**
+ * One line of a side chat. `tool` rows are the quiet "read server/src/db.ts" lines; `meta.cards` are
+ * task cards the chat created, queued or scheduled, shown as chips you can open.
+ */
+export interface ChatMessage {
+  id: number;
+  chat_id: string;
+  role: "user" | "assistant" | "tool" | "error";
+  text: string;
+  meta: { cards?: { id: string; title: string; action: "created" | "updated" | "queued" | "scheduled" }[]; cost_usd?: number };
+  ts: string;
 }
 
 export interface Run {
@@ -475,6 +608,8 @@ export interface Approval {
   decision: ApprovalDecision | null;
   decided_at: string | null;
   note: string | null;
+  /** Your answers to a question card: question text → chosen label(s), or what you typed. */
+  answers: Record<string, string> | null;
   created_at: string;
 }
 
@@ -555,8 +690,24 @@ export interface Settings {
    * session, from the stage it was on — once the window resets, instead of marking it failed.
    */
   autoResume: boolean;
+  /**
+   * When Claude's usage runs out mid-task, carry the stage on here (a provider and model) instead of
+   * waiting for the window to reset. null waits (D194).
+   */
+  claudeFallback: TierRef | null;
   /** Tell the OS not to sleep while anything is queued, running or scheduled. The screen may still turn off. */
   keepAwake: boolean;
+  /**
+   * When Claude asks you a question mid-task and nobody answers: 0 waits for your answer however long it
+   * takes; N > 0 waits N minutes, then Claude picks the most sensible option and says which.
+   */
+  questionWaitMin: number;
+  /** The side chat's model and effort: a balance of quality and price for questions about code. */
+  chatModel: string;
+  chatEffort: Effort;
+  /** The Spec section's ✦ Rewrite: Opus by default — it reads the code first, and a good spec saves a whole run. */
+  specModel: string;
+  specEffort: Effort;
   /**
    * Give runs their own browser (Playwright, headless, one per session) and ask the code and review
    * stages to look at anything visible they changed. Local pages only unless you approve otherwise.
@@ -564,6 +715,8 @@ export interface Settings {
   browserChecks: boolean;
   /** Also offer Claude in Chrome — your own signed-in Chrome — to supervised runs. Never autonomous ones. */
   chromeInSupervised: boolean;
+  /** Stream a live picture of each task's browser into its card (only while someone is watching). */
+  liveView: boolean;
   /** Landing policy new projects start with. */
   defaultMerge: MergePolicy;
   /** Markdown checklist the bootstrap task follows for an empty project. Empty means the shipped default. */
@@ -634,6 +787,14 @@ export type WsMessage =
   | { type: "task.updated"; task: Task }
   | { type: "task.deleted"; taskId: string }
   | { type: "schedule.updated"; schedule: Schedule }
+  | { type: "chat.updated"; chat: Chat }
+  /** A task's browser opened or closed: the board shows a "watch" chip on its card while live. */
+  | { type: "browser.live"; taskId: string; live: boolean }
+  | { type: "chat.deleted"; id: string; project_id: string }
+  | { type: "chat.message"; message: ChatMessage }
+  /** Words of a reply as they are written; only sent to clients watching that chat. */
+  | { type: "chat.delta"; chatId: string; text: string }
+  | { type: "spec.rewrite"; taskId: string; state: "running" | "done" | "failed" | "stopped"; note?: string; error?: string }
   | { type: "schedule.deleted"; id: string; project_id: string }
   | { type: "run.updated"; run: Run }
   | { type: "run.finished"; run: Run }
@@ -645,6 +806,8 @@ export type WsMessage =
   | { type: "milestone.updated"; milestone: Milestone }
   | { type: "settings.updated"; settings: Settings }
   | { type: "limits.updated"; limits: UsageLimit[] }
+  /** A delegated provider ran out, or came back. */
+  | { type: "providers.out"; out: ProviderOut[] }
   | { type: "setup.updated"; check: SetupCheckResult }
   | { type: "setup.output"; id: string; chunk: string }
   | { type: "health.updated"; health: { loggedIn: boolean; authMethod: string | null; cliVersion: string | null; sdkVersion: string; error: string | null; checkedAt: string } };

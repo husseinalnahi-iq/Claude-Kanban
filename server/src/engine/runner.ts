@@ -8,7 +8,9 @@ import * as gitOps from "../git/worktree.ts";
 import { DEFAULT_VISION_MODEL, nowIso } from "../db.ts";
 import type { Repo } from "../repo.ts";
 import type { Bus } from "../bus.ts";
-import type { Approval, ApprovalDecision, Project, Run, SessionTools, Stage, StageName, Task, TaskStatus, TierRef, UsageLimit } from "../types.ts";
+import type {
+  Approval, ApprovalDecision, Project, Provider, ProviderOut, ProviderUsage, Run, SessionTools, Stage, StageName, Task, TaskStatus, TierRef, UsageLimit, UsageTotals,
+} from "../types.ts";
 
 type RateLimitInfo = {
   status?: UsageLimit["status"];
@@ -27,19 +29,23 @@ import { describeImage, describeImageVia } from "./vision.ts";
 import { LEAN } from "./lean.ts";
 import { applyOnboardingResult } from "./onboarding.ts";
 import { buildCriticPrompt, buildRevisionPrompt, extractRevisedPlan, parseCritique } from "./debate.ts";
-import { BROWSER_SERVER, PLAYWRIGHT_PLUGIN_TOOLS, browserDecision, browserServer } from "./browser.ts";
+import { BROWSER_SERVER, PLAYWRIGHT_PLUGIN_TOOLS, browserCaption, browserDecision, browserServer } from "./browser.ts";
+import { BrowserWatch } from "./browserWatch.ts";
 import { scanSkills } from "../skills.ts";
 import { freePort, readWorktreeInclude, runProjectCommand, seedWorktree, stopListeners } from "../git/bootstrap.ts";
 import { NOTES_IN_PROMPT } from "../repo.ts";
 import { SecretStore } from "../secrets.ts";
 import { ProviderRegistry } from "./providers/registry.ts";
 import { estimateCost, sumUsage } from "./providers/cost.ts";
-import { ModelCatalog } from "./providers/catalog.ts";
+import { ModelCatalog, isLocal } from "./providers/catalog.ts";
 import { setCliSecrets } from "./providers/cli/index.ts";
+import { classifyProviderError, naiveOffsetFor, retryDelayMs, type OutKind } from "./providers/limits.ts";
+import { QuotaReader, type LiveQuota } from "./providers/usage.ts";
 import type { Resolved, StageInvocation } from "./providers/types.ts";
 import { saveAttachment } from "../routes/attachments.ts";
 import { pickBrowser, realProbe } from "../setup/probe.ts";
-import { ANTHROPIC_PROVIDER_ID, ARTIFACT_EXTS, MAX_ATTACHMENT_BYTES, attachmentKind, supportsFastMode, type FastModeStatus } from "../types.ts";
+import { ANTHROPIC_PROVIDER_ID, ARTIFACT_EXTS, MAX_ATTACHMENT_BYTES, attachmentKind, supportsFastMode, type ClaudeModelsResult, type FastModeStatus } from "../types.ts";
+import { fromSdk, type SdkModelInfo } from "./claudeModels.ts";
 
 export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => AsyncIterable<SDKMessage>;
 
@@ -59,6 +65,8 @@ export interface RunnerDeps {
   secrets?: SecretStore;
   /** Live model lists. Defaults to one that asks the real providers. */
   catalog?: ModelCatalog;
+  /** What each provider says is left of its plan. Defaults to one that asks the real providers. */
+  quota?: QuotaReader;
 }
 
 interface StartOpts {
@@ -84,8 +92,25 @@ interface PipelineCtl {
 
 const STAGE_STATUS: Record<StageName, TaskStatus> = { plan: "planning", code: "running", review: "review", custom: "running" };
 const PLAN_DISALLOWED = ["Edit", "Write", "NotebookEdit", "MultiEdit"];
-/** Nobody can answer a question tool from the board; runs make a choice and say so instead. */
-const ALWAYS_DISALLOWED = ["AskUserQuestion"];
+/** Nothing is withheld from every run today; questions go to you as cards (see askApproval). */
+const ALWAYS_DISALLOWED: string[] = [];
+export const QUESTION_TOOL = "AskUserQuestion";
+
+/**
+ * What the session gets back from a question card. An answer goes in as the tool's own `answers`
+ * field (question text → label, several labels comma-separated), the way Claude Code's dialog fills
+ * it in. No answer — skipped, timed out, or the run ended — tells Claude to decide for itself.
+ */
+export function questionResult(
+  input: Record<string, unknown>, decision: ApprovalDecision, note: string | null, answers: Record<string, string> | undefined, waitMin: number,
+): PermissionResult {
+  if (decision === "answered" && answers && Object.keys(answers).length) return { behavior: "allow", updatedInput: { ...input, answers } };
+  const why = decision === "expired" && waitMin > 0 ? `No answer after ${waitMin} minutes` : decision === "deny" ? "The user chose not to answer" : "No answer";
+  return {
+    behavior: "deny",
+    message: `${why}${note && decision === "deny" ? ` (${note})` : ""}. Choose the most sensible option yourself, say which one and why in your summary, and continue.`,
+  };
+}
 /** Bounded so one chatty session cannot fill the disk. */
 const MAX_ARTIFACTS_PER_RUN = 20;
 /** One image, one description: a CLI that has not answered in three minutes is not going to. */
@@ -193,21 +218,32 @@ export class TaskRunner {
   private repo: Repo;
   private bus: Bus;
   private queryFn: QueryFn;
+  /** The same SDK entry point for the side chat, so tests inject one fake for both. */
+  get sdkQuery(): QueryFn {
+    return this.queryFn;
+  }
   private git: typeof gitOps;
   private logDir?: string;
   readonly secrets: SecretStore;
   readonly providers: ProviderRegistry;
   readonly catalog: ModelCatalog;
+  readonly quota: QuotaReader;
+  /** Times in a row each provider ran out with no reset time to go on: how long the next wait is. */
+  private outStreak = new Map<string, number>();
+  /** For a stage moved to another model partway: what it needs to know, put in its prompt once. */
+  private handovers = new Map<string, string>();
   private active = new Map<string, Active>();
   private pipelines = new Map<string, PipelineCtl>();
   /** Tasks inside an approve / discard / chat transition (git or session work in flight). */
   private holds = new Set<string>();
   private startOpts = new Map<string, StartOpts>();
   private ports = new Map<string, number>();
+  /** Live pictures of each task's browser, for the Browser tab. */
+  readonly browserWatch: BrowserWatch;
   /** Verification output of the failed attempt, fed back into the next run's prompt. */
   private verifyFailures = new Map<string, string>();
   private pendingNotes = new Map<string, string[]>();
-  private resolvers = new Map<string, (d: { decision: ApprovalDecision; note: string | null }) => void>();
+  private resolvers = new Map<string, (d: { decision: ApprovalDecision; note: string | null; answers?: Record<string, string> }) => void>();
   /** One landing at a time per project: two merges into the same branch race over the same index. */
   private merging = new Map<string, Promise<void>>();
   /** taskId → the tree hash the verify command last passed on, so an unchanged tree is not re-tested. */
@@ -217,11 +253,13 @@ export class TaskRunner {
     this.repo = deps.repo;
     this.bus = deps.bus;
     this.queryFn = deps.queryFn ?? (query as unknown as QueryFn);
+    this.browserWatch = new BrowserWatch(deps.bus);
     this.git = deps.git ?? gitOps;
     this.logDir = deps.logDir;
     this.secrets = deps.secrets ?? new SecretStore(":memory:");
     this.providers = new ProviderRegistry(deps.repo, this.secrets);
     this.catalog = deps.catalog ?? new ModelCatalog();
+    this.quota = deps.quota ?? new QuotaReader();
     setCliSecrets(this.secrets);
     this.queue = new RunQueue({
       // Serial mode overrides the number without overwriting it, so turning it off restores it.
@@ -298,6 +336,7 @@ export class TaskRunner {
     this.pendingNotes.delete(taskId);
     this.startOpts.delete(taskId);
     this.verified.delete(taskId);
+    this.handovers.delete(taskId);
   }
 
   /** Runs `fn` while the task counts as busy, so no queue/chat/approve can interleave with it. */
@@ -447,6 +486,7 @@ export class TaskRunner {
       const cwd = await this.ensureCwd(task, project);
       // Reserved before the first prompt is written, so the prompt can name it.
       await this.portFor(taskId);
+      let switches = 0;
 
       for (let i = opts.fromStage; i < task.pipeline.length; i++) {
         if (ctl.stopped) {
@@ -462,6 +502,13 @@ export class TaskRunner {
           this.pauseForCost(taskId, spent, capped, "this task reached its ceiling");
           return;
         }
+        // Its provider is known to be out: carry on where Settings say, or wait without calling it (D194).
+        const pre = this.preflightProvider(task, i);
+        if (pre === "paused") return;
+        if (pre === "switched") {
+          task = this.repo.getTask(taskId)!;
+          if (i === opts.fromStage) opts.resume = undefined;
+        }
         const stage = task.pipeline[i];
         const run = this.repo.createRun({
           task_id: taskId, stage: stage.stage, stage_index: i, model: stage.model, effort: stage.effort,
@@ -471,9 +518,11 @@ export class TaskRunner {
         this.setTask(taskId, { status: STAGE_STATUS[stage.stage], error: null });
 
         const gated = stage.stage === "code" || stage.stage === "custom";
+        const prompt = await this.stagePromptFor(task, i, project, cwd);
+        this.handovers.delete(taskId);
         const outcome = await this.runQuery({
           task, project, run, cwd, ctl,
-          prompt: await this.stagePromptFor(task, i, project, cwd),
+          prompt,
           resume: i === opts.fromStage ? opts.resume : undefined,
           stageStatus: STAGE_STATUS[stage.stage],
           disallowedTools: stage.stage === "plan" ? PLAN_DISALLOWED : undefined,
@@ -499,11 +548,26 @@ export class TaskRunner {
             this.pauseForCost(taskId, this.repo.taskCost(taskId), this.taskCeiling(task), outcome.error ?? "the stage reached its ceiling");
             return;
           }
-          // The pause timer is tied to Claude's usage windows; a foreign provider's 429 just fails (D135).
-          if (outcome.providerId === ANTHROPIC_PROVIDER_ID && this.pauseForLimit(taskId, outcome.error)) return;
+          // Ran out rather than went wrong: carry on elsewhere (the stage runs again, in this loop), or
+          // wait for it to come back, or ask. Claude's windows and a provider's are handled alike (D194).
+          if (!ctl.stopped) {
+            // Three moves in one go is a merry-go-round, not a plan: after that it waits or asks.
+            const mayMove = switches < 3;
+            const next = outcome.providerId === ANTHROPIC_PROVIDER_ID
+              ? this.afterClaudeLimit(taskId, i, outcome.error, run.id, mayMove)
+              : await this.afterProviderOut(taskId, i, outcome.providerId, outcome.error, run.id, mayMove);
+            if (next === "switched") {
+              switches++;
+              if (i === opts.fromStage) opts.resume = undefined;
+              i--;
+              continue;
+            }
+            if (next === "paused") return;
+          }
           this.setTask(taskId, { status: "failed", error: outcome.error });
           return;
         }
+        if (outcome.providerId !== ANTHROPIC_PROVIDER_ID) this.providerBack(outcome.providerId);
         // "Done" means the project's own check passes — not that the model said it was done.
         if (gated && project.env.verifyCommand) {
           const verdict = await this.verifyWorkspace(project, task, cwd, run.id);
@@ -677,6 +741,7 @@ export class TaskRunner {
       messages,
       rejectNote: task.note,
       verificationFailure: this.verifyFailures.get(task.id) ?? null,
+      handover: this.handovers.get(task.id) ?? null,
       verifyCommand: project.env.verifyCommand,
       browser: settings.browserChecks
         ? { port: this.ports.get(task.id) ?? null, chrome: settings.chromeInSupervised && task.mode !== "autonomous" }
@@ -752,9 +817,15 @@ export class TaskRunner {
     const autonomous = task.mode === "autonomous";
     // The board's own browser, one per session; see browser.ts for why not the Playwright plugin's.
     const browserDir = join(tmpdir(), "claude-kanban-browser", run.id);
+    // The live view: the browser also opens a debugging port the board watches (browserWatch.ts).
+    const watchPort = settings.browserChecks && settings.liveView ? await freePort().catch(() => undefined) : undefined;
+    if (watchPort) this.browserWatch.begin(task.id, run.id, watchPort);
     // Board tools are always allowed; handled here rather than via allowedTools so nothing shadows this callback.
     const canUseTool: CanUseTool = async (toolName, input, o) => {
       if (toolName.startsWith("mcp__board__")) return { behavior: "allow", updatedInput: input };
+      // A question for you, in both modes: it waits on a card like an approval (and, if Settings say
+      // so, Claude decides for itself after a while). Before the gate, which would refuse it.
+      if (toolName === QUESTION_TOOL) return this.askApproval(run, task.id, toolName, input, o);
       // The blocklist comes first, in both modes: these are the commands where an approval card
       // would just be a chance to click the wrong button.
       const command = String((input as { command?: unknown }).command ?? "");
@@ -823,7 +894,7 @@ export class TaskRunner {
       systemPrompt: settings.cacheableSystemPrompt ? { type: "preset", preset: "claude_code", excludeDynamicSections: true } : undefined,
       mcpServers: {
         board: createBoardServer(this.repo, this.bus, { taskId: task.id, runId: run.id }, (parent) => this.promoteReady(parent.project_id)),
-        ...(settings.browserChecks ? { [BROWSER_SERVER]: browserServer(browserDir, pickBrowser(realProbe)?.browser) } : {}),
+        ...(settings.browserChecks ? { [BROWSER_SERVER]: browserServer(browserDir, pickBrowser(realProbe)?.browser, watchPort) } : {}),
       },
       // Claude in Chrome is switched on per run, and explicitly off otherwise: an unattended run must
       // never drive the browser you are signed in with.
@@ -885,6 +956,10 @@ export class TaskRunner {
 
         // How full the session's context is right now (what Claude Code shows as the context bar).
         if (msg.type === "assistant") {
+          for (const block of (msg.message?.content ?? []) as { type: string; name?: string; input?: Record<string, unknown> }[]) {
+            const caption = block.type === "tool_use" && block.name ? browserCaption(block.name, block.input ?? {}) : null;
+            if (caption) this.browserWatch.action(task.id, caption, typeof block.input?.url === "string" ? block.input.url : undefined);
+          }
           const u = msg.message?.usage;
           if (u) {
             const held = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.output_tokens ?? 0);
@@ -957,6 +1032,7 @@ export class TaskRunner {
       thrown = err instanceof Error ? err.message : String(err);
     } finally {
       this.active.delete(task.id);
+      this.browserWatch.end(task.id, run.id);
       for (const ap of this.repo.pendingApprovals(task.id)) this.resolvers.get(ap.id)?.({ decision: "expired", note: "run ended" });
       // Screenshots were already kept from the tool results; the rest is page snapshots and logs.
       try {
@@ -1313,6 +1389,55 @@ export class TaskRunner {
     return this.fastStatus;
   }
 
+  private claudeList: ClaudeModelsResult | null = null;
+  private claudeListing: Promise<ClaudeModelsResult> | null = null;
+
+  /**
+   * The Claude models your login can use, as Claude Code lists them in its model picker. Read in the
+   * session's startup handshake with no prompt ever sent, so it costs nothing. A list is kept 30
+   * minutes (it changes when Claude ships a model or your plan changes); a failure only 30 seconds.
+   */
+  async claudeModels(force = false): Promise<ClaudeModelsResult> {
+    const c = this.claudeList;
+    const fresh = c && Date.now() - Date.parse(c.checked_at) < (c.source === "live" ? 30 * 60_000 : 30_000);
+    if (c && fresh && !force) return c;
+    this.claudeListing ??= this.listClaudeModels().finally(() => (this.claudeListing = null));
+    return (this.claudeList = await this.claudeListing);
+  }
+
+  private async listClaudeModels(): Promise<ClaudeModelsResult> {
+    const abort = new AbortController();
+    // A prompt that never sends anything: the session starts, answers the question, and is closed.
+    const silent = (async function* (): AsyncGenerator<SDKUserMessage> {
+      await new Promise((r) => abort.signal.addEventListener("abort", r, { once: true }));
+    })();
+    const q = this.queryFn({ prompt: silent, options: { cwd: process.cwd(), ...LEAN, abortController: abort } }) as AsyncIterable<SDKMessage> & {
+      supportedModels?: () => Promise<SdkModelInfo[]>;
+      close?: () => void;
+    };
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      if (typeof q.supportedModels !== "function") throw new Error("this Claude Code version cannot list its models");
+      const infos = await Promise.race([
+        q.supportedModels(),
+        new Promise<never>((_, rej) => (timer = setTimeout(() => rej(new Error("Claude Code did not answer within 20 seconds")), 20_000))),
+      ]);
+      const models = fromSdk(infos);
+      if (!models.length) throw new Error("Claude Code listed no models");
+      return { source: "live", models, checked_at: nowIso() };
+    } catch (err) {
+      return { source: "unavailable", models: [], checked_at: nowIso(), error: err instanceof Error ? err.message : String(err) };
+    } finally {
+      clearTimeout(timer);
+      abort.abort();
+      try {
+        q.close?.();
+      } catch {
+        // already closed
+      }
+    }
+  }
+
   private toolsStatus: (SessionTools & { key: string }) | null = null;
 
   /**
@@ -1532,22 +1657,303 @@ export class TaskRunner {
     return this.retryTask(taskId);
   }
 
-  /** Give up on a task paused at its cost ceiling: it fails with the reason, so Retry and Back to backlog work as usual. */
+  /**
+   * Give up on a paused task (a cost ceiling, or a provider or Claude that ran out): it fails with the
+   * reason, so Retry and Back to backlog work as usual, and nothing it did is lost.
+   */
   stopPaused(taskId: string): Task {
     const { task } = this.load(taskId);
-    if (task.status !== "paused" || task.pause_reason !== "cost") throw new ConflictError("Only a task paused at its cost ceiling can be stopped this way.");
-    return this.setTask(taskId, { status: "failed", pause_reason: null, error: task.note ?? "Stopped at its cost ceiling.", note: null });
+    if (task.status !== "paused") throw new ConflictError("Only a paused task can be stopped this way.");
+    return this.setTask(taskId, { status: "failed", pause_reason: null, resume_at: null, error: task.note ?? "Stopped while paused.", note: null });
+  }
+
+  // ---------------------------------------------------------------- a provider that ran out (D194)
+
+  private providerById(id: string | null | undefined): Provider | undefined {
+    return id && id !== ANTHROPIC_PROVIDER_ID ? this.repo.getSettings().providers.find((p) => p.id === id) : undefined;
+  }
+
+  private labelOf(ref: { provider?: string | null; model: string }): string {
+    const p = this.providerById(ref.provider);
+    return ref.provider && ref.provider !== ANTHROPIC_PROVIDER_ID ? `${ref.model} on ${p?.label ?? ref.provider}` : `Claude ${ref.model}`;
+  }
+
+  /** The provider's out state if it still applies; one whose reset time has passed is cleared here. */
+  private activeOut(providerId: string, now = Date.now()): ProviderOut | null {
+    const out = this.repo.providerOuts().find((o) => o.provider_id === providerId);
+    if (!out) return null;
+    if (out.resets_at && Date.parse(out.resets_at) <= now) {
+      this.repo.clearProviderOut(providerId);
+      this.bus.publish({ type: "providers.out", out: this.repo.providerOuts() });
+      return null;
+    }
+    return out;
+  }
+
+  /** Is Claude's own window shut right now? */
+  private claudeOut(now = Date.now()): boolean {
+    return this.limitedUntil(now) !== null || this.repo.usageLimits().some((l) => l.status === "rejected" && l.resets_at !== null && l.resets_at * 1000 > now);
+  }
+
+  /** Can this stage carry on at `to`: it exists, is switched on, may run this kind of stage, and is not out itself. */
+  private fallbackUsable(to: TierRef, stage: Stage, mode: Task["mode"]): boolean {
+    const onClaude = !to.provider || to.provider === ANTHROPIC_PROVIDER_ID;
+    if (onClaude ? this.claudeOut() : this.activeOut(to.provider)) return false;
+    try {
+      return this.providers.allowedOn(this.providers.resolve(to.provider), stage.stage, mode) === null;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Where a stage on this provider carries on when it runs out, if Settings say so. */
+  private fallbackFor(providerId: string | null | undefined): TierRef | null {
+    return !providerId || providerId === ANTHROPIC_PROVIDER_ID ? this.repo.getSettings().claudeFallback : this.providerById(providerId)?.fallback ?? null;
+  }
+
+  /** What a model taking a stage over needs: where the work stands, and what the last one said. */
+  private handoverText(task: Task, runId: string | undefined, from: string, why: string): string {
+    const said = runId ? this.repo.lastAssistantText(runId, 1800) : "";
+    const where = task.mode === "autonomous"
+      ? "Its changes so far are in this worktree, committed as “[failed]” (see `git log -1 --stat` and `git status`)."
+      : "Its changes so far are already in the folder (see `git status` and `git diff`).";
+    return (
+      `This stage was started on ${from}, which stopped partway: ${why}. ${where} ` +
+      "Keep what is right, finish the stage rather than starting over, and check its claims against the code." +
+      (said ? `\n\nWhat it said last:\n${said}` : "")
+    );
+  }
+
+  /** Move stage i to another provider and model. The caller runs it again. */
+  private moveStage(task: Task, i: number, to: TierRef, why: string, runId?: string): Task {
+    const from = task.pipeline[i];
+    const onClaude = !to.provider || to.provider === ANTHROPIC_PROVIDER_ID;
+    const pipeline = task.pipeline.map((s, j) => {
+      if (j !== i) return s;
+      const { provider: _p, ...rest } = s;
+      return onClaude ? { ...rest, model: to.model } : { ...rest, provider: to.provider, model: to.model };
+    });
+    const fromLabel = this.labelOf(from);
+    this.handovers.set(task.id, this.handoverText(task, runId, fromLabel, why));
+    const note = `[board] ${fromLabel} ran out (${why}). Stage #${i + 1} carries on as ${this.labelOf({ provider: to.provider, model: to.model })}.`;
+    if (runId) {
+      const event = this.repo.insertEvent(runId, "board:switch", { type: "provider_switch", text: note });
+      this.bus.publish({ type: "event", runId, taskId: task.id, event });
+    } else {
+      this.pendingNotes.set(task.id, [...(this.pendingNotes.get(task.id) ?? []), note.replace(/^\[board\] /, "")]);
+    }
+    this.log(runId ?? task.id, `\n${note}\n`);
+    return this.setTask(task.id, { pipeline });
+  }
+
+  /**
+   * Record that a provider ran out. With no reset time to go on, it is tried again after half an
+   * hour, then an hour, two, four — so a plan that is out for days is not knocked on all night.
+   */
+  private recordOut(providerId: string, kind: OutKind, reason: string, resetsAt: number | null): ProviderOut {
+    const streak = this.outStreak.get(providerId) ?? 0;
+    let at = resetsAt;
+    if (!at && kind !== "credit") {
+      at = Date.now() + retryDelayMs(kind, streak);
+      this.outStreak.set(providerId, streak + 1);
+    }
+    const out = this.repo.setProviderOut({ provider_id: providerId, kind, reason, resets_at: at ? new Date(at).toISOString() : null });
+    this.bus.publish({ type: "providers.out", out: this.repo.providerOuts() });
+    this.armResume();
+    return out;
+  }
+
+  /** A stage on this provider worked: whatever was recorded against it is over. */
+  private providerBack(providerId: string): void {
+    this.outStreak.delete(providerId);
+    if (this.repo.clearProviderOut(providerId)) this.bus.publish({ type: "providers.out", out: this.repo.providerOuts() });
+  }
+
+  /** A provider that says a window is used up, asked directly: when it resets. */
+  private async resetFromQuota(provider: Provider, secret: string | null): Promise<number | null> {
+    try {
+      const q = await this.quota.read(provider, secret, true);
+      const full = (q?.windows ?? []).filter((w) => !w.soft && (w.used ?? 0) >= 0.999 && w.resets_at).map((w) => Date.parse(w.resets_at!));
+      const later = full.filter((ms) => ms > Date.now());
+      return later.length ? Math.max(...later) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Pause for a provider that ran out: by itself until it is back, or until you decide. */
+  private pauseForProvider(taskId: string, label: string, out: ProviderOut): void {
+    const at = out.resets_at ? new Date(Date.parse(out.resets_at) + 90_000) : null;
+    const what = out.kind === "credit" ? "is out of credit" : out.kind === "busy" ? "is too busy right now" : "reached its usage limit";
+    const fb = "or switch this stage to another provider now (the next model picks up where it stopped)";
+    const reason = out.reason.replace(/[.\s]+$/, "");
+    this.setTask(taskId, {
+      status: "paused",
+      pause_reason: "provider",
+      resume_at: at ? at.toISOString() : null,
+      error: null,
+      note: at
+        ? `${label} ${what}: ${reason}. It carries on by itself at ${at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}, in the same session, from the stage it was on — ${fb}.`
+        : `${label} ${what}: ${reason}. Top it up and press Try again, ${fb}.`,
+    });
+    this.armResume();
+  }
+
+  /**
+   * Before a stage starts: if its provider (or Claude) is known to be out, carry on where Settings
+   * say, or pause without calling it. Credit that ran out is tried anyway: it may have been topped up.
+   */
+  private preflightProvider(task: Task, i: number): "go" | "switched" | "paused" {
+    const stage = task.pipeline[i];
+    const pid = stage.provider && stage.provider !== ANTHROPIC_PROVIDER_ID ? stage.provider : ANTHROPIC_PROVIDER_ID;
+    const fb = this.fallbackFor(pid);
+    if (pid === ANTHROPIC_PROVIDER_ID) {
+      if (fb && this.claudeOut() && this.fallbackUsable(fb, stage, task.mode)) {
+        this.moveStage(task, i, fb, "Claude's usage limit is reached");
+        return "switched";
+      }
+      return "go";
+    }
+    const out = this.activeOut(pid);
+    if (!out) return "go";
+    if (fb && this.fallbackUsable(fb, stage, task.mode)) {
+      this.moveStage(task, i, fb, out.reason);
+      return "switched";
+    }
+    if (out.kind !== "credit" && out.resets_at && this.repo.getSettings().autoResume) {
+      this.pauseForProvider(task.id, this.providerById(pid)?.label ?? pid, out);
+      return "paused";
+    }
+    return "go";
+  }
+
+  /** A Claude stage stopped by the usage limit: carry on at the fallback if there is one, else pause as ever. */
+  private afterClaudeLimit(taskId: string, i: number, error: string | null, runId: string, mayMove: boolean): "switched" | "paused" | "failed" {
+    if (!this.hitLimit(error)) return "failed";
+    const task = this.repo.getTask(taskId)!;
+    const fb = this.repo.getSettings().claudeFallback;
+    if (mayMove && fb && this.fallbackUsable(fb, task.pipeline[i], task.mode)) {
+      this.moveStage(task, i, fb, "Claude's usage limit is reached", runId);
+      return "switched";
+    }
+    return this.pauseForLimit(taskId, error) ? "paused" : "failed";
+  }
+
+  /**
+   * A delegated stage failed. If the provider ran out (not the work going wrong): record it, then
+   * carry on at its fallback, or wait for it to come back, or pause for you when nothing comes back
+   * by itself (credit). Anything else is an ordinary failure.
+   */
+  private async afterProviderOut(taskId: string, i: number, providerId: string, error: string | null, runId: string, mayMove: boolean): Promise<"switched" | "paused" | "failed"> {
+    const provider = this.providerById(providerId);
+    const hit = classifyProviderError(error, Date.now(), naiveOffsetFor(provider?.baseUrl));
+    if (!hit) return "failed";
+    let resetsAt = hit.resetsAt;
+    if (!resetsAt && hit.kind === "window" && provider) resetsAt = await this.resetFromQuota(provider, this.secrets.get(provider.authRef));
+    const out = this.recordOut(providerId, hit.kind, hit.reason, resetsAt);
+    const task = this.repo.getTask(taskId);
+    if (!task) return "failed";
+    const fb = provider?.fallback;
+    if (mayMove && fb && this.fallbackUsable(fb, task.pipeline[i], task.mode)) {
+      this.moveStage(task, i, fb, hit.reason, runId);
+      return "switched";
+    }
+    // Auto-resume off: a window fails as it always did. Credit still pauses — failing would not help.
+    if (!this.repo.getSettings().autoResume && out.kind !== "credit") return "failed";
+    this.pauseForProvider(taskId, provider?.label ?? providerId, out);
+    return "paused";
+  }
+
+  /**
+   * You chose where a paused stage carries on (from the task's pause card). It runs again there,
+   * with a note of what the previous model did; `remember` makes it the fallback from now on.
+   */
+  switchStage(taskId: string, to: TierRef, remember = false): Task {
+    const { task } = this.load(taskId);
+    if (task.status !== "paused" || task.pause_reason === "cost") {
+      throw new ConflictError("Only a task paused because Claude or a provider ran out can be switched here. To change a stage otherwise, edit the pipeline.");
+    }
+    const i = this.defaultStart(task).fromStage;
+    const stage = task.pipeline[i];
+    if (!stage) throw new ConflictError("No stage left to run.");
+    const res = this.providers.resolve(to.provider);
+    const why = this.providers.allowedOn(res, stage.stage, task.mode);
+    if (why) throw new PolicyError(why);
+    const fromId = stage.provider && stage.provider !== ANTHROPIC_PROVIDER_ID ? stage.provider : ANTHROPIC_PROVIDER_ID;
+    const toId = !to.provider || to.provider === ANTHROPIC_PROVIDER_ID ? ANTHROPIC_PROVIDER_ID : to.provider;
+    if (fromId === toId && stage.model === to.model) throw new ConflictError("It already runs there. Press Try again to try it now.");
+    if (remember && fromId !== toId) {
+      const settings = fromId === ANTHROPIC_PROVIDER_ID
+        ? this.repo.updateSettings({ claudeFallback: { provider: toId, model: to.model } })
+        : this.repo.updateSettings({ providers: this.repo.getSettings().providers.map((p) => (p.id === fromId ? { ...p, fallback: { provider: toId, model: to.model } } : p)) });
+      this.bus.publish({ type: "settings.updated", settings });
+    }
+    const prev = this.latestByStage(taskId).get(i);
+    const moved = this.moveStage(task, i, { provider: toId, model: to.model }, task.pause_reason === "provider" ? "it ran out of usage" : "Claude's usage limit is reached", prev?.id);
+    this.setTask(taskId, { status: "backlog", pause_reason: null, resume_at: null, note: null, error: null });
+    return this.queueTask(moved.id, { fromStage: i });
+  }
+
+  /** Every enabled provider's usage: what it says is left, what this board sent there, and whether it is out (D195). */
+  async providerUsage(force = false): Promise<ProviderUsage[]> {
+    const now = Date.now();
+    const h5 = this.repo.providerTotals(new Date(now - 5 * 3_600_000).toISOString());
+    const d7 = this.repo.providerTotals(new Date(now - 7 * 86_400_000).toISOString());
+    const zero: UsageTotals = { runs: 0, input_tokens: 0, output_tokens: 0, cost_usd: 0 };
+    const shown = this.repo.getSettings().providers.filter((p) => p.enabled || d7.has(p.id));
+    return Promise.all(
+      shown.map(async (p): Promise<ProviderUsage> => {
+        let live: LiveQuota | null = null;
+        let error: string | null = null;
+        try {
+          live = await this.quota.read(p, this.secrets.get(p.authRef), force);
+        } catch (err) {
+          error = err instanceof Error ? err.message : String(err);
+        }
+        if (live) this.noteQuota(p.id, live);
+        return {
+          provider_id: p.id,
+          label: p.label,
+          local: isLocal(p),
+          source: live ? "live" : "board",
+          windows: live?.windows ?? [],
+          balance: live?.balance ?? null,
+          plan: live?.plan ?? null,
+          error,
+          board: { h5: h5.get(p.id) ?? zero, d7: d7.get(p.id) ?? zero },
+          out: this.activeOut(p.id, now),
+          checked_at: new Date(now).toISOString(),
+        };
+      }),
+    );
+  }
+
+  /** The provider's own figures settle it: a full window holds its work now; one with room again clears it. */
+  private noteQuota(providerId: string, q: LiveQuota): void {
+    const hard = q.windows.filter((w) => !w.soft && w.used !== null);
+    const full = hard.filter((w) => (w.used ?? 0) >= 0.999 && w.resets_at && Date.parse(w.resets_at) > Date.now());
+    const current = this.repo.providerOuts().find((o) => o.provider_id === providerId);
+    if (full.length) {
+      const until = Math.max(...full.map((w) => Date.parse(w.resets_at!)));
+      // Already known (with the provider's own words): only a different reset time is news.
+      const known = current && (current.kind === "credit" || (current.resets_at && Math.abs(Date.parse(current.resets_at) - until) < 5 * 60_000));
+      if (!known) this.recordOut(providerId, "window", `${full.map((w) => w.label).join(" and ")} used up`, until);
+    } else if (hard.length && current?.kind === "window") {
+      this.providerBack(providerId);
+    }
+    if (q.balance && q.balance.amount <= 0 && !current) this.recordOut(providerId, "credit", `no ${q.balance.label} left`, null);
   }
 
   /**
    * When the Claude window that stopped work opens again, or null when nothing is waiting on it.
    * Read from the paused tasks themselves: `pauseForLimit` already worked the time out, and the
    * state clears itself when `resumeDue` un-pauses them — no extra table, nothing to keep in sync.
+   * Tasks waiting on another provider are not Claude's business and do not count.
    */
   limitedUntil(now = Date.now()): number | null {
     let at: number | null = null;
     for (const t of this.repo.tasksInStatus(["paused"])) {
-      if (!t.resume_at) continue;
+      if (!t.resume_at || t.pause_reason === "provider") continue;
       const ms = Date.parse(t.resume_at);
       if (ms > now && (at === null || ms > at)) at = ms;
     }
@@ -1559,9 +1965,12 @@ export class TaskRunner {
    * asked: a task whose first stage is delegated should get on with it and pause later at a Claude
    * stage if it must — making real progress beats waiting for a window it may never need.
    */
+  private nextStage(task: Task): Stage | undefined {
+    return task.pipeline[this.startOpts.get(task.id)?.fromStage ?? this.defaultStart(task).fromStage];
+  }
+
   private nextStageNeedsClaude(task: Task): boolean {
-    const from = this.startOpts.get(task.id)?.fromStage ?? this.defaultStart(task).fromStage;
-    const stage = task.pipeline[from];
+    const stage = this.nextStage(task);
     if (!stage) return true;
     const onClaude = (id: string | null | undefined) => !id || id === ANTHROPIC_PROVIDER_ID;
     if (onClaude(stage.provider)) return true;
@@ -1572,23 +1981,35 @@ export class TaskRunner {
 
   /**
    * The queue's veto. While a limit window is open, Claude work waits for it; work delegated to
-   * another provider carries on, which is the whole point of having delegated it.
+   * another provider carries on, which is the whole point of having delegated it. The same goes the
+   * other way: work for a provider that is out until a known time waits for it. Either way, a
+   * fallback in Settings means there is somewhere to go, so it starts and moves over (D194).
    */
   private mayStartNow(taskId: string): boolean {
-    if (this.limitedUntil() === null) return true;
     const task = this.repo.getTask(taskId);
-    return task ? !this.nextStageNeedsClaude(task) : true;
+    if (!task) return true;
+    if (this.limitedUntil() !== null && this.nextStageNeedsClaude(task) && !this.repo.getSettings().claudeFallback) return false;
+    const stage = this.nextStage(task);
+    if (stage?.provider && stage.provider !== ANTHROPIC_PROVIDER_ID) {
+      const out = this.activeOut(stage.provider);
+      if (out && out.kind !== "credit" && out.resets_at && !this.fallbackFor(stage.provider)) return false;
+    }
+    return true;
   }
 
-  /** One timer for all paused tasks, set to the earliest resume time. Survives restarts via recover(). */
+  /** One timer for all paused tasks and out providers, set to the earliest time. Survives restarts via recover(). */
   private resumeTimer: ReturnType<typeof setTimeout> | null = null;
 
   armResume(): void {
     if (this.resumeTimer) clearTimeout(this.resumeTimer);
     this.resumeTimer = null;
-    const paused = this.repo.tasksInStatus(["paused"]).filter((t) => t.resume_at);
-    if (!paused.length) return;
-    const next = Math.min(...paused.map((t) => Date.parse(t.resume_at!)));
+    const times = [
+      ...this.repo.tasksInStatus(["paused"]).filter((t) => t.resume_at).map((t) => Date.parse(t.resume_at!)),
+      // Queued work held for a provider is nudged when it comes back, even with no task paused on it.
+      ...this.repo.providerOuts().filter((o) => o.resets_at).map((o) => Date.parse(o.resets_at!)),
+    ];
+    if (!times.length) return;
+    const next = Math.min(...times);
     // setTimeout caps at ~24.8 days; a weekly window fits, but clamp so an odd value cannot overflow.
     const wait = Math.min(Math.max(0, next - Date.now()), 2 ** 31 - 1);
     this.resumeTimer = setTimeout(() => this.resumeDue(), wait);
@@ -1597,9 +2018,13 @@ export class TaskRunner {
 
   /** Re-queue every paused task whose time has come, resuming its session from where it stopped. */
   resumeDue(now = Date.now()): string[] {
+    // Providers whose time has come are back (activeOut clears them as it reads).
+    for (const o of this.repo.providerOuts()) this.activeOut(o.provider_id, now);
     const resumed: string[] = [];
+    let claudeWindow = false;
     for (const t of this.repo.tasksInStatus(["paused"])) {
       if (!t.resume_at || Date.parse(t.resume_at) > now) continue;
+      if (t.pause_reason !== "provider") claudeWindow = true;
       this.setTask(t.id, { status: "backlog", resume_at: null, pause_reason: null, note: null });
       try {
         this.retryTask(t.id);
@@ -1609,7 +2034,7 @@ export class TaskRunner {
       }
     }
     // The window that blocked them is open again — clear the stale "rejected" so it is not re-read.
-    if (resumed.length) this.repo.clearRejectedLimits();
+    if (claudeWindow) this.repo.clearRejectedLimits();
     this.armResume();
     // Tasks the limit gate held are still waiting and nothing else will nudge them: pump directly,
     // since every retryTask above may have thrown and enqueued nothing.
@@ -1622,6 +2047,12 @@ export class TaskRunner {
     const { task } = this.load(taskId);
     if (task.status !== "paused") throw new ConflictError("Only a paused task can be resumed.");
     if (task.pause_reason === "cost") throw new ConflictError("This task is waiting on Continue, not on a usage window.");
+    // "Try again" after topping up: forget what was recorded against its provider, or the stage would
+    // pause again before it asks.
+    if (task.pause_reason === "provider") {
+      const stage = task.pipeline[this.defaultStart(task).fromStage];
+      if (stage?.provider) this.providerBack(stage.provider);
+    }
     this.repo.updateTask(taskId, { resume_at: new Date(0).toISOString() });
     this.resumeDue();
   }
@@ -1634,11 +2065,15 @@ export class TaskRunner {
     this.setTask(taskId, { status: "approval" });
     this.bus.publish({ type: "approval.requested", approval });
 
+    const question = toolName === QUESTION_TOOL;
+    const waitMin = question ? this.repo.getSettings().questionWaitMin : 0;
     return new Promise<PermissionResult>((resolve) => {
-      const done = ({ decision, note }: { decision: ApprovalDecision; note: string | null }) => {
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const done = ({ decision, note, answers }: { decision: ApprovalDecision; note: string | null; answers?: Record<string, string> }) => {
         if (!this.resolvers.has(approval.id)) return;
         this.resolvers.delete(approval.id);
-        const decided = this.repo.decideApproval(approval.id, decision, note);
+        if (timer) clearTimeout(timer);
+        const decided = this.repo.decideApproval(approval.id, decision, note, answers ?? null);
         this.bus.publish({ type: "approval.decided", approval: decided });
         const stillPending = this.repo.pendingApprovals(taskId).length > 0;
         const active = this.active.get(taskId);
@@ -1646,6 +2081,7 @@ export class TaskRunner {
           this.setRun(run.id, { status: "running" });
           this.setTask(taskId, { status: active.stageStatus });
         }
+        if (question) return resolve(questionResult(input, decision, note, answers, waitMin));
         resolve(
           decision === "allow"
             ? { behavior: "allow", updatedInput: input }
@@ -1653,21 +2089,34 @@ export class TaskRunner {
         );
       };
       this.resolvers.set(approval.id, done);
+      if (waitMin > 0) {
+        timer = setTimeout(() => done({ decision: "expired", note: `no answer in ${waitMin} min — Claude decided` }), waitMin * 60_000);
+        timer.unref?.();
+      }
       o.signal?.addEventListener("abort", () => done({ decision: "expired", note: "aborted" }), { once: true });
     });
   }
 
-  decideApproval(id: string, decision: "allow" | "deny", note: string | null = null): Approval {
+  /** Answer a question card: question text → the option label(s) you chose, or what you typed. */
+  answerQuestion(id: string, answers: Record<string, string>): Approval {
+    const approval = this.repo.getApproval(id);
+    if (!approval) throw new NotFoundError(`No question ${id}`);
+    if (approval.tool_name !== QUESTION_TOOL) throw new ConflictError("That card is an approval, not a question.");
+    return this.decideApproval(id, "answered", null, answers);
+  }
+
+  decideApproval(id: string, decision: "allow" | "deny" | "answered", note: string | null = null, answers?: Record<string, string>): Approval {
     const approval = this.repo.getApproval(id);
     if (!approval) throw new NotFoundError(`No approval ${id}`);
     if (approval.decision) throw new ConflictError(`Approval already ${approval.decision}.`);
+    if (approval.tool_name === QUESTION_TOOL && decision === "allow") throw new ConflictError("A question needs an answer, not Allow.");
     const resolve = this.resolvers.get(id);
     if (!resolve) {
       const expired = this.repo.decideApproval(id, "expired", "no live run waiting for this approval");
       this.bus.publish({ type: "approval.decided", approval: expired });
       throw new ConflictError("No live run is waiting for this approval (it expired).");
     }
-    resolve({ decision, note });
+    resolve({ decision, note, answers });
     return this.repo.getApproval(id)!;
   }
 
@@ -1737,9 +2186,11 @@ export class TaskRunner {
         if (!outcome.ok) {
           this.setRun(run.id, before); // the chat turn failed; the stage result it belonged to stands
           if (outcome.providerId === ANTHROPIC_PROVIDER_ID && this.pauseForLimit(taskId, outcome.error)) return;
+          if (outcome.providerId !== ANTHROPIC_PROVIDER_ID && !ctl.stopped && (await this.afterProviderOut(taskId, run.stage_index, outcome.providerId, outcome.error, run.id, false)) === "paused") return;
           this.setTask(taskId, { status: "failed", error: outcome.error });
           return;
         }
+        if (outcome.providerId !== ANTHROPIC_PROVIDER_ID) this.providerBack(outcome.providerId);
         const fresh = this.repo.getTask(taskId)!;
         if (this.pipelineComplete(fresh)) this.setTask(taskId, { status: "review" });
         else {

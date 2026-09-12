@@ -1,3 +1,4 @@
+import { mkdirSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
@@ -19,9 +20,57 @@ export const PLAYWRIGHT_PLUGIN_TOOLS = "mcp__plugin_playwright_playwright";
 /** Claude in Chrome: your own Chrome, signed in to your accounts. */
 export const CHROME_PREFIX = "mcp__claude-in-chrome__";
 
-/** `browser` is whichever one this machine has (setup/probe.ts pickBrowser); unset, the server's default is Chrome. */
-export function browserServer(outputDir: string, browser?: "chrome" | "msedge" | "chromium"): McpServerConfig {
+/**
+ * The Playwright server's config when the board also watches the page: the same headless, in-memory
+ * browser, launched with a debugging port the board connects to for the live view (browserWatch.ts).
+ * Playwright still drives it over its own pipe; the port is only for looking.
+ */
+export function liveConfig(browser: "chrome" | "msedge" | "chromium" | undefined, port: number, outputDir: string) {
+  return {
+    browser: {
+      browserName: "chromium",
+      isolated: true,
+      launchOptions: { ...(browser && browser !== "chromium" ? { channel: browser } : {}), headless: true, args: [`--remote-debugging-port=${port}`] },
+    },
+    outputDir,
+  };
+}
+
+/**
+ * `browser` is whichever one this machine has (setup/probe.ts pickBrowser); unset, the server's default
+ * is Chrome. With `watchPort`, the settings go in a config file in `outputDir` so the launch can carry the
+ * debugging port for the live view.
+ */
+export function browserServer(outputDir: string, browser?: "chrome" | "msedge" | "chromium", watchPort?: number): McpServerConfig {
+  if (watchPort) {
+    const config = join(outputDir, "playwright.json");
+    mkdirSync(outputDir, { recursive: true });
+    writeFileSync(config, JSON.stringify(liveConfig(browser, watchPort, outputDir)));
+    return { type: "stdio", command: "npx", args: ["-y", "@playwright/mcp@latest", "--config", config] };
+  }
   return { type: "stdio", command: "npx", args: ["-y", "@playwright/mcp@latest", "--headless", "--isolated", ...(browser ? ["--browser", browser] : []), "--output-dir", outputDir] };
+}
+
+/** What the browser is doing, in words, for the caption under the live view. */
+export function browserCaption(tool: string, input: Record<string, unknown>): string | null {
+  if (!tool.startsWith(PREFIX)) return null;
+  const t = tool.slice(PREFIX.length);
+  const el = typeof input.element === "string" ? `“${input.element.slice(0, 60)}”` : "the page";
+  switch (t) {
+    case "browser_navigate": return `opening ${String(input.url ?? "a page")}`;
+    case "browser_click": return `clicking ${el}`;
+    case "browser_type": return `typing into ${el}`;
+    case "browser_fill_form": return "filling in a form";
+    case "browser_select_option": return `choosing in ${el}`;
+    case "browser_press_key": return `pressing ${String(input.key ?? "a key")}`;
+    case "browser_hover": return `pointing at ${el}`;
+    case "browser_take_screenshot": return "taking a screenshot";
+    case "browser_snapshot": return "reading the page";
+    case "browser_wait_for": return "waiting for the page";
+    case "browser_resize": return "resizing the window";
+    case "browser_navigate_back": return "going back";
+    default: return t.replace(/^browser_/, "").replace(/_/g, " ");
+  }
 }
 
 /** Looking only: reading the page, screenshots, console, network, waiting, resizing, tabs. */

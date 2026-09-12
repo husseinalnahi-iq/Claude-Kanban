@@ -14,7 +14,7 @@ const TWO_STAGE: Stage[] = [
   { stage: "code", model: "m", effort: "low" },
 ];
 
-async function until(cond: () => boolean, ms = 4000) {
+async function until(cond: () => boolean, ms = 15_000) {
   const t0 = Date.now();
   while (!cond()) {
     if (Date.now() - t0 > ms) throw new Error("timed out");

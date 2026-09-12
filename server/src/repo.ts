@@ -4,7 +4,7 @@ import { DEFAULT_BLOCKED_COMMANDS, DEFAULT_VISION_MODEL, SEED_DEBATE, SEED_TIERS
 import type {
   Approval, ApprovalDecision, EventRow, Message, Milestone, Mode, Policy, Project, Run, RunListItem, RunStatus,
   Attachment, Note, MergePolicy, Priority, ProjectEnv, Settings, Stage, StageName, Task, TaskCard, TaskStatus, TaskType, UsageLimit,
-  Provider, RunRole, CostSource, TierRef, Schedule,
+  Provider, RunRole, CostSource, TierRef, Schedule, Chat, ChatMessage, Effort, SpecVersion, ProviderOut, UsageTotals,
 } from "./types.ts";
 import { ANTHROPIC_PROVIDER_ID, DEFAULT_MERGE, EMPTY_ENV } from "./types.ts";
 import { DEFAULT_CHECKLIST } from "./engine/onboarding.ts";
@@ -124,6 +124,42 @@ const toSchedule = (r: Row): Schedule => ({
   created_at: r.created_at as string,
 });
 
+const toChat = (r: Row): Chat => ({
+  id: r.id as string,
+  project_id: r.project_id as string,
+  title: r.title as string,
+  session_id: (r.session_id as string) ?? null,
+  model: r.model as string,
+  effort: r.effort as Effort,
+  cost_usd: Number(r.cost_usd ?? 0),
+  archived_at: (r.archived_at as string) ?? null,
+  created_at: r.created_at as string,
+  updated_at: r.updated_at as string,
+});
+
+const toSpecVersion = (r: Row): SpecVersion => ({
+  id: r.id as string,
+  task_id: r.task_id as string,
+  kind: r.kind as SpecVersion["kind"],
+  spec_md: r.spec_md as string,
+  model: (r.model as string | null) ?? null,
+  effort: (r.effort as Effort | null) ?? null,
+  source_id: (r.source_id as string | null) ?? null,
+  instruction: (r.instruction as string | null) ?? null,
+  summary: (r.summary as string | null) ?? null,
+  cost_usd: Number(r.cost_usd) || 0,
+  created_at: r.created_at as string,
+});
+
+const toChatMessage = (r: Row): ChatMessage => ({
+  id: Number(r.id),
+  chat_id: r.chat_id as string,
+  role: r.role as ChatMessage["role"],
+  text: r.text as string,
+  meta: json<ChatMessage["meta"]>(r.meta_json, {}),
+  ts: r.ts as string,
+});
+
 const toAttachment = (r: Row): Attachment => ({
   id: r.id as string,
   task_id: r.task_id as string,
@@ -174,6 +210,7 @@ const toApproval = (r: Row): Approval => ({
   decision: (r.decision as ApprovalDecision) ?? null,
   decided_at: (r.decided_at as string) ?? null,
   note: (r.note as string) ?? null,
+  answers: json<Record<string, string> | null>(r.answer_json, null),
   created_at: r.created_at as string,
 });
 
@@ -262,8 +299,16 @@ function normaliseTiers(raw: Record<string, unknown>): Settings["tiers"] {
   return { cheap: one(raw.cheap, SEED_TIERS.cheap), balanced: one(raw.balanced, SEED_TIERS.balanced), strong: one(raw.strong, SEED_TIERS.strong) };
 }
 
+function tierOrNull(v: unknown): TierRef | null {
+  const o = v as Partial<TierRef> | null;
+  return o && typeof o.provider === "string" && o.provider && typeof o.model === "string" && o.model ? { provider: o.provider, model: o.model } : null;
+}
+
 function normaliseProvider(p: Provider): Provider {
-  return { ...p, enabled: p.enabled !== false, mayEditFiles: p.mayEditFiles === true, models: Array.isArray(p.models) ? p.models : [], authRef: p.authRef ?? "" };
+  return {
+    ...p, enabled: p.enabled !== false, mayEditFiles: p.mayEditFiles === true, models: Array.isArray(p.models) ? p.models : [], authRef: p.authRef ?? "",
+    fallback: tierOrNull(p.fallback),
+  };
 }
 
 export class Repo {
@@ -297,10 +342,17 @@ export class Repo {
       delegateTimeoutMin: Number(m.get("delegateTimeoutMin") ?? 30),
       autoSizing: (m.get("autoSizing") ?? "true") !== "false",
       autoResume: (m.get("autoResume") ?? "true") !== "false",
+      claudeFallback: tierOrNull(json<unknown>(m.get("claudeFallback"), null)),
       keepAwake: (m.get("keepAwake") ?? "true") !== "false",
+      questionWaitMin: Number(m.get("questionWaitMin") ?? 0),
+      chatModel: m.get("chatModel") || "claude-sonnet-5",
+      chatEffort: (m.get("chatEffort") as Effort) || "medium",
+      specModel: m.get("specModel") || "claude-opus-5",
+      specEffort: (m.get("specEffort") as Effort) || "high",
       loadUserPlugins: (m.get("loadUserPlugins") ?? "true") !== "false",
       browserChecks: (m.get("browserChecks") ?? "true") !== "false",
       chromeInSupervised: m.get("chromeInSupervised") === "true",
+      liveView: (m.get("liveView") ?? "true") !== "false",
       maxCostPerTaskUsd: Number(m.get("maxCostPerTaskUsd") ?? 15),
       maxRepeatedToolCalls: Number(m.get("maxRepeatedToolCalls") ?? 8),
       eventRetentionDays: Number(m.get("eventRetentionDays") ?? 30),
@@ -486,6 +538,84 @@ export class Repo {
 
   deleteSchedule(id: string): void {
     this.db.prepare("DELETE FROM schedules WHERE id = ?").run(id);
+  }
+
+  // ---------- side chat ----------
+  listChats(projectId: string): Chat[] {
+    return (this.db.prepare("SELECT * FROM chats WHERE project_id = ? ORDER BY updated_at DESC").all(projectId) as Row[]).map(toChat);
+  }
+
+  getChat(id: string): Chat | undefined {
+    const r = this.db.prepare("SELECT * FROM chats WHERE id = ?").get(id) as Row | undefined;
+    return r && toChat(r);
+  }
+
+  createChat(c: { project_id: string; title: string; model: string; effort: Effort }): Chat {
+    const id = newId("c");
+    const now = nowIso();
+    this.db
+      .prepare("INSERT INTO chats(id, project_id, title, model, effort, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(id, c.project_id, c.title, c.model, c.effort, now, now);
+    return this.getChat(id)!;
+  }
+
+  updateChat(id: string, patch: Partial<Pick<Chat, "title" | "session_id" | "model" | "effort" | "cost_usd" | "archived_at">>): Chat {
+    const { sets, vals } = setClause(patch as Record<string, unknown>, { title: str, session_id: str, model: str, effort: str, cost_usd: num, archived_at: str });
+    if (sets.length) this.db.prepare(`UPDATE chats SET ${sets.join(", ")}, updated_at = ? WHERE id = ?`).run(...vals, nowIso(), id);
+    return this.getChat(id)!;
+  }
+
+  deleteChat(id: string): void {
+    this.db.prepare("DELETE FROM chats WHERE id = ?").run(id);
+  }
+
+  chatMessages(chatId: string, limit = 500): ChatMessage[] {
+    const rows = this.db
+      .prepare("SELECT * FROM (SELECT * FROM chat_messages WHERE chat_id = ? ORDER BY id DESC LIMIT ?) ORDER BY id")
+      .all(chatId, limit) as Row[];
+    return rows.map(toChatMessage);
+  }
+
+  addChatMessage(m: { chat_id: string; role: ChatMessage["role"]; text: string; meta?: ChatMessage["meta"] }): ChatMessage {
+    const res = this.db
+      .prepare("INSERT INTO chat_messages(chat_id, role, text, meta_json, ts) VALUES (?, ?, ?, ?, ?)")
+      .run(m.chat_id, m.role, m.text, JSON.stringify(m.meta ?? {}), nowIso());
+    return toChatMessage(this.db.prepare("SELECT * FROM chat_messages WHERE id = ?").get(Number(res.lastInsertRowid)) as Row);
+  }
+
+  /** What every side chat has cost, for the dashboard. */
+  chatCost(projectId?: string): number {
+    const r = (projectId
+      ? this.db.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS c FROM chats WHERE project_id = ?").get(projectId)
+      : this.db.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS c FROM chats").get()) as { c: number };
+    return Number(r.c) || 0;
+  }
+
+  // ---------- spec versions ----------
+  specVersions(taskId: string): SpecVersion[] {
+    // rowid breaks ties between versions saved in the same millisecond.
+    return (this.db.prepare("SELECT * FROM spec_versions WHERE task_id = ? ORDER BY created_at, rowid").all(taskId) as Row[]).map(toSpecVersion);
+  }
+
+  getSpecVersion(id: string): SpecVersion | undefined {
+    const r = this.db.prepare("SELECT * FROM spec_versions WHERE id = ?").get(id) as Row | undefined;
+    return r && toSpecVersion(r);
+  }
+
+  addSpecVersion(v: Omit<SpecVersion, "id" | "created_at">): SpecVersion {
+    const id = newId("sv");
+    this.db
+      .prepare("INSERT INTO spec_versions(id, task_id, kind, spec_md, model, effort, source_id, instruction, summary, cost_usd, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(id, v.task_id, v.kind, v.spec_md, v.model, v.effort, v.source_id, v.instruction, v.summary, v.cost_usd, nowIso());
+    return this.getSpecVersion(id)!;
+  }
+
+  /** What every ✦ Rewrite has cost, for the dashboard. */
+  specCost(projectId?: string): number {
+    const r = (projectId
+      ? this.db.prepare("SELECT COALESCE(SUM(v.cost_usd), 0) AS c FROM spec_versions v JOIN tasks t ON t.id = v.task_id WHERE t.project_id = ?").get(projectId)
+      : this.db.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS c FROM spec_versions").get()) as { c: number };
+    return Number(r.c) || 0;
   }
 
   // ---------- attachments ----------
@@ -723,8 +853,10 @@ export class Repo {
     return r && toApproval(r);
   }
 
-  decideApproval(id: string, decision: ApprovalDecision, note: string | null): Approval {
-    this.db.prepare("UPDATE approvals SET decision = ?, decided_at = ?, note = ? WHERE id = ? AND decision IS NULL").run(decision, nowIso(), note, id);
+  decideApproval(id: string, decision: ApprovalDecision, note: string | null, answers: Record<string, string> | null = null): Approval {
+    this.db
+      .prepare("UPDATE approvals SET decision = ?, decided_at = ?, note = ?, answer_json = ? WHERE id = ? AND decision IS NULL")
+      .run(decision, nowIso(), note, answers ? JSON.stringify(answers) : null, id);
     return this.getApproval(id)!;
   }
 
@@ -823,6 +955,64 @@ export class Repo {
       resets_at: r.resets_at === null ? null : Number(r.resets_at),
       updated_at: r.updated_at as string,
     }));
+  }
+
+  // ---------- delegated providers that ran out ----------
+  setProviderOut(o: Omit<ProviderOut, "updated_at">): ProviderOut {
+    this.db
+      .prepare(
+        `INSERT INTO provider_limits(provider_id, kind, reason, resets_at, updated_at) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(provider_id) DO UPDATE SET kind = excluded.kind, reason = excluded.reason, resets_at = excluded.resets_at, updated_at = excluded.updated_at`,
+      )
+      .run(o.provider_id, o.kind, o.reason, o.resets_at, nowIso());
+    return this.providerOuts().find((x) => x.provider_id === o.provider_id)!;
+  }
+
+  /** Returns whether there was anything to clear. */
+  clearProviderOut(providerId: string): boolean {
+    return Number(this.db.prepare("DELETE FROM provider_limits WHERE provider_id = ?").run(providerId).changes) > 0;
+  }
+
+  providerOuts(): ProviderOut[] {
+    return (this.db.prepare("SELECT * FROM provider_limits ORDER BY provider_id").all() as Row[]).map((r) => ({
+      provider_id: r.provider_id as string,
+      kind: r.kind as ProviderOut["kind"],
+      reason: r.reason as string,
+      resets_at: (r.resets_at as string) ?? null,
+      updated_at: r.updated_at as string,
+    }));
+  }
+
+  /** What the board's runs sent to each delegated provider since a time: runs, tokens and cost. */
+  providerTotals(sinceIso: string): Map<string, UsageTotals> {
+    const rows = this.db
+      .prepare(
+        `SELECT provider, COUNT(*) AS runs, COALESCE(SUM(input_tokens), 0) AS inp, COALESCE(SUM(output_tokens), 0) AS outp, COALESCE(SUM(cost_usd), 0) AS cost
+         FROM runs WHERE provider IS NOT NULL AND started_at >= ? GROUP BY provider`,
+      )
+      .all(sinceIso) as { provider: string; runs: number; inp: number; outp: number; cost: number }[];
+    return new Map(rows.map((r) => [r.provider, { runs: Number(r.runs), input_tokens: Number(r.inp), output_tokens: Number(r.outp), cost_usd: Number(r.cost) }]));
+  }
+
+  /** The last things a run's model said, newest last: what a model taking over needs to know. */
+  lastAssistantText(runId: string, maxChars = 2000): string {
+    const rows = this.db.prepare("SELECT payload_json FROM events WHERE run_id = ? AND type = 'assistant' ORDER BY id DESC LIMIT 12").all(runId) as { payload_json: string }[];
+    const parts: string[] = [];
+    let size = 0;
+    for (const r of rows) {
+      let text = "";
+      try {
+        const content = (JSON.parse(r.payload_json) as { message?: { content?: { type: string; text?: string }[] } }).message?.content ?? [];
+        text = content.filter((b) => b.type === "text" && b.text?.trim()).map((b) => b.text!.trim()).join("\n");
+      } catch {
+        continue;
+      }
+      if (!text) continue;
+      if (size + text.length > maxChars) break;
+      parts.unshift(text);
+      size += text.length;
+    }
+    return parts.join("\n\n");
   }
 
   // ---------- milestones ----------

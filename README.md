@@ -22,7 +22,9 @@ lands safely, and an honest record of what everything cost.
 | “I can only watch one Claude session at a time.” | Queue as many tasks as you like; independent ones run **in parallel**. Autonomous tasks each get their own copy of the project (a git worktree), so they never edit the same files. |
 | “Claude did something I didn't want.” | **Supervised** tasks turn every file change and command into an **Allow / Deny** card. **Autonomous** tasks work in their own copy and change nothing until you approve the result. Dangerous commands are blocked outright. |
 | “The best model for everything is slow and uses up my limit.” | Each task is a **pipeline**: a strong model plans, an efficient one codes, a cheap one reviews. You choose per stage — or use **free local models** (LM Studio, Ollama) and others (OpenRouter, GLM, Kimi…). |
-| “I hit my usage limit halfway through and lost the work.” | The task **pauses** and **carries on by itself** when your limit resets, in the same session. |
+| “I hit my usage limit halfway through and lost the work.” | The task **pauses** and **carries on by itself** when your limit resets, in the same session — or carries on with another provider you picked. The same goes for a GLM, Kimi or Qwen plan that runs out. |
+| “I just want to talk about my project and have the tasks written for me.” | The **✦ Chat** panel answers questions about your code and turns what you want into task cards, which you start or schedule. It reads, and never changes code by itself. |
+| “Claude guessed at a choice only I could make.” | When a decision really needs you, Claude **asks**: the card shows *asks you* with options to pick. It waits for your answer, or decides after a time you set. |
 | “I want Claude to work while I sleep.” | **Schedule** a card for 2 AM, for when your limit resets, or every chosen day. The computer is kept awake while work is waiting, and you wake up to it in Review. |
 | “I have no idea what that cost or where the time went.” | Every task shows its **cost, tokens and time**; the **Dashboard** adds it all up. |
 | “A big job is too much for one prompt.” | **Improve** turns a rough idea into a clear spec and splits it into subtasks with dependencies; the board runs them in the right order. |
@@ -93,6 +95,72 @@ opens that page for you if not). A ZIP copy does not update itself — the one-l
 
 The **Tour** tab explains every feature in a few minutes.
 
+**Wrote it in a hurry?** Open the card and press **✦ Rewrite** on its Spec. Claude (Opus, by default)
+reads the part of your project the request is about, then rewrites it into a clear spec: which files are
+involved, what “done” means as checks you can test, and how to verify it. Your own text is always kept:
+**↩ Back to yours** puts it back, **Try another model** rewrites your words again with a different model
+or focus, and **Versions** lists every version to preview or reuse.
+
+## Ask about your project
+
+Press **✦ Chat** in the top bar (or the **c** key). A panel slides in beside the board: ask how
+something works, what to do next, or describe a feature. Claude reads your project to answer, and
+when you want something built it writes a **task card** for it — a chip under the reply lets you
+**open** or **start** it, or ask it to schedule the card for tonight. It never changes code from the
+chat; the work still goes through the card, with your approvals and review.
+
+- **Several chats** per project: **+ New** starts one, the title at the top switches between them,
+  and **archive** tucks one away (restore or delete it from *Archived*).
+- It uses **Sonnet at medium effort** by default — a good balance of quality and price for questions.
+  Switch model or effort per chat at the bottom of the panel, or change the default in Settings →
+  *Side chat*. Each chat shows what it has cost.
+
+## Watch a task use the browser
+
+When a task changes something you can see, it opens your app in its own background browser to check
+it. While it does, its card shows a pulsing **live** chip: click it (or open the task's **Browser** tab)
+to watch the page as Claude clicks, types and scrolls, with what it is doing written underneath. After
+the run, the last picture stays; every screenshot it took is in the **Files** tab. Nothing pops up over
+your work, and the picture is streamed only while you are watching. Switch it off in Settings →
+*Browser & plugins* → *Live view*.
+
+## Claude Code and Claude Kanban
+
+| | Claude Code | Claude Kanban |
+|---|---|---|
+| Read and change files, run commands | yes | yes — every task, with approval cards in supervised tasks |
+| A terminal you type in | it is one | **Terminal** panel (Ctrl + \`) |
+| Chat about the project | yes | **✦ Chat** — reads code, writes task cards |
+| Claude asks you mid-task | yes | yes — a question card on the task |
+| Test your app in a browser | Playwright plugin | built in, one browser per task, and you can **watch it live** |
+| Use your signed-in Chrome | Claude in Chrome | supervised tasks, every action approved (Settings → Browser & plugins) |
+| Your skills, plugins, hooks, CLAUDE.md | yes | loaded into every run |
+| Many sessions at once, costs, schedules, safe merging | — | what the board is for |
+| Control other desktop apps | — | not built: a board that can click anything on your PC is a risk it does not take |
+
+## Your terminal
+
+**Terminal** in the top bar (or **Ctrl + `**) opens a real terminal under the board, already in the
+project's folder — PowerShell on Windows, your usual shell on a Mac or Linux. **+** opens another tab;
+**Terminal here** on a task opens one in that task's own copy of the project, so you can run or try
+exactly what Claude built. Hiding the panel keeps your shells running; **×** on a tab ends one. It is
+your terminal, not Claude's: commands you type are not checked or blocked by the board.
+
+On Windows it is ready for everyday tools out of the box: `npm` and `npx` work even where Windows
+blocks scripts (the terminal's own shell allows them; no system setting changes), and accented
+letters and other scripts display correctly. **Setup** lists what makes it better: *The built-in
+terminal* (with a one-click **Repair** if its terminal part is missing) and, optionally,
+**PowerShell 7** — one click installs it, and new terminals use it straight away.
+
+## Answer Claude's questions
+
+Sometimes only you can make a call: which design, which of two approaches, what a vague request
+meant. Claude then stops and asks. The card shows **asks you**, the bell rings, and the question
+appears in the task (and on the **Approvals** tab) with options to pick; you can also type your own
+answer. **Let Claude decide** hands it back. By default the task waits for you, however long it takes.
+To keep night work moving instead, Settings → Runs & limits → *When Claude asks you a question* lets
+Claude decide after 15 minutes to 4 hours; it says what it chose in its summary.
+
 ## Let it work while you sleep
 
 - **Start a card later:** when you create a task, pick **Later** (a date and time) or **After reset**
@@ -107,6 +175,33 @@ The **Tour** tab explains every feature in a few minutes.
   & limits, on by default) stops the computer sleeping while work is waiting; the screen can still turn
   off.
 
+## Let a cheaper subscription do the typing
+
+Claude plans; another model can write the code. Monthly coding plans from other companies work, not only
+pay-per-use keys, and they run through the real Claude Code, so approvals, worktrees and board tools all
+keep working:
+
+| Plan | About | Add it as |
+|---|---|---|
+| GLM Coding Plan (z.ai) | $18 a month | **GLM (z.ai)** |
+| Kimi Code | $19 a month | **Kimi Code (subscription)** |
+| Ollama Pro (GLM, Kimi, Qwen… in Ollama's cloud) | $20 a month | **Ollama (agentic)**, then run `ollama signin` |
+| Alibaba Token Plan (Qwen) | $18 a month | **Qwen (Alibaba Token Plan)**. Alibaba allows it for interactive use only, so long unattended runs may break its terms |
+
+1. **Settings → Providers → Add from a preset**, pick the plan, paste its key and press **Test**.
+2. In a task's pipeline (or the default one), leave **Plan** on Claude and set **Code** to the new provider.
+
+**When it runs out mid-task:** a used-up window (5-hour, weekly) pauses the task, which carries on by
+itself when the window resets, in the same session. Credit that ran out marks the card **needs you**:
+open it and either **Switch & continue** on another provider (the next model is told what the last one
+did and finds its changes in place) or top up and press **Try again**. To skip the question, set
+**When it runs out** on the provider (Settings → Providers) to carry on somewhere else straight away.
+The same works for Claude: Settings → Runs & limits → *When Claude's usage runs out*.
+
+**What each has left:** click the usage meters in the top bar. Below Claude's windows, **Other
+providers** shows GLM's and Kimi Code's own 5-hour and weekly use, OpenRouter's credit and the Kimi
+API's balance, plus what the board sent each one this week. A provider that is out shows in the top bar.
+
 ## Update or remove
 
 - **Update:** run the install line again. Your projects and tasks are kept — they live in
@@ -119,7 +214,8 @@ The **Tour** tab explains every feature in a few minutes.
 The board runs on your computer and keeps its data there. It has no accounts, ads or tracking. Your
 tasks talk to Anthropic through Claude Code, just as Claude Code does on its own — or to another
 provider only if you add one. Running tasks uses your Claude plan's usage (or API credit); the board
-shows your 5-hour and weekly usage in the top bar and what each task cost.
+shows your 5-hour and weekly usage in the top bar, your other providers' plans under it, and what each
+task cost.
 
 ## If something goes wrong
 
@@ -131,6 +227,9 @@ shows your 5-hour and weekly usage in the top bar and what each task cost.
   open a new one, and paste the install line again.
 - **The browser says the page cannot be reached:** the board is not running — double-click the icon.
 - **Something is missing or red:** open the **Setup** tab; it checks everything and offers a fix.
+- **The terminal says "basic mode":** its terminal part did not install, so commands work but
+  full-screen programs (editors, pickers) do not. Open **Setup** → *The built-in terminal* →
+  **Repair**; new terminals use the full one as soon as it finishes.
 - **A scheduled task did not run overnight:** the board has to be open, and the computer awake. A laptop
   can still sleep when its lid is closed: in Windows, Control Panel → Power Options → *Choose what
   closing the lid does* → *Do nothing* (when plugged in).
@@ -298,6 +397,25 @@ not support fast mode simply runs at standard speed.
 
 There is no "slow / balanced / fast" setting in Claude; these two controls are what exists.
 
+## Claude models: picked, not typed
+
+**Settings → Models & pipeline → Claude models** fills itself from your Claude login: the board asks
+Claude Code which models your plan has (free — it reads Claude Code's startup handshake and closes the
+session before any message is sent), with each model's name, what it is for and which effort levels it
+takes. Every row is marked: ✓ your login has it, **!** not on its list (probably a typo — a *use
+claude-sonnet-5* button fixes it; an older model can still work), **✕** not a Claude model id at all,
+so a run on it fails. Models your login has that are missing from the list appear as **+ Fable 5.1**
+chips; the Add box is a dropdown of them, and a brand-new id can still be typed the day it ships.
+
+The same check follows every Claude pick — pipeline stages, right-sizing tiers, the plan critic, the
+triage, vision and side-chat models: a bad one gets a ⚠ on its picker and a banner at the top of
+Settings, and **Setup** lists it under *Claude models in your settings*. A stage's effort box offers
+only the levels its model takes (Haiku has none). **Refresh** asks again after Claude ships a model.
+
+Ollama, LM Studio, OpenRouter and the other providers need no list: switch a picker's first box from
+`claude` to the provider and it shows what that provider has right now (below). The Claude models
+section shows one line per provider — how many models are ready — with a link to Providers.
+
 ## Other models: delegation and plan debate
 
 Every stage runs on Claude through your Claude Code login by default. It does not have to. A stage can
@@ -309,10 +427,13 @@ Providers**; pick one per stage in any pipeline editor. Keys live in the board's
 
 Three ways to reach another model, each a different trade-off:
 
-- **Claude Code on another endpoint** (GLM/z.ai, Kimi, MiniMax, OpenRouter, Ollama, LM Studio). The real Claude
+- **Claude Code on another endpoint** (GLM/z.ai, Kimi Code, the Kimi API, Alibaba's Qwen Token Plan,
+  MiniMax, OpenRouter, Ollama, LM Studio). The real Claude
   Code, pointed at an Anthropic-shaped API with an environment override. Everything keeps working — the
   board tools, approvals, hooks, worktrees, the transcript — only the model behind the API changes.
-  Effort and fast mode are Claude-only, so they are switched off for these.
+  Effort and fast mode are Claude-only, so they are switched off for these. The key goes out as a bearer
+  token (`ANTHROPIC_AUTH_TOKEN`), or as an API key (`ANTHROPIC_API_KEY`) for endpoints that document it
+  that way (Kimi Code); every Claude alias, Fable included, is pinned to the chosen model.
 - **A plain chat API** (OpenAI-compatible: OpenRouter, Ollama, anything). Text in, text out, no tools —
   so it is allowed on **plan and review only**, with the diff or the repository's file list put into the
   prompt. Good for a critique or a second opinion.
@@ -336,15 +457,37 @@ Studio** (≥ 0.4.1, server on, port 1234) it is what you downloaded, loaded one
 quantisation, and a warning when a model is loaded with less than the 32k context Claude Code needs.
 For OpenRouter it is the whole list, split into *Free* and *Paid* with the price per million tokens
 and the context size. Type to filter, or type any id to use it as it is. Other providers show the
-models you listed.
+models you listed. A picked model the provider's live list does not have (a typo, or one you removed)
+gets an amber ⚠ on the picker.
 The provider dropdown's last entry, **+ Add a provider**, opens Settings → Providers in a new tab.
 
 **Cost** for a non-Claude model is estimated from the prices you enter (USD per million tokens) and
 labelled *est.*; with no price of yours, a model picked from OpenRouter's list uses OpenRouter's price.
 A model with no price at all is shown as *subscription* — $0, with the tokens still counted.
 The board meters each stage itself against the per-stage ceiling, since the SDK cannot price a model id
-it does not know. A foreign provider's rate limit fails the task rather than pausing it — the pause
-timer is tied to Claude's own usage windows.
+it does not know.
+
+**When a provider runs out** (D194). A delegated stage's error is read for what it is
+(`engine/providers/limits.ts`): a **window** (z.ai 1308/1310, Kimi Code's 5-hour and weekly 403s,
+Ollama's session limit…), **credit** (z.ai 1113, HTTP 402, "insufficient balance", an expired plan) or
+**busy** (concurrency, 429 with no usage words). Anything else is an ordinary failure. The provider is
+recorded as out (`provider_limits`), with its reset time from the message (z.ai's bare times are read as
+Beijing time), from the provider's usage API, or, failing both, a retry after 30 minutes that doubles
+up to 4 hours. Then, in order: the provider's **fallback** (`Provider.fallback`) takes the stage over at
+once; otherwise a window pauses the task (`pause_reason: "provider"`) until the reset, and credit pauses
+it with no resume time, for you. Switching runs the stage again on the new model, with a handover in its
+prompt: where the changes are (committed as `[failed]` in a worktree) and what the last model said. At
+most three moves per run. While a provider is out until a known time, queued work whose next stage is on
+it waits in the queue, and a stage about to start on it pauses without calling it. A stage that succeeds
+clears the record. Claude's own limit can move to `Settings.claudeFallback` the same way.
+`POST /api/tasks/:id/switch {provider, model, remember}` is the pause card's **Switch & continue**.
+
+**Usage** (D195). `GET /api/providers/usage` returns each enabled provider's own figures where it has an
+API for them (`engine/providers/usage.ts`): z.ai's `/api/monitor/usage/quota/limit` (5-hour and weekly
+percentages), Kimi Code's `/coding/v1/usages`, OpenRouter's `/api/v1/credits`, Moonshot's balance. It
+adds what the board's runs sent there in the last 5 hours and 7 days, and the out record. Reads are free,
+cached for 5 minutes, and a key only goes to its own provider's host. A window the provider says is used
+up marks it out before any stage fails on it.
 
 **Plan debate** (Settings → Models, or per stage) sends a finished plan to a second model, which lists
 its objections; the planner then answers each and revises. The task stops and shows you the original
@@ -374,6 +517,21 @@ Settings.
 
 New tasks are also classified automatically (type, labels) when Claude is confident. Priority is only
 ever *suggested* — a wrong label is worse than no label.
+
+**✦ Rewrite** (on the Spec itself) goes deeper than Improve on one thing: the spec. Improve is the quick
+intake call — a cheap model with no access to your code that also sizes and splits the task. Rewrite
+is one read-only session on a strong model (**Settings → Runs & limits → Spec rewrite**: Opus 5 at
+high by default, any Claude model and effort) with `Read`, `Glob` and `Grep` in the task's worktree or
+the project, the project's CLAUDE.md and memory, a structured answer, and a $3 ceiling. Its progress
+shows live ("reading src/search.js"), and it can be stopped.
+
+Every version is stored in `spec_versions`: your text before the first rewrite, each rewrite with its
+model, effort, cost, one-line summary and what you asked it to focus on, and any edit you made in
+between. A rewrite always starts from **your** latest words, never from an earlier rewrite, so two
+models are compared on the same input. Going back to a version first saves what is there now, so no
+text is ever lost. Rewrite costs appear on the dashboard as *spec rewrites*. API:
+`GET /api/tasks/:id/spec`, `POST …/spec/rewrite {model?, effort?, instruction?}`, `…/spec/stop`,
+`…/spec/restore {version_id}`; progress arrives as `spec.rewrite` events.
 
 ---
 
@@ -543,6 +701,10 @@ survives a restart of the board; and **now** on the card tries immediately if yo
 wait. A genuine error is never disguised as a pause — only a usage limit pauses. Turn it off in
 Settings → *Runs & limits* and a limit fails the task as before, for you to Retry.
 
+Rather keep going? **When Claude's usage runs out** (same place) can carry the stage on with another
+provider instead of waiting, and a paused card offers **Switch & continue** either way. Other providers'
+plans show under Claude's in the same panel, and pause and resume the same way (see *Other models*).
+
 ## Schedules
 
 A card can carry a **scheduled start** (`start_at`): an ISO time, or `reset` for the next reset of the
@@ -563,6 +725,39 @@ local time; each time it comes round it creates a fresh card, titled with the da
   leaves the computer unable to sleep.
 - API: `POST /api/tasks/:id/schedule`, `GET /api/projects/:id/schedules`, `POST /api/schedules`,
   `PATCH` / `DELETE /api/schedules/:id`, `POST /api/schedules/:id/run`.
+
+## Side chat
+
+Each chat is one Claude Code session in the project folder, resumed on every message
+(`resume: session_id`) with `includePartialMessages` so replies stream (`chat.delta`, sent only to the
+socket watching that chat). It loads the project's `CLAUDE.md` (`settingSources: ["project"]`) but not
+your global tool servers (`strictMcpConfig`), so it stays quick and cheap. Read tools are allowed;
+`Edit`, `Write`, `Bash`, subagents and `AskUserQuestion` are not offered, and anything else is refused.
+Its own board server can list and read cards, create cards (always in Backlog, under the project's
+mode policy), edit Backlog cards, and queue or schedule them — never in another project. The system
+prompt tells it the local time and offset, so "tonight at 3" schedules correctly, and never to queue or
+schedule a card you did not ask to run. API: `/api/projects/:id/chats`, `/api/chats/:id`
+(`PATCH` title/model/effort/archived, `DELETE`), `/api/chats/:id/messages`, `/send`, `/stop`.
+
+## Live browser view
+
+The Playwright server a run gets is launched from a config file (`liveConfig` in `engine/browser.ts`)
+that keeps it headless and in memory and adds a `--remote-debugging-port`. The board connects to that
+port over the Chrome DevTools Protocol (`engine/browserWatch.ts`): it polls `/json/list` for the task's
+page — the site it last navigated to, else a local page, never an extension's tab — and, only while a
+viewer is attached, runs `Page.startScreencast` (JPEG, about 5 frames a second, every frame acked). The
+watched page is brought to the front with focus emulation, because Chrome barely paints a background
+tab. Frames reach the Browser tab over `/ws/browser/:taskId`; `browser.live` events drive the card chip.
+The last frame is kept after the run. Captions come from the run's `browser_*` tool calls.
+
+## Built-in terminal
+
+Shells run on the server through `node-pty` (an optional dependency with ready-built binaries; if it
+fails to install, the board falls back to plain pipes and says "basic mode" in the panel and on Setup).
+A shell only opens in a registered project's folder or one of its tasks' worktrees, and its socket
+(`/ws/terminal/:id`) sits behind the same local-only Host/Origin guard as the rest of the API, so no
+website can reach it. Each shell keeps about 200 KB of scrollback, replayed when the panel reopens;
+every shell ends when the board stops. API: `GET/POST /api/terminals`, `DELETE /api/terminals/:id`.
 
 ## What a task costs
 

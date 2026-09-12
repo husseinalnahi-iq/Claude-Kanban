@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { isQuestion, questionTitle } from "./questions.ts";
 import type { Task, UsageLimit, WsMessage } from "../../../server/src/types.ts";
 import { api } from "./api.ts";
 import { clock, until } from "./format.ts";
@@ -24,7 +25,7 @@ export interface AlertKindInfo {
 }
 
 export const ALERT_KINDS: AlertKindInfo[] = [
-  { kind: "approval", label: "Needs your approval", hint: "A supervised run is waiting on a card", color: "var(--color-rose)", icon: "✋", defaults: { sound: true, toast: true, desktop: true } },
+  { kind: "approval", label: "Needs you", hint: "A supervised run is waiting on a card, or Claude asked you a question", color: "var(--color-rose)", icon: "✋", defaults: { sound: true, toast: true, desktop: true } },
   { kind: "review", label: "Ready for review", hint: "Every stage finished; your turn to look", color: "var(--color-lime)", icon: "◉", defaults: { sound: true, toast: true, desktop: true } },
   { kind: "done", label: "Landed", hint: "Approved and merged", color: "var(--color-moss)", icon: "✓", defaults: { sound: true, toast: true, desktop: false } },
   { kind: "failed", label: "Failed", hint: "A run, a check or a review said no", color: "var(--color-rust)", icon: "✕", defaults: { sound: true, toast: true, desktop: true } },
@@ -195,6 +196,8 @@ function onTask(t: Task) {
     if (cur === "done") taskAlert("done", t, "");
     else if (cur === "failed" && t.error !== "stopped by user") taskAlert("failed", t, firstLine(t.error));
     else if (cur === "paused" && t.pause_reason === "cost") taskAlert("approval", t, "reached its cost ceiling — Continue or Stop");
+    else if (cur === "paused" && t.pause_reason === "provider" && !t.resume_at) taskAlert("approval", t, `${firstLine(t.note).split(":")[0]} — switch provider, or top up and try again`);
+    else if (cur === "paused" && t.pause_reason === "provider") taskAlert("paused", t, `${firstLine(t.note).split(":")[0]} · resumes ${until(t.resume_at)} · ${clock(t.resume_at!)}`);
     else if (cur === "paused") taskAlert("paused", t, t.resume_at ? `resumes ${until(t.resume_at)} · ${clock(t.resume_at)}` : "resumes when the window resets");
     else if (prev === "paused" && ACTIVE.has(cur)) taskAlert("resumed", t, "");
     else if ((prev === "queued" || prev === "backlog" || prev === "failed") && (cur === "planning" || cur === "running")) taskAlert("started", t, "");
@@ -242,7 +245,8 @@ export function watchAlerts(m: WsMessage) {
   } else if (m.type === "limits.updated") onLimits(m.limits);
   else if (m.type === "approval.requested" && seeded) {
     const a = m.approval;
-    raise({ kind: "approval", title: a.task_title ?? "A task", body: `Wants to: ${a.title ?? a.tool_name}`, taskId: a.task_id, projectId: a.project_id });
+    const body = isQuestion(a) ? `Asks: ${questionTitle(a)}` : `Wants to: ${a.title ?? a.tool_name}`;
+    raise({ kind: "approval", title: a.task_title ?? "A task", body, taskId: a.task_id, projectId: a.project_id });
   }
 }
 

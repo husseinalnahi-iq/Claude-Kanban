@@ -14,6 +14,8 @@ export async function systemRoutes(app: FastifyInstance, { repo, runner }: AppDe
   app.post("/limits/refresh", async () => runner.refreshLimits());
   /** Whether fast mode can run on this account — free to check, it never reaches the model. */
   app.get("/fast-mode", async (req) => runner.fastModeStatus((req.query as { force?: string }).force === "1"));
+  /** The Claude models your login can use — free, read from Claude Code's startup handshake. */
+  app.get("/claude/models", async (req) => runner.claudeModels((req.query as { force?: string }).force === "1"));
   /** The plugins and tool servers a run gets — also free, read from the session's init message. */
   app.get("/session-tools", async (req) => runner.sessionTools((req.query as { force?: string }).force === "1"));
 }

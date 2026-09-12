@@ -214,6 +214,13 @@ export async function taskRoutes(app: FastifyInstance, { repo, bus, runner }: Ap
   /** A task paused at its cost ceiling: spend one more stage's worth, or give up. */
   app.post("/tasks/:id/continue", async (req) => runner.continueTask(idOf(req)));
   app.post("/tasks/:id/stop-paused", async (req) => runner.stopPaused(idOf(req)));
+  /** A task paused because Claude or a provider ran out: carry its stage on elsewhere, now. */
+  app.post("/tasks/:id/switch", async (req) => {
+    const body = z
+      .object({ provider: z.string().trim().min(1).max(64), model: z.string().trim().min(1).max(200), remember: z.boolean().optional() })
+      .parse(req.body ?? {});
+    return runner.switchStage(idOf(req), { provider: body.provider, model: body.model }, body.remember ?? false);
+  });
   app.post("/tasks/:id/resume", async (req) => {
     runner.resumeNow(idOf(req));
     return mustGet(idOf(req));

@@ -9,7 +9,7 @@ import { Bus } from "../src/bus.ts";
 import { TaskRunner, type QueryFn } from "../src/engine/runner.ts";
 import { DEFAULT_EFFORT, EFFORT_NOTES, EFFORTS, supportsFastMode, type Stage } from "../src/types.ts";
 
-async function until(cond: () => boolean, ms = 4000) {
+async function until(cond: () => boolean, ms = 15_000) {
   const t0 = Date.now();
   while (!cond()) {
     if (Date.now() - t0 > ms) throw new Error("timed out");

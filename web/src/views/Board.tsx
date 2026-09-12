@@ -10,6 +10,9 @@ import { NewTaskForm } from "../components/forms.tsx";
 import { LimitBanner, SerialSwitch } from "../components/QueueControls.tsx";
 import { DepGraph } from "../components/DepGraph.tsx";
 import { SchedulesPanel, startLabel, useSchedules } from "../components/SchedulesPanel.tsx";
+import { isQuestion } from "../lib/questions.ts";
+import { liveTasks } from "../components/LiveBrowser.tsx";
+import { openTaskOn } from "./TaskDrawer.tsx";
 import { COLUMN_SIZES, setViewPrefs, useViewPrefs } from "../lib/view.ts";
 
 const DOT: Record<StageState, string> = {
@@ -34,10 +37,23 @@ const COLUMNS: { id: string; statuses: TaskStatus[]; label: string; color: strin
   ...(["review", "done", "failed"] as const).map((s) => ({ id: s, statuses: [s], ...STATUS_META[s] })),
 ];
 
+/** The provider of the stage a paused task stopped on: the first one that has not succeeded. */
+function stoppedProvider(card: TaskCard): string | null {
+  const i = card.stage_states.findIndex((s) => s !== "success");
+  return card.pipeline[i < 0 ? card.pipeline.length - 1 : i]?.provider ?? null;
+}
+
 /** The in-progress badge: which stage is running, or why it is waiting. */
-function phase(card: TaskCard): { text: string; tone: string; title: string } {
+function phase(card: TaskCard, asking?: boolean): { text: string; tone: string; title: string } {
+  if (card.status === "approval" && asking) return { text: "asks you", tone: "border-iris/60 text-iris", title: "Claude has a question for you — open the task to answer" };
   if (card.status === "approval") return { text: "needs you", tone: "border-rose/60 text-rose", title: "Waiting for you to allow or deny something — open the task" };
   if (card.status === "paused" && card.pause_reason === "cost") return { text: "needs you · cost", tone: "border-rose/60 text-rose", title: "It reached its cost ceiling — open the task and press Continue or Stop" };
+  if (card.status === "paused" && card.pause_reason === "provider") {
+    const who = stoppedProvider(card) ?? "provider";
+    return card.resume_at
+      ? { text: `paused · ${who}`, tone: "border-iris/50 text-iris", title: `${who} ran out of usage; it carries on by itself, or open it to switch provider` }
+      : { text: `needs you · ${who}`, tone: "border-rose/60 text-rose", title: `${who} ran out of credit — open the task to switch provider, or top it up and try again` };
+  }
   if (card.status === "paused") return { text: "paused · limit", tone: "border-iris/50 text-iris", title: "Paused by your Claude usage limit; it carries on by itself" };
   if (card.status === "planning") return { text: "planning", tone: "border-cyan/50 text-cyan", title: "The plan stage is running" };
   const i = card.stage_states.indexOf("running");
@@ -86,6 +102,8 @@ const Card = memo(function Card({
   blocked,
   progress,
   serial,
+  asking,
+  watching,
   onDragStart,
 }: {
   card: TaskCard;
@@ -94,6 +112,10 @@ const Card = memo(function Card({
   progress?: { done: number; total: number };
   /** The board runs one task at a time, so queueing means waiting — offer the way past it. */
   serial?: boolean;
+  /** Its pending card is a question, not an approval. */
+  asking?: boolean;
+  /** Its browser is open right now: offer to watch. */
+  watching?: boolean;
   onDragStart: (e: React.DragEvent) => void;
 }) {
   const draggable = card.status === "backlog" || card.status === "queued";
@@ -119,7 +141,7 @@ const Card = memo(function Card({
       {parentTitle ? <div className="mb-1 truncate font-mono text-[10.5px] text-ink-500">↳ {parentTitle}</div> : null}
       <div className="mb-1 flex flex-wrap items-center gap-1">
         {IN_PROGRESS.includes(card.status) ? (() => {
-          const p = phase(card);
+          const p = phase(card, asking);
           return <Chip className={`${p.tone} ${card.status === "paused" ? "" : "font-semibold"}`} title={p.title}>{p.text}</Chip>;
         })() : null}
         <Chip className={PRIORITY_META[card.priority].tone} title={PRIORITY_META[card.priority].title}>{card.priority}</Chip>
@@ -128,6 +150,18 @@ const Card = memo(function Card({
           <Chip key={l} className="border-ink-700 text-ink-400 normal-case">{l}</Chip>
         ))}
         {blocked ? <Chip className="border-slate/50 text-slate" title="Waiting on another task">blocked</Chip> : null}
+        {watching ? (
+          <button
+            className="rise flex cursor-pointer items-center gap-1 rounded border border-rose/50 bg-rose/10 px-1.5 py-px font-mono text-[10px] font-semibold uppercase tracking-wide text-rose hover:bg-rose/20"
+            title="Its browser is open: watch it work"
+            onClick={(e) => {
+              e.stopPropagation();
+              openTaskOn(card.id, "browser");
+            }}
+          >
+            <span className="pulse-rose h-1.5 w-1.5 rounded-full bg-rose" /> live
+          </button>
+        ) : null}
         {progress ? (
           <Chip
             className={progress.done === progress.total ? "border-moss/50 text-moss" : "border-ink-600 text-ink-300"}
@@ -183,9 +217,24 @@ const Card = memo(function Card({
           </button>
         </div>
       ) : null}
+      {card.status === "paused" && card.pause_reason === "provider" && !card.resume_at ? (
+        <div className="mt-1.5 flex items-center gap-2 rounded-md border border-rose/40 bg-rose/5 px-2 py-1 text-[11.5px] text-rose">
+          <span className="min-w-0 truncate" title={card.note ?? undefined}>{stoppedProvider(card) ?? "the provider"} is out of credit</span>
+          <button
+            className="ml-auto shrink-0 cursor-pointer rounded border border-rose/40 px-1.5 py-px font-mono text-[10.5px] hover:bg-rose/10"
+            title="Open it to carry the stage on with another provider, or try again after topping up"
+            onClick={(e) => {
+              e.stopPropagation();
+              navigate({ taskId: card.id });
+            }}
+          >
+            switch
+          </button>
+        </div>
+      ) : null}
       {card.status === "paused" && card.pause_reason !== "cost" && card.resume_at ? (
         <div className="mt-1.5 flex items-center gap-2 rounded-md border border-iris/40 bg-iris/5 px-2 py-1 text-[11.5px] text-iris">
-          <span title="Paused by your Claude usage limit; it continues in the same session, from the stage it was on">
+          <span title={card.pause_reason === "provider" ? card.note ?? undefined : "Paused by your Claude usage limit; it continues in the same session, from the stage it was on"}>
             resumes {until(card.resume_at)} · {clock(card.resume_at)}
           </span>
           <button
@@ -259,6 +308,17 @@ export function Board({ project }: { project: ProjectWithGit }) {
   const { columns } = useViewPrefs();
   const [creating, setCreating] = useState<false | "now" | "repeat">(false);
   const [schedulesOpen, setSchedulesOpen] = useState(false);
+  // Tasks whose browser is open now, for the "live" chip.
+  const [live, setLive] = useState<Set<string>>(new Set());
+  useEffect(() => void liveTasks().then((ids) => setLive(new Set(ids)), () => {}), [project.id]);
+  useWs((m) => {
+    if (m.type === "browser.live") setLive((prev) => {
+      const next = new Set(prev);
+      if (m.live) next.add(m.taskId);
+      else next.delete(m.taskId);
+      return next;
+    });
+  });
   const schedules = useSchedules(project.id);
   const scheduledCount = schedules.filter((s) => s.enabled).length + cards.filter((c) => c.start_at).length;
   const [dropTarget, setDropTarget] = useState<TaskStatus | null>(null);
@@ -301,7 +361,8 @@ export function Board({ project }: { project: ProjectWithGit }) {
     for (const c of visible) m.get(colOf.get(c.status) ?? "")?.push(c);
     // Inside In progress, what needs you comes first and what is paused last; then the most urgent first.
     // A cost pause waits on a person, like an approval, so it ranks with "needs you" rather than last.
-    const rank = (c: TaskCard) => (c.status === "paused" && c.pause_reason === "cost" ? 0 : IN_PROGRESS.includes(c.status) ? IN_PROGRESS.indexOf(c.status) : 0);
+    const needsYou = (c: TaskCard) => c.status === "paused" && (c.pause_reason === "cost" || (c.pause_reason === "provider" && !c.resume_at));
+    const rank = (c: TaskCard) => (needsYou(c) ? 0 : IN_PROGRESS.includes(c.status) ? IN_PROGRESS.indexOf(c.status) : 0);
     for (const list of m.values()) list.sort((a, b) => rank(a) - rank(b) || a.priority.localeCompare(b.priority) || a.position - b.position);
     return m;
   }, [visible]);
@@ -349,7 +410,7 @@ export function Board({ project }: { project: ProjectWithGit }) {
           {projectPending.length ? (
             <Button variant="outline" className="border-rose/60 text-rose" onClick={() => navigate({ taskId: projectPending[0].task_id })}>
               <span className="pulse-rose inline-block h-2 w-2 rounded-full bg-rose" />
-              {projectPending.length} awaiting approval
+              {projectPending.length} waiting for you
             </Button>
           ) : null}
           <Button onClick={() => setSchedulesOpen(true)} title="Work set to start later, or on repeat, so it runs while you are away">
@@ -476,6 +537,8 @@ export function Board({ project }: { project: ProjectWithGit }) {
                     progress={progress.get(c.id)}
                     parentTitle={c.parent_id ? titles.get(c.parent_id) : undefined}
                     serial={settings?.serial}
+                    asking={projectPending.some((a) => a.task_id === c.id && isQuestion(a))}
+                    watching={live.has(c.id)}
                     onDragStart={(e) => {
                       e.dataTransfer.setData("text/task-id", c.id);
                       e.dataTransfer.setData("text/task-status", c.status);

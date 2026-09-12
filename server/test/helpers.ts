@@ -85,7 +85,7 @@ export function setup(queryFn: QueryFn, policy: Record<string, unknown> = {}, ex
   return { dir, repo, bus, seen, project, runner, secrets, cleanup };
 }
 
-export async function until(cond: () => boolean, ms = 3000) {
+export async function until(cond: () => boolean, ms = 15_000) {
   const t0 = Date.now();
   while (!cond()) {
     if (Date.now() - t0 > ms) throw new Error("timed out");

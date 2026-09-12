@@ -22,7 +22,7 @@ export interface Probe {
   claudeBin: string;
   run(command: string, args: string[], opts?: { timeoutMs?: number }): Promise<RunResult>;
   /** Like run, but hands output over as it arrives. Resolves with the exit code (null: never started). */
-  stream(command: string, args: string[], opts: { timeoutMs: number }, onChunk: (s: string) => void): Promise<number | null>;
+  stream(command: string, args: string[], opts: { timeoutMs: number; cwd?: string }, onChunk: (s: string) => void): Promise<number | null>;
   exists(path: string): boolean;
   list(dir: string): string[];
   fetchJson(url: string, timeoutMs?: number): Promise<unknown>;
@@ -96,7 +96,7 @@ export const realProbe: Probe = {
 `);
         return resolve(null);
       }
-      const child = spawn(l.file, l.args, { windowsHide: true, shell: l.shell });
+      const child = spawn(l.file, l.args, { windowsHide: true, shell: l.shell, cwd: opts.cwd });
       const timer = setTimeout(() => child.kill(), opts.timeoutMs);
       child.stdout?.on("data", (d) => onChunk(String(d)));
       child.stderr?.on("data", (d) => onChunk(String(d)));

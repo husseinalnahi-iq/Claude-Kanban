@@ -19,7 +19,7 @@ export interface ModelOption {
  * rows grouped under headings, and anything typed can be used as a model id as it is.
  */
 export function ModelCombobox({
-  value, onChange, options, note, loading,
+  value, onChange, options, note, loading, warn, placeholder,
 }: {
   value: string;
   onChange: (id: string) => void;
@@ -27,6 +27,9 @@ export function ModelCombobox({
   /** One line above the list, e.g. why the live list is missing. */
   note?: string | null;
   loading?: boolean;
+  /** Something wrong with the current id, shown on the closed picker: red fails a run, amber is a likely typo. */
+  warn?: { text: string; tone: "red" | "amber" };
+  placeholder?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -117,7 +120,9 @@ export function ModelCombobox({
       <button
         ref={button}
         type="button"
-        className={`${inputCls} flex min-w-0 cursor-pointer items-center gap-1 text-left font-mono`}
+        className={`${inputCls} flex min-w-0 cursor-pointer items-center gap-1 text-left font-mono ${
+          warn?.tone === "red" ? "border-rust/70!" : warn ? "border-amber/60!" : ""
+        }`}
         onClick={() => setOpen((o) => !o)}
         onKeyDown={(e) => {
           if (e.key === "ArrowDown" || (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey)) {
@@ -126,11 +131,16 @@ export function ModelCombobox({
             setOpen(true);
           }
         }}
-        title={current ? `${current.id}${current.label !== current.id ? ` — ${current.label}` : ""}${current.meta ? ` · ${current.meta}` : ""}` : value || "Choose a model"}
+        title={
+          (warn ? `⚠ ${warn.text}\n` : "") +
+          (current ? `${current.id}${current.label !== current.id ? ` — ${current.label}` : ""}${current.meta ? ` · ${current.meta}` : ""}` : value || "Choose a model")
+        }
         aria-haspopup="listbox"
         aria-expanded={open}
+        aria-invalid={warn?.tone === "red" || undefined}
       >
-        <span className={`min-w-0 flex-1 truncate ${value ? "" : "text-ink-500"}`}>{value || "choose…"}</span>
+        <span className={`min-w-0 flex-1 truncate ${value ? "" : "text-ink-500"}`}>{value || placeholder || "choose…"}</span>
+        {warn ? <span className={`shrink-0 text-[11px] ${warn.tone === "red" ? "text-rust" : "text-amber"}`}>⚠</span> : null}
         {current?.free ? <span className="shrink-0 text-[10px] text-moss">free</span> : null}
         <span className="shrink-0 text-[10px] text-ink-500">▾</span>
       </button>

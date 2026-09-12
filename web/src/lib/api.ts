@@ -1,6 +1,7 @@
 import type {
   Approval, Attachment, DiffFile, EventRow, FastModeStatus, Message, MergePolicy, Milestone, Mode, Note, Policy, Project, ProjectEnv, Run, RunListItem, SessionTools, Settings, SkillInfo, Stage, Task, TaskCard, UsageLimit,
-  Provider, ProviderTestResult, SetupCheckResult, ModelCatalogResult, Schedule,
+  Provider, ProviderTestResult, SetupCheckResult, ModelCatalogResult, Schedule, Chat, ChatMessage, Effort, ClaudeModelsResult, SpecVersion,
+  ProviderUsage, ProviderOut,
 } from "../../../server/src/types.ts";
 import type { ProviderPreset } from "../../../server/src/engine/providers/presets.ts";
 import type { LocalModelsStatus } from "../../../server/src/setup/local.ts";
@@ -15,6 +16,8 @@ import type { TriageResult } from "../../../server/src/engine/triage.ts";
 import type { SearchHit } from "../../../server/src/routes/search.ts";
 
 export type ProjectWithGit = Project & { isGit: boolean };
+export type { TerminalInfo } from "../../../server/src/terminal.ts";
+import type { TerminalInfo } from "../../../server/src/terminal.ts";
 export type ScheduleBody = Partial<Pick<Schedule, "spec_md" | "mode" | "type" | "priority" | "pipeline" | "skills" | "enabled">> &
   Pick<Schedule, "title" | "days" | "time">;
 /** What is in a folder before it is registered: nothing, code, or no folder at all. */
@@ -113,6 +116,18 @@ export const api = {
   patchSchedule: (id: string, b: Partial<ScheduleBody>) => req<Schedule>("PATCH", `/schedules/${id}`, b),
   deleteSchedule: (id: string) => req<{ ok: true }>("DELETE", `/schedules/${id}`),
   runSchedule: (id: string) => req<Task>("POST", `/schedules/${id}/run`),
+
+  terminals: () => req<TerminalInfo[]>("GET", "/terminals"),
+  createTerminal: (b: { project_id: string; task_id?: string | null }) => req<TerminalInfo>("POST", "/terminals", b),
+  deleteTerminal: (id: string) => req<{ ok: boolean }>("DELETE", `/terminals/${id}`),
+
+  chats: (projectId: string) => req<Chat[]>("GET", `/projects/${projectId}/chats`),
+  createChat: (projectId: string) => req<Chat>("POST", `/projects/${projectId}/chats`, {}),
+  patchChat: (id: string, b: { title?: string; model?: string; effort?: Effort; archived?: boolean }) => req<Chat>("PATCH", `/chats/${id}`, b),
+  deleteChat: (id: string) => req<{ ok: true }>("DELETE", `/chats/${id}`),
+  chatMessages: (id: string) => req<ChatMessage[]>("GET", `/chats/${id}/messages`),
+  sendChat: (id: string, text: string) => req<ChatMessage>("POST", `/chats/${id}/send`, { text }),
+  stopChat: (id: string) => req<{ stopped: boolean }>("POST", `/chats/${id}/stop`),
   /** `force` starts the task beside whatever is running, outside the concurrency caps. */
   queue: (id: string, force?: boolean) => req<Task>("POST", `/tasks/${id}/queue`, { force }),
   retry: (id: string, stage_index?: number, force?: boolean) => req<Task>("POST", `/tasks/${id}/retry`, { stage_index, force }),
@@ -127,6 +142,8 @@ export const api = {
   events: (runId: string, after = 0) => req<EventRow[]>("GET", `/runs/${runId}/events?after=${after}`),
   pendingApprovals: () => req<Approval[]>("GET", "/approvals"),
   decide: (id: string, decision: "allow" | "deny", note?: string) => req<Approval>("POST", `/approvals/${id}`, { decision, note }),
+  /** Answer a question Claude asked: question text → the option label(s) chosen, or your own words. */
+  answer: (id: string, answers: Record<string, string>) => req<Approval>("POST", `/approvals/${id}/answer`, { answers }),
 
   milestones: (projectId: string) => req<Milestone[]>("GET", `/milestones?project=${encodeURIComponent(projectId)}`),
   createMilestone: (b: { project_id: string; title: string; due_date?: string | null }) => req<Milestone>("POST", "/milestones", b),
@@ -142,6 +159,11 @@ export const api = {
 
   analytics: (projectId: string | undefined, days: number) =>
     req<Analytics>("GET", `/analytics?days=${days}${projectId ? `&project=${encodeURIComponent(projectId)}` : ""}`),
+  specStatus: (taskId: string) => req<{ versions: SpecVersion[]; rewriting: { model: string; note: string } | null }>("GET", `/tasks/${taskId}/spec`),
+  rewriteSpec: (taskId: string, body: { model?: string; effort?: Effort; instruction?: string }) =>
+    req<{ started: true; model: string }>("POST", `/tasks/${taskId}/spec/rewrite`, body),
+  stopSpecRewrite: (taskId: string) => req<{ stopped: boolean }>("POST", `/tasks/${taskId}/spec/stop`, {}),
+  restoreSpec: (taskId: string, versionId: string) => req<Task>("POST", `/tasks/${taskId}/spec/restore`, { version_id: versionId }),
   refine: (taskId: string) => req<TriageProposal>("POST", `/tasks/${taskId}/refine`),
   applyRefine: (taskId: string, proposal: TriageProposal & { auto_queue_children?: boolean }) =>
     req<{ task: Task; subtasks: Task[] }>("POST", `/tasks/${taskId}/refine/apply`, proposal),
@@ -154,11 +176,14 @@ export const api = {
   claudeMd: (projectId: string) => req<InstructionFile[]>("GET", `/projects/${projectId}/claude-md`),
   initClaudeMd: (projectId: string) => req<Task>("POST", `/projects/${projectId}/claude-md/init`),
   fastMode: (force = false) => req<FastModeStatus>("GET", `/fast-mode${force ? "?force=1" : ""}`),
+  claudeModels: (force = false) => req<ClaudeModelsResult>("GET", `/claude/models${force ? "?force=1" : ""}`),
   sessionTools: (force = false) => req<SessionTools>("GET", `/session-tools${force ? "?force=1" : ""}`),
   resumeTask: (id: string) => req<Task>("POST", `/tasks/${id}/resume`),
   /** A task paused at its cost ceiling: spend one more stage's worth, or give up. */
   continueTask: (id: string) => req<Task>("POST", `/tasks/${id}/continue`),
   stopPaused: (id: string) => req<Task>("POST", `/tasks/${id}/stop-paused`),
+  /** A task paused because Claude or a provider ran out: carry its stage on elsewhere now. */
+  switchStage: (id: string, body: { provider: string; model: string; remember?: boolean }) => req<Task>("POST", `/tasks/${id}/switch`, body),
   refreshLimits: () => req<UsageLimit[]>("POST", "/limits/refresh"),
   acceptSuggestion: (id: string, what: { fields?: boolean; pipeline?: boolean }) => req<Task>("POST", `/tasks/${id}/accept-suggestion`, what),
   planDecision: (id: string, b: { choice: "original" | "revised" | "custom"; text?: string }) => req<Task>("POST", `/tasks/${id}/plan-decision`, b),
@@ -189,6 +214,8 @@ export const api = {
   settings: () => req<Settings>("GET", "/settings"),
   providers: () => req<ProviderRow[]>("GET", "/providers"),
   providerPresets: () => req<ProviderPreset[]>("GET", "/providers/presets"),
+  providerUsage: (force = false) => req<ProviderUsage[]>("GET", `/providers/usage${force ? "?force=1" : ""}`),
+  providerOuts: () => req<ProviderOut[]>("GET", "/providers/out"),
   setProviderSecret: (id: string, value: string) => req<{ hasSecret: boolean }>("PUT", `/providers/${id}/secret`, { value }),
   deleteProviderSecret: (id: string) => req<{ hasSecret: boolean }>("DELETE", `/providers/${id}/secret`),
   testVision: (provider: string, model: string) =>

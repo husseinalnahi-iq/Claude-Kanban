@@ -6,6 +6,9 @@ import { useCatalog } from "../../lib/catalog.ts";
 import { useAppData } from "../../lib/store.tsx";
 import { isLocal } from "../../../../server/src/engine/providers/catalog.ts";
 import { LocalModelsGuide } from "./LocalModelsGuide.tsx";
+import { ProviderPicker } from "../../components/ProviderPicker.tsx";
+import { OutChip, ProviderUsageCard } from "../../components/ProviderUsage.tsx";
+import { useProviderUsage } from "../../lib/providerUsage.ts";
 
 const KIND_LABEL: Record<Provider["kind"], string> = {
   "anthropic-compatible": "Claude Code on another endpoint — every board tool and guardrail works",
@@ -84,7 +87,53 @@ function TestResult({ r }: { r: ProviderTestResult }) {
   );
 }
 
+/**
+ * What happens when this provider runs out mid-task (D194): by default the task waits for it to come
+ * back (a usage window) or asks you (credit that ran out). A fallback carries the stage on instead.
+ */
+function RunsOut({ p, onChange }: { p: Provider; onChange: (p: Provider) => void }) {
+  const { settings } = useAppData();
+  if (!settings) return null;
+  const others = settings.providers.filter((x) => x.id !== p.id);
+  const fb = p.fallback ?? null;
+  return (
+    <div className="mt-3">
+      <div className="text-[11px] uppercase tracking-wider text-ink-500">When it runs out</div>
+      <div className="mt-1 flex flex-col gap-1.5 text-[12px] text-ink-200">
+        <label className="flex cursor-pointer items-start gap-2">
+          <input type="radio" className="mt-0.5 accent-amber" checked={!fb} onChange={() => onChange({ ...p, fallback: null })} />
+          <span>
+            Wait for it, or ask me
+            <span className="block text-[11px] text-ink-500">
+              A used-up usage window: the task pauses and carries on by itself when it resets. Credit that ran out: the task waits for you to switch
+              provider or top up.
+            </span>
+          </span>
+        </label>
+        <label className="flex cursor-pointer items-start gap-2">
+          <input
+            type="radio"
+            className="mt-0.5 accent-amber"
+            checked={Boolean(fb)}
+            onChange={() => onChange({ ...p, fallback: { provider: "anthropic", model: settings.tiers.balanced.provider === "anthropic" ? settings.tiers.balanced.model : settings.models[0]?.id ?? "" } })}
+          />
+          <span className="flex-1">
+            Carry the stage on elsewhere, straight away
+            <span className="block text-[11px] text-ink-500">The next model is told what this one did and finds its changes in place.</span>
+          </span>
+        </label>
+        {fb ? (
+          <div className="ml-6 max-w-[460px]">
+            <ProviderPicker value={fb} onChange={(v) => onChange({ ...p, fallback: v })} models={settings.models} providers={others} compact />
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function ProviderCard({ p, hasSecret, onChange, onRemove, onSecretChanged }: { p: Provider; hasSecret: boolean; onChange: (p: Provider) => void; onRemove: () => void; onSecretChanged: () => void }) {
+  const usage = useProviderUsage().rows?.find((u) => u.provider_id === p.id);
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<ProviderTestResult | null>(null);
   const [testModel, setTestModel] = useState(p.models[0]?.id ?? "");
@@ -155,7 +204,28 @@ function ProviderCard({ p, hasSecret, onChange, onRemove, onSecretChanged }: { p
       <div className="mt-3">
         <div className="text-[11px] uppercase tracking-wider text-ink-500">Key</div>
         <SecretField provider={p} hasSecret={hasSecret} onChanged={onSecretChanged} />
+        {p.kind === "anthropic-compatible" && !isLocal(p) ? (
+          <label className="mt-1.5 flex items-center gap-2 text-[11.5px] text-ink-400">
+            Sent as
+            <select className={`${inputCls} h-7 w-auto! py-0 text-[11.5px]`} value={p.authStyle ?? "bearer"} onChange={(e) => onChange({ ...p, authStyle: e.target.value as Provider["authStyle"] })}>
+              <option value="bearer">a bearer token (most providers)</option>
+              <option value="api-key">an API key (Kimi Code)</option>
+            </select>
+          </label>
+        ) : null}
       </div>
+
+      <RunsOut p={p} onChange={onChange} />
+      {usage ? (
+        <div className="mt-3">
+          <div className="mb-1 flex items-center gap-2">
+            <span className="text-[11px] uppercase tracking-wider text-ink-500">Usage</span>
+            <OutChip out={usage.out} />
+            {usage.plan ? <span className="font-mono text-[10.5px] text-ink-500">{usage.plan}</span> : null}
+          </div>
+          <ProviderUsageCard u={usage} compact />
+        </div>
+      ) : null}
 
       <div className="mt-3">
         <div className="mb-1 flex items-baseline gap-2">
@@ -279,7 +349,9 @@ export function ProviderSettings({ providers, onChange }: { providers: Provider[
           <b className="text-ink-400">What stays the same:</b> Claude Code on another endpoint keeps the board tools, approvals, worktrees and
           blocked-command list. <b className="text-ink-400">What changes:</b> costs are estimated from the prices you enter, Claude's usage
           windows do not apply, and effort / fast mode are Claude-only controls. A text-only provider gets the diff or the file list in its
-          prompt instead of tools, so it can plan or review but not implement.
+          prompt instead of tools, so it can plan or review but not implement. <b className="text-ink-400">Usage:</b> z.ai, Kimi Code,
+          OpenRouter and the Kimi API report what is left of your plan or credit, shown here and in the top bar's usage panel; for the others
+          the board counts what it sent.
         </p>
       </Section>
     </>

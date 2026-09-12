@@ -56,7 +56,7 @@ export function useTabBadge(pendingApprovals: number) {
   const unseen = useUnseen();
   useEffect(() => {
     if (pendingApprovals) {
-      document.title = `(${pendingApprovals}) Claude Kanban — approval waiting`;
+      document.title = `(${pendingApprovals}) Claude Kanban — waiting for you`;
       setIcon(drawIcon(resolve("var(--color-rose)")));
     } else if (unseen) {
       const info = kindInfo(unseen);

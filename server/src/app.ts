@@ -30,6 +30,13 @@ import { searchRoutes } from "./routes/search.ts";
 import { wsRoutes } from "./routes/ws.ts";
 import { scheduleRoutes } from "./routes/schedules.ts";
 import { Scheduler } from "./engine/scheduler.ts";
+import { ChatService } from "./engine/chat.ts";
+import { chatRoutes } from "./routes/chats.ts";
+import { SpecWriter } from "./engine/specWriter.ts";
+import { specRoutes } from "./routes/specs.ts";
+import { TerminalManager } from "./terminal.ts";
+import { terminalRoutes } from "./routes/terminals.ts";
+import { browserLiveRoutes } from "./routes/browserLive.ts";
 
 export interface AppDeps {
   repo: Repo;
@@ -43,6 +50,12 @@ export interface AppDeps {
   setup?: SetupService;
   /** Starts cards on time. index.ts starts its timer; tests get one that only ticks when asked. */
   scheduler?: Scheduler;
+  /** The side chat. Built here when not given; it shares the runner's SDK entry point. */
+  chat?: ChatService;
+  /** The shells behind the Terminal dock. All of them end when the server closes. */
+  terminals?: TerminalManager;
+  /** The Spec section's ✦ Rewrite. */
+  specs?: SpecWriter;
 }
 
 export function defaultAllowedHosts(): string[] {
@@ -77,6 +90,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   await app.register(websocket);
   const setup = deps.setup ?? new SetupService({ repo: deps.repo, bus: deps.bus, runner: deps.runner, stateDir: join(STATE_DIR, "setup") });
   const scheduler = deps.scheduler ?? new Scheduler({ repo: deps.repo, bus: deps.bus, runner: deps.runner });
+  const chat = deps.chat ?? new ChatService({ repo: deps.repo, bus: deps.bus, runner: deps.runner, scheduler });
+  const specs = deps.specs ?? new SpecWriter({ repo: deps.repo, bus: deps.bus, runner: deps.runner });
   await app.register(async (api) => {
     await projectRoutes(api, deps);
     await taskRoutes(api, deps);
@@ -96,8 +111,17 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     await claudeMdRoutes(api, deps);
     await providerRoutes(api, deps);
     await scheduleRoutes(api, { ...deps, scheduler });
+    await chatRoutes(api, { ...deps, chat });
+    await specRoutes(api, { ...deps, specs });
   }, { prefix: "/api" });
   await wsRoutes(app, deps);
+  const terminals = deps.terminals ?? new TerminalManager();
+  await terminalRoutes(app, { ...deps, terminals });
+  await browserLiveRoutes(app, deps);
+  app.addHook("onClose", async () => {
+    terminals.killAll();
+    deps.runner.browserWatch.stopAll();
+  });
 
   if (deps.webDist && existsSync(deps.webDist)) {
     await app.register(fastifyStatic, { root: deps.webDist });

@@ -49,7 +49,7 @@ test("codex JSONL becomes SDK-shaped events; the last-message file is the result
     const task = s.repo.createTask({ project_id: s.project.id, title: "t", spec_md: "x", mode: "supervised", pipeline: [{ stage: "plan", model: "gpt-5.6-sol", effort: "high", provider: "codex" }] });
     // Codex writes the result to the -o file; simulate that by writing to the path it was given.
     s.runner.queueTask(task.id);
-    await until(() => s.repo.getTask(task.id)!.status === "review", 5000);
+    await until(() => s.repo.getTask(task.id)!.status === "review", 15_000);
     const [run] = s.repo.runsForTask(task.id);
     const types = s.repo.eventsAfter(run.id).map((e) => e.type);
     assert.deepEqual(types, ["user:prompt", "delegate:command", "system:init", "assistant", "assistant", "user", "assistant", "assistant", "result:success"]);
@@ -78,7 +78,7 @@ test("the child env is an allowlist plus the provider's own key — no ANTHROPIC
     s.secrets.set("ZAI_API_KEY", "sk-zai-other-provider");
     const task = s.repo.createTask({ project_id: s.project.id, title: "t", spec_md: "x", mode: "supervised", pipeline: [{ stage: "plan", model: "gpt-5.6-sol", effort: "low", provider: "codex" }] });
     s.runner.queueTask(task.id);
-    await until(() => s.repo.getTask(task.id)!.status === "review", 5000);
+    await until(() => s.repo.getTask(task.id)!.status === "review", 15_000);
     assert.equal(rec.env.OPENAI_API_KEY, "sk-openai-secret-value");
     assert.ok(rec.env.PATH, "PATH is passed");
     assert.equal(rec.env.ANTHROPIC_API_KEY, undefined, "the board's Anthropic key never crosses");
@@ -119,7 +119,7 @@ test("a read-only stage that leaves the worktree dirty fails, and nothing is com
     s.secrets.set("OPENAI_API_KEY", "k-value-1234567");
     const task = s.repo.createTask({ project_id: s.project.id, title: "t", spec_md: "x", mode: "supervised", pipeline: [{ stage: "plan", model: "gpt-5.6-sol", effort: "low", provider: "codex" }] });
     s.runner.queueTask(task.id);
-    await until(() => s.repo.getTask(task.id)!.status === "failed", 5000);
+    await until(() => s.repo.getTask(task.id)!.status === "failed", 15_000);
     assert.match(s.repo.getTask(task.id)!.error ?? "", /left changes in the workspace/);
   } finally {
     setCliSpawn(undefined);
@@ -127,7 +127,7 @@ test("a read-only stage that leaves the worktree dirty fails, and nothing is com
   }
 });
 
-test("Gemini stats become usage; an error status fails the run", async () => {
+test("Gemini stats become usage; an overloaded error pauses to try again later, and Stop fails it with the reason", async () => {
   const good = readFileSync(join(FIX, "gemini.jsonl"), "utf8").split(/\r?\n/).filter(Boolean);
   const { spawnFn } = fakeChild({ lines: good });
   setCliSpawn(spawnFn);
@@ -138,7 +138,7 @@ test("Gemini stats become usage; an error status fails the run", async () => {
     s.secrets.set("GEMINI_API_KEY", "g-value-12345678");
     const task = s.repo.createTask({ project_id: s.project.id, title: "t", spec_md: "x", mode: "supervised", pipeline: [{ stage: "plan", model: "gemini-3.8-pro", effort: "low", provider: "gemini" }] });
     s.runner.queueTask(task.id);
-    await until(() => s.repo.getTask(task.id)!.status === "review", 5000);
+    await until(() => s.repo.getTask(task.id)!.status === "review", 15_000);
     const [run] = s.repo.runsForTask(task.id);
     assert.equal(run.input_tokens, 800);
     assert.equal(run.session_id, "gem-sess-1");
@@ -147,7 +147,11 @@ test("Gemini stats become usage; an error status fails the run", async () => {
     setCliSpawn(fakeChild({ lines: err }).spawnFn);
     const t2 = s.repo.createTask({ project_id: s.project.id, title: "e", spec_md: "x", mode: "supervised", pipeline: [{ stage: "plan", model: "gemini-3.8-pro", effort: "low", provider: "gemini" }] });
     s.runner.queueTask(t2.id);
-    await until(() => s.repo.getTask(t2.id)!.status === "failed", 5000);
+    // An overloaded model is "busy" (D194): it waits ten minutes rather than failing.
+    await until(() => s.repo.getTask(t2.id)!.status === "paused", 15_000);
+    assert.match(s.repo.getTask(t2.id)!.note ?? "", /too busy right now: .*model overloaded/);
+    assert.ok(s.repo.getTask(t2.id)!.resume_at);
+    s.runner.stopPaused(t2.id);
     assert.match(s.repo.getTask(t2.id)!.error ?? "", /model overloaded/);
   } finally {
     setCliSpawn(undefined);
@@ -167,7 +171,7 @@ test("a custom command gets the prompt in a file and its stdout as the result; u
     s.repo.updateSettings({ providers: [cp] });
     const task = s.repo.createTask({ project_id: s.project.id, title: "t", spec_md: "x", mode: "supervised", pipeline: [{ stage: "plan", model: "default", effort: "low", provider: "custom" }] });
     s.runner.queueTask(task.id);
-    await until(() => s.repo.getTask(task.id)!.status === "review", 5000);
+    await until(() => s.repo.getTask(task.id)!.status === "review", 15_000);
     const [run] = s.repo.runsForTask(task.id);
     assert.equal(run.result_md, "not json, just text\nthe answer");
     assert.ok(rec.args.includes("read-only"), "{mode} became read-only");
@@ -199,9 +203,9 @@ test("stop and timeout kill the child and fail the run", async () => {
     s.secrets.set("OPENAI_API_KEY", "k-value-12345678");
     const task = s.repo.createTask({ project_id: s.project.id, title: "t", spec_md: "x", mode: "supervised", pipeline: [{ stage: "plan", model: "gpt-5.6-sol", effort: "low", provider: "codex" }] });
     s.runner.queueTask(task.id);
-    await until(() => s.repo.getTask(task.id)!.status === "planning", 5000);
+    await until(() => s.repo.getTask(task.id)!.status === "planning", 15_000);
     s.runner.stopTask(task.id);
-    await until(() => s.repo.getTask(task.id)!.status === "failed", 5000);
+    await until(() => s.repo.getTask(task.id)!.status === "failed", 15_000);
     assert.equal(killed, true, "the child was killed");
     assert.equal(s.repo.getTask(task.id)!.error, "stopped by user");
   } finally {

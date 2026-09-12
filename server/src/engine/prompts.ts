@@ -44,6 +44,8 @@ export interface PromptCtx {
   rejectNote?: string | null;
   /** Output of the project's verify command when it failed on the previous attempt. */
   verificationFailure?: string | null;
+  /** This stage was started on another model, which ran out partway: what the new one needs to know. */
+  handover?: string | null;
   /** Durable project memory: decisions and conventions from earlier tasks. */
   memory?: string[];
   /** Files the human attached: images (described), spreadsheets, documents, data. */
@@ -179,6 +181,9 @@ export function buildStagePrompt(ctx: PromptCtx): string {
         "```\n" + clamp(ctx.verificationFailure, LIMITS.verification, 0.8) + "\n```\n" +
         "Fix the cause, not the symptom, and do not weaken or delete the checks to make them pass.",
     );
+  }
+  if (ctx.handover?.trim()) {
+    out.push(`\n## Picking up from another model\n${clamp(ctx.handover.trim(), LIMITS.previousResult)}`);
   }
   for (const earlier of ctx.earlierResults ?? []) {
     out.push(`\n## Earlier stage result (${earlier.stage})\n${clamp(earlier.result, LIMITS.earlierResult)}`);

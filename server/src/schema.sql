@@ -139,6 +139,15 @@ CREATE TABLE IF NOT EXISTS usage_limits (
   updated_at  TEXT NOT NULL
 );
 
+-- Delegated providers that ran out (a usage window, their credit, or too busy), until they come back.
+CREATE TABLE IF NOT EXISTS provider_limits (
+  provider_id TEXT PRIMARY KEY,
+  kind        TEXT NOT NULL,
+  reason      TEXT NOT NULL,
+  resets_at   TEXT,
+  updated_at  TEXT NOT NULL
+);
+
 -- Images belonging to a task: ones you attached, and ones a session produced (screenshots, generated
 -- files). The bytes live under <stateDir>/attachments/<task>/; this table is the index.
 CREATE TABLE IF NOT EXISTS attachments (
@@ -175,3 +184,44 @@ CREATE TABLE IF NOT EXISTS schedules (
   created_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS schedules_project ON schedules(project_id);
+
+-- Side chat: conversations about a project, one Claude session each. Reads code, makes cards; never edits.
+CREATE TABLE IF NOT EXISTS chats (
+  id          TEXT PRIMARY KEY,
+  project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  title       TEXT NOT NULL,
+  session_id  TEXT,
+  model       TEXT NOT NULL,
+  effort      TEXT NOT NULL,
+  cost_usd    REAL NOT NULL DEFAULT 0,
+  archived_at TEXT,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chats_project ON chats(project_id, updated_at);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id   TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+  role      TEXT NOT NULL,
+  text      TEXT NOT NULL,
+  meta_json TEXT NOT NULL DEFAULT '{}',
+  ts        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id, id);
+
+-- A task's spec versions: your own text and each AI rewrite of it, so any of them can come back.
+CREATE TABLE IF NOT EXISTS spec_versions (
+  id          TEXT PRIMARY KEY,
+  task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  kind        TEXT NOT NULL,
+  spec_md     TEXT NOT NULL,
+  model       TEXT,
+  effort      TEXT,
+  source_id   TEXT,
+  instruction TEXT,
+  summary     TEXT,
+  cost_usd    REAL NOT NULL DEFAULT 0,
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS spec_versions_task ON spec_versions(task_id, created_at);

@@ -4,6 +4,8 @@ import { api } from "../lib/api.ts";
 import { useWs } from "../lib/ws.ts";
 import { ago, clock, until } from "../lib/format.ts";
 import { navigate } from "../lib/router.ts";
+import { useProviderUsage } from "../lib/providerUsage.ts";
+import { ProviderUsageCard } from "./ProviderUsage.tsx";
 
 const LABELS: Record<string, string> = {
   five_hour: "5-hour window",
@@ -50,6 +52,9 @@ export function UsageMeters() {
   const [error, setError] = useState<string | null>(null);
   const box = useRef<HTMLDivElement>(null);
   useMinuteTick();
+  // Other providers: loaded once for the top-bar warning, and fresh whenever the panel opens.
+  const others = useProviderUsage();
+  const outNow = (others.rows ?? []).filter((u) => u.out);
 
   const loadPaused = () => void api.pausedTasks().then(setPaused, () => {});
   useEffect(() => {
@@ -80,7 +85,8 @@ export function UsageMeters() {
     setChecking(true);
     setError(null);
     try {
-      setLimits(await api.refreshLimits());
+      const [l] = await Promise.all([api.refreshLimits(), others.refresh()]);
+      setLimits(l);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -119,6 +125,14 @@ export function UsageMeters() {
         ) : (
           <span className="font-mono text-[10.5px] text-ink-500">usage</span>
         )}
+        {outNow.length ? (
+          <span
+            className={`rounded px-1 font-mono text-[10px] ${outNow.some((u) => u.out?.kind === "credit") ? "bg-rust/20 text-rust" : "bg-iris/20 text-iris"}`}
+            title={outNow.map((u) => `${u.label}: ${u.out!.reason}`).join("\n")}
+          >
+            {outNow.length === 1 ? `${outNow[0].label.split(" ")[0]} out` : `${outNow.length} providers out`}
+          </span>
+        ) : null}
         {paused.length ? <span className="rounded bg-iris/20 px-1 font-mono text-[10px] text-iris">{paused.length} paused</span> : null}
       </button>
 
@@ -160,9 +174,29 @@ export function UsageMeters() {
             </p>
           )}
 
+          {others.rows?.length ? (
+            <div className="mt-4 border-t border-ink-800 pt-3">
+              <div className="mb-2 flex items-baseline justify-between">
+                <span className="text-[13px] font-semibold text-ink-100">Other providers</span>
+                <button
+                  className="cursor-pointer text-[10.5px] text-ink-500 hover:text-ink-200"
+                  onClick={() => {
+                    setOpen(false);
+                    location.hash = "#/settings?tab=providers";
+                  }}
+                >
+                  Providers →
+                </button>
+              </div>
+              <div className="max-h-[42vh] space-y-2 overflow-y-auto pr-1">
+                {others.rows.map((u) => <ProviderUsageCard key={u.provider_id} u={u} />)}
+              </div>
+            </div>
+          ) : null}
+
           {paused.length ? (
             <div className="mt-4 border-t border-ink-800 pt-3">
-              <div className="mb-1.5 text-[11px] uppercase tracking-wider text-iris">Waiting for the window</div>
+              <div className="mb-1.5 text-[11px] uppercase tracking-wider text-iris">Waiting</div>
               <div className="space-y-1">
                 {paused.map((t) => (
                   <button
@@ -174,11 +208,18 @@ export function UsageMeters() {
                     className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[12px] hover:bg-ink-850 cursor-pointer"
                   >
                     <span className="min-w-0 flex-1 truncate text-ink-200">{t.title}</span>
-                    <span className="font-mono text-[10.5px] text-iris">{t.resume_at ? `${until(t.resume_at)} · ${clock(t.resume_at)}` : "soon"}</span>
+                    {t.resume_at ? (
+                      <span className="font-mono text-[10.5px] text-iris">{`${until(t.resume_at)} · ${clock(t.resume_at)}`}</span>
+                    ) : (
+                      <span className="font-mono text-[10.5px] text-rose" title={t.note ?? undefined}>needs you</span>
+                    )}
                   </button>
                 ))}
               </div>
-              <p className="mt-1.5 text-[11px] text-ink-500">They continue by themselves, in the same session, from the stage they were on.</p>
+              <p className="mt-1.5 text-[11px] text-ink-500">
+                They continue by themselves, in the same session, from the stage they were on. One marked “needs you” ran out of credit: open it to switch
+                provider or try again.
+              </p>
             </div>
           ) : null}
 

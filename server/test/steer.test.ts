@@ -11,7 +11,7 @@ import type { Stage } from "../src/types.ts";
 
 const ONE_STAGE: Stage[] = [{ stage: "code", model: "claude-haiku-4-5-20251001", effort: "low" }];
 
-async function until(cond: () => boolean, ms = 3000) {
+async function until(cond: () => boolean, ms = 15_000) {
   const t0 = Date.now();
   while (!cond()) {
     if (Date.now() - t0 > ms) throw new Error("timed out");

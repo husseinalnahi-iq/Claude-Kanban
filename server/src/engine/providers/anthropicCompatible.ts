@@ -14,27 +14,30 @@ function userMessage(text: string): AsyncIterable<SDKUserMessage> {
  * Everything the board relies on — the board MCP server, canUseTool, hooks, the worktree, the
  * transcript — is Claude Code's, so it all keeps working; only the model behind the API changes.
  * Claude-only controls (effort, fast mode) are dropped: a foreign endpoint rejects or ignores them.
- * Every model alias Claude Code might reach for is pinned to the same id, so a subagent or a
- * background call never asks a GLM endpoint for "claude-haiku".
+ * Every model alias Claude Code might reach for (opus, sonnet, haiku, fable, subagents) is pinned
+ * to the same id, so a subagent or a background call never asks a GLM endpoint for "claude-haiku".
  * Claude Code's own budget ceiling is dropped too: it prices a model id it does not know as a Claude
  * model, so a free local model hit a $0.20 cap on a one-word test. The board meters these stages
  * itself from your price table (D124).
  */
 export function applyAnthropicCompatible(options: Options, inv: { provider: Provider; model: string; secret: string | null }): Options {
   const { effort: _effort, settings: _settings, maxBudgetUsd: _budget, ...rest } = options;
+  // Most endpoints take the key as a bearer token; Kimi Code documents it as an API key. Only one is
+  // ever set: the other is blanked, so a key the board itself runs with never leaves for this endpoint.
+  const asKey = inv.provider.authStyle === "api-key";
   return {
     ...rest,
     model: inv.model,
     env: {
       ...(options.env ?? {}),
       ANTHROPIC_BASE_URL: inv.provider.baseUrl ?? "",
-      ANTHROPIC_AUTH_TOKEN: inv.secret ?? "",
-      // An API key set for the board's own runs would be sent to the foreign endpoint otherwise.
-      ANTHROPIC_API_KEY: "",
+      ANTHROPIC_AUTH_TOKEN: asKey ? "" : inv.secret ?? "",
+      ANTHROPIC_API_KEY: asKey ? inv.secret ?? "" : "",
       ANTHROPIC_MODEL: inv.model,
       ANTHROPIC_DEFAULT_OPUS_MODEL: inv.model,
       ANTHROPIC_DEFAULT_SONNET_MODEL: inv.model,
       ANTHROPIC_DEFAULT_HAIKU_MODEL: inv.model,
+      ANTHROPIC_DEFAULT_FABLE_MODEL: inv.model,
       CLAUDE_CODE_SUBAGENT_MODEL: inv.model,
       CLAUDE_CODE_USE_BEDROCK: "",
       CLAUDE_CODE_USE_VERTEX: "",

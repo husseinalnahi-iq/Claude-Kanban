@@ -75,7 +75,7 @@ export const STATUS_META: Record<TaskStatus, { label: string; color: string; tex
   queued: { label: "Queued", color: "border-slate", text: "text-slate", dot: "bg-slate" },
   planning: { label: "Planning", color: "border-cyan", text: "text-cyan", dot: "bg-cyan" },
   running: { label: "Running", color: "border-amber", text: "text-amber", dot: "bg-amber" },
-  approval: { label: "Needs approval", color: "border-rose", text: "text-rose", dot: "bg-rose" },
+  approval: { label: "Needs you", color: "border-rose", text: "text-rose", dot: "bg-rose" },
   paused: { label: "Paused · limit", color: "border-iris", text: "text-iris", dot: "bg-iris" },
   review: { label: "Review", color: "border-lime", text: "text-lime", dot: "bg-lime" },
   done: { label: "Done", color: "border-moss", text: "text-moss", dot: "bg-moss" },

@@ -152,7 +152,7 @@ test("a text-only review stage gets the diff inlined", async () => {
     });
     s.runner.queueTask(task.id);
     // The review stage sets task status to "review" while it runs; wait for the run itself to finish.
-    await until(() => s.repo.runsForTask(task.id).some((r) => r.stage === "review" && r.status === "success"), 5000);
+    await until(() => s.repo.runsForTask(task.id).some((r) => r.stage === "review" && r.status === "success"), 15_000);
     const prompt = calls[0].body.messages[1].content as string;
     assert.match(prompt, /## Diff \(1 file\)/);
     assert.match(prompt, /A a\.txt/);

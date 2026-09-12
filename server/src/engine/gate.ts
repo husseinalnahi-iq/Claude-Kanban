@@ -147,6 +147,7 @@ export function autonomousGate(toolName: string, input: Record<string, unknown>,
   if (toolName.startsWith("mcp__") && !isSafeMcp(toolName)) {
     return { behavior: "deny", message: `Autonomous runs can't call external MCP tools (${toolName}). Ask for a supervised task if this is needed.` };
   }
+  // The runner sends questions to you before this gate; one that gets here anyway is decided alone.
   if (toolName === "AskUserQuestion") {
     return { behavior: "deny", message: "No one is watching this autonomous run. Make a reasonable choice, note it in your summary, and continue." };
   }

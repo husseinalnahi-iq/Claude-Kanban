@@ -25,6 +25,8 @@ import { Tour } from "./views/Tour.tsx";
 import { Welcome } from "./components/Welcome.tsx";
 import { useWelcomeOpen } from "./lib/welcome.ts";
 import { Setup, useSetupCount } from "./views/Setup.tsx";
+import { ChatPanel } from "./components/chat/ChatPanel.tsx";
+import { TerminalDock } from "./components/TerminalDock.tsx";
 import { Button, Empty } from "./components/ui.tsx";
 
 const NAV: { view: View; label: string; key: string }[] = [
@@ -54,6 +56,8 @@ export function App() {
   const connected = useWsConnected();
   const [adding, setAdding] = useState(false);
   const [searching, setSearching] = useState(false);
+  const [chatting, setChatting] = useState(false);
+  const [terminal, setTerminal] = useState(false);
   const welcome = useWelcomeOpen();
   const project = projects.find((p) => p.id === route.projectId) ?? null;
   const setupCount = useSetupCount();
@@ -73,10 +77,20 @@ export function App() {
 
   useEffect(() => {
     const k = (e: KeyboardEvent) => {
+      // Before the typing guard: the terminal itself is a text box, and this must still close it.
+      if (e.ctrlKey && (e.key === "`" || e.code === "Backquote")) {
+        e.preventDefault();
+        setTerminal((v) => !v);
+        return;
+      }
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
       const n = NAV.find((x) => x.key === e.key);
       if (n && !e.ctrlKey && !e.metaKey && !e.altKey) navigate({ view: n.view });
       if (e.key === "a" && !e.ctrlKey && !e.metaKey && !e.altKey) navigate({ view: "approvals" });
+      if (e.key === "c" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault(); // or the "c" lands in the chat box that just took focus
+        setChatting((v) => !v);
+      }
       if ((e.key === "/" || (e.key === "k" && (e.ctrlKey || e.metaKey))) && !e.altKey) {
         e.preventDefault();
         setSearching(true);
@@ -91,6 +105,13 @@ export function App() {
     };
     window.addEventListener("keydown", k);
     return () => window.removeEventListener("keydown", k);
+  }, []);
+
+  // "Open terminal here" on a task: show the dock (the dock itself opens the shell).
+  useEffect(() => {
+    const show = () => setTerminal(true);
+    window.addEventListener("kanban:terminal", show);
+    return () => window.removeEventListener("kanban:terminal", show);
   }, []);
 
   // Zoom goes on <html>: there, 100% heights resolve against the scaled viewport, so the app still
@@ -155,19 +176,20 @@ export function App() {
         {pending.length ? (
           <div className="mx-3 mb-3 rounded-md border border-rose/40 bg-rose/10 px-3 py-2 text-[11.5px] text-rose">
             <span className="pulse-rose mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-rose" />
-            {pending.length} approval{pending.length > 1 ? "s" : ""} waiting
+            {pending.length} waiting for you
           </div>
         ) : null}
       </aside>
 
       {/* main */}
-      <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex items-center gap-1 border-b border-ink-800 px-4">
+      {/* With the chat open on a wide screen, the board makes room for it instead of hiding under it. */}
+      <div className={`flex min-w-0 flex-1 flex-col transition-[margin] duration-300 ${chatting && project ? "xl:mr-[460px]" : ""}`}>
+        <div className="flex items-center gap-1 no-scrollbar overflow-x-auto border-b border-ink-800 px-4">
           {NAV.map((n) => (
             <button
               key={n.view}
               onClick={() => navigate({ view: n.view, taskId: null })}
-              className={`relative px-3 py-3 text-[12.5px] transition-colors cursor-pointer ${route.view === n.view ? "text-ink-100" : "text-ink-400 hover:text-ink-200"}`}
+              className={`relative shrink-0 whitespace-nowrap px-3 py-3 text-[12.5px] transition-colors cursor-pointer ${route.view === n.view ? "text-ink-100" : "text-ink-400 hover:text-ink-200"}`}
             >
               {n.label}
               {n.view === "setup" && setupCount ? (
@@ -181,7 +203,26 @@ export function App() {
             </button>
           ))}
           <button
-            className="ml-auto flex items-center gap-1.5 rounded-md border border-ink-700 px-2.5 py-1 text-[12px] text-ink-400 transition-colors hover:border-ink-500 hover:text-ink-200 cursor-pointer"
+            className={`ml-auto flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border px-2.5 py-1 text-[12px] transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${
+              chatting ? "border-amber/60 bg-amber/10 text-amber" : "border-ink-700 text-ink-300 hover:border-amber/50 hover:text-amber"
+            }`}
+            onClick={() => setChatting((v) => !v)}
+            disabled={!project}
+            title={project ? "Talk to Claude about this project, and have it write task cards" : "Pick a project first"}
+          >
+            ✦ Chat <span className="font-mono text-[10px] text-ink-600">c</span>
+          </button>
+          <button
+            className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border px-2.5 py-1 text-[12px] transition-colors cursor-pointer ${
+              terminal ? "border-amber/60 bg-amber/10 text-amber" : "border-ink-700 text-ink-400 hover:border-ink-500 hover:text-ink-200"
+            }`}
+            onClick={() => setTerminal((v) => !v)}
+            title="Your own terminal, in the project's folder (Ctrl + `)"
+          >
+            <span className="font-mono">&gt;_</span> Terminal
+          </button>
+          <button
+            className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-ink-700 px-2.5 py-1 text-[12px] text-ink-400 transition-colors hover:border-ink-500 hover:text-ink-200 cursor-pointer"
             onClick={() => setSearching(true)}
             title="Search specs, transcripts, results and memory"
           >
@@ -193,7 +234,7 @@ export function App() {
             <UsageMeters />
           </div>
         </div>
-        <main className="min-h-0 flex-1">
+        <main className="min-h-0 flex-1 overflow-hidden">
           {needsProject && !project ? (
             <div className="mx-auto mt-24 max-w-md space-y-4 text-center">
               <Empty>
@@ -221,11 +262,13 @@ export function App() {
             <Tour hasProjects={projects.length > 0} onAddProject={() => setAdding(true)} />
           ) : null}
         </main>
+        <TerminalDock project={project} open={terminal} onClose={() => setTerminal(false)} />
       </div>
 
       {route.taskId ? <TaskDrawer taskId={route.taskId} onClose={() => navigate({ taskId: null })} /> : null}
       {adding ? <NewProjectForm onClose={() => setAdding(false)} /> : null}
       {searching ? <SearchModal projectId={project?.id} onClose={() => setSearching(false)} /> : null}
+      {chatting && project ? <ChatPanel project={project} onClose={() => setChatting(false)} /> : null}
       {welcome ? <Welcome hasProjects={projects.length > 0} onAddProject={() => setAdding(true)} /> : null}
       <Toasts />
     </div>

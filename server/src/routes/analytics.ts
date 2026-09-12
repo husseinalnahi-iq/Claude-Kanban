@@ -70,6 +70,10 @@ export async function analyticsRoutes(app: FastifyInstance, { repo, runner }: Ap
     const done = agg.totals.success;
     const failed = agg.totals.failed;
 
+    // The side chat is not a run, but it is spend: one line in the cost breakdown, and in the total.
+    const chatCost = repo.chatCost(project);
+    // So are spec rewrites.
+    const specCost = repo.specCost(project);
     const result: Analytics = {
       byStatus: tally(tasks.map((t) => t.status), ["backlog", "queued", "planning", "running", "approval", "review", "done", "failed"]),
       byType: tally(tasks.map((t) => t.type), TASK_TYPES),
@@ -81,14 +85,18 @@ export async function analyticsRoutes(app: FastifyInstance, { repo, runner }: Ap
         blocked: tasks.filter((t) => t.status === "backlog" && runner.blockers(t).length > 0).length,
         needsYou: tasks.filter((t) => ["approval", "review", "failed"].includes(t.status)).length,
         cost7d: Number(daily.slice(-7).reduce((s, d) => s + d.cost, 0).toFixed(4)),
-        costAll: Number(agg.totals.cost.toFixed(4)),
+        costAll: Number((agg.totals.cost + chatCost + specCost).toFixed(4)),
         runs: agg.totals.runs,
         runSuccessRate: done + failed ? done / (done + failed) : null,
         medianCycleHours: median === null ? null : Number(median.toFixed(2)),
         firstPassRate: finished ? firstPass / finished : null,
       },
       failuresByStage: agg.failuresByStage,
-      costByModel: agg.byModel,
+      costByModel: [
+        ...agg.byModel,
+        ...(chatCost > 0 ? [{ key: "side chat", cost: Number(chatCost.toFixed(4)), runs: 0 }] : []),
+        ...(specCost > 0 ? [{ key: "spec rewrites", cost: Number(specCost.toFixed(4)), runs: 0 }] : []),
+      ].sort((a, b) => b.cost - a.cost),
     };
     return result;
   });
