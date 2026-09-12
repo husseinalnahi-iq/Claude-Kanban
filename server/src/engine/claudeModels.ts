@@ -59,7 +59,7 @@ export function findClaudeModel(id: string, r: ClaudeModelsResult | null | undef
  * could not be read, so only the shape was checked.
  */
 export function claudeModelStatus(id: string, r: ClaudeModelsResult | null | undefined): ClaudeModelStatus {
-  if (!CLAUDE_ID.test(id.trim())) return "invalid";
+  if (!CLAUDE_ID.test(id?.trim() ?? "")) return "invalid";
   if (!r || r.source !== "live") return "unchecked";
   return findClaudeModel(id, r) ? "ok" : "unlisted";
 }
@@ -79,7 +79,8 @@ export function claudePicks(s: PickSettings): { where: string; id: string }[] {
     ...(s.specModel ? [{ where: "spec rewrite model", id: s.specModel }] : []),
     ...(onClaude(s.visionProvider) ? [{ where: "vision model", id: s.visionModel }] : []),
   ];
-  return picks.filter((p) => p.id.trim());
+  // `?.`: a page newer than the server it talks to gets settings without the newest fields.
+  return picks.filter((p) => p.id?.trim());
 }
 
 /** The picks a run would fail on (invalid) or that are probably typos (unlisted). */

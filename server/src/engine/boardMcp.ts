@@ -2,7 +2,7 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { Repo } from "../repo.ts";
 import type { Bus } from "../bus.ts";
-import type { Mode, Project, Stage, Task } from "../types.ts";
+import type { Mode, Project, Run, Stage, Task } from "../types.ts";
 import { EFFORTS } from "../types.ts";
 
 export interface BoardCtx {
@@ -35,6 +35,19 @@ export function defaultPipeline(repo: Repo, project: Project): Stage[] {
 
 const brief = (t: Task) => ({ id: t.id, title: t.title, status: t.status, mode: t.mode, summary: t.summary });
 
+/** The latest successful result of each pipeline stage, in stage order. */
+function stageResults(runs: Run[]) {
+  const latest = new Map<number, Run>();
+  for (const r of runs) {
+    if (r.status !== "success" || r.role === "critic" || !r.result_md?.trim()) continue;
+    const seen = latest.get(r.stage_index);
+    if (!seen || r.started_at > seen.started_at) latest.set(r.stage_index, r);
+  }
+  return [...latest.values()]
+    .sort((a, b) => a.stage_index - b.stage_index)
+    .map((r) => ({ stage_index: r.stage_index, stage: r.stage, model: r.model, result_md: r.result_md }));
+}
+
 /** Implementation of the board tools, separate from the MCP wrapper so tests can call it directly. */
 export function boardHandlers(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtasks?: (parent: Task) => unknown[]) {
   const own = () => repo.getTask(ctx.taskId)!;
@@ -47,6 +60,8 @@ export function boardHandlers(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtasks?: 
         parent_id: t.parent_id, pipeline: t.pipeline,
         subtasks: repo.children(t.id).map(brief),
         messages: repo.inboundMessages(t.id).map((m) => ({ from_task_id: m.from_task_id, body: m.body, ts: m.ts })),
+        // In full: the prompt may carry a long result clamped, and its trim marker points here.
+        stage_results: stageResults(repo.runsForTask(t.id)),
       });
     },
 
@@ -92,6 +107,10 @@ export function boardHandlers(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtasks?: 
           mode: allowedMode(project, s.mode ?? parent.mode),
           pipeline: s.pipeline?.length ? s.pipeline : parent.pipeline.length ? parent.pipeline : defaultPipeline(repo, project),
           skills: parent.skills,
+          // A live parent's pieces touch the same live system (D202).
+          live: parent.live,
+          plan_approval: parent.plan_approval,
+          own_branch: parent.own_branch,
           status: "backlog",
         });
         ids.push(task.id);
@@ -141,7 +160,7 @@ export function createBoardServer(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtask
     instructions:
       "Shared Claude Kanban board. Read your task, list siblings, post messages to other tasks, create subtasks, set a one-line progress summary on your card, and read or add durable project memory.",
     tools: [
-      tool("board_get_task", "Get a task's spec, status, pipeline, subtasks and inbound messages (default: your own task).",
+      tool("board_get_task", "Get a task's spec, status, pipeline, subtasks, inbound messages and the full result of each finished stage — the whole plan included (default: your own task).",
         { task_id: z.string().optional() }, async (a) => h.getTask(a)),
       tool("board_list_siblings", "List your parent task, your sibling tasks and your subtasks, each with status and last summary.",
         {}, async () => h.listSiblings()),

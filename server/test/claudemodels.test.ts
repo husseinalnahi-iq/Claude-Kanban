@@ -61,6 +61,27 @@ test("the picks a run would fail on are found, with where they are", () => {
   ], "another provider's model is not judged against Claude's list");
 });
 
+test("a setting an older server does not send yet is skipped, not a crash that blanks Settings", () => {
+  const s = new Repo(openDb(":memory:")).getSettings();
+  const older = { ...s, chatModel: undefined, visionModel: undefined } as unknown as typeof s;
+  assert.doesNotThrow(() => badClaudePicks(older, live()));
+  assert.equal(claudeModelStatus(undefined as unknown as string, live()), "invalid", "the model picker shows it as unset");
+});
+
+test("GET /api/version: a server started after its code last changed is not stale", async () => {
+  const repo = new Repo(openDb(":memory:"));
+  const bus = new Bus();
+  const app = await buildApp({ repo, bus, runner: new TaskRunner({ repo, bus, queryFn: listing(SDK).fn }), allowedHosts: ["localhost:80"] });
+  try {
+    const res = await app.inject({ method: "GET", url: "/api/version" });
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(res.json().stale, false);
+    assert.ok(Date.parse(res.json().startedAt));
+  } finally {
+    await app.close();
+  }
+});
+
 /** A fake session that answers the model question, like Claude Code's startup handshake. */
 function listing(answer: SdkModelInfo[] | Error) {
   let asked = 0;

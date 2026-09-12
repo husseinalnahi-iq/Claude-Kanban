@@ -161,6 +161,22 @@ answer. **Let Claude decide** hands it back. By default the task waits for you, 
 To keep night work moving instead, Settings → Runs & limits → *When Claude asks you a question* lets
 Claude decide after 15 minutes to 4 hours; it says what it chose in its summary.
 
+## Approve the plan first, and mark live tasks
+
+A wrong plan is cheapest to fix before any code is written. Turn on **Settings → Runs & limits → Wait
+for my approval after every plan** and every task (supervised or autonomous) stops after its Plan stage:
+the card says **approve plan**, and the task shows the plan with **Approve plan**, **Edit, then approve**,
+and **Send back with a note** (the planner reads your note first on the next run). Each task can follow
+Settings, always wait, or never wait — its **Pipeline** tab, or *Safety* when you create it.
+
+Tick **Touches a live system** on a task that changes real data — a production database, a live business app, a
+deployed site. It gets a **prod** chip, always waits for plan approval, every stage is told to dry-run
+and read back each live change, and its review runs on *Settings → Review model for live tasks* (Opus by
+default) and checks the live system itself instead of trusting the summary.
+
+The **Plan** tab of every task shows the plan the code stage worked to, next to the code stage's own
+*Plan steps* checklist — each step done, changed or skipped, and why.
+
 ## Let it work while you sleep
 
 - **Start a card later:** when you create a task, pick **Later** (a date and time) or **After reset**
@@ -227,6 +243,9 @@ task cost.
   open a new one, and paste the install line again.
 - **The browser says the page cannot be reached:** the board is not running — double-click the icon.
 - **Something is missing or red:** open the **Setup** tab; it checks everything and offers a fix.
+- **An amber bar says the board is running older code, or a screen says it hit an error:** the board
+  was updated while it kept running. Close the minimised `Claude Kanban` window in the taskbar (best
+  when no task is running), then open the board again from its icon.
 - **The terminal says "basic mode":** its terminal part did not install, so commands work but
   full-screen programs (editors, pickers) do not. Open **Setup** → *The built-in terminal* →
   **Repair**; new terminals use the full one as soon as it finishes.
@@ -317,9 +336,9 @@ restarting it.
 |---|---|
 | **Projects** | A registered folder plus a policy: whether worktrees and autonomous runs are allowed, and how many tasks may run at once. |
 | **Tasks** | Title, markdown spec, mode, pipeline, attached skills, optional parent, milestone and dependencies. |
-| **Pipeline** | Each stage is one `query()` with its own model and effort. The prompt carries the spec, the parent, sibling summaries, earlier stage results, project memory, messages and attached files. Plan stages cannot edit files. |
+| **Pipeline** | Each stage is one `query()` with its own model and effort. The prompt carries the spec, the parent, sibling summaries, earlier stage results, project memory, messages and attached files. Plan stages cannot edit files. The plan is handed to Code and Review **in full**: Code works through its numbered steps and ends with a checklist of each one (done, or skipped and why), and Review sends the task back if a step — a safety check above all — was dropped without a reason. |
 | **Autonomous** | Runs in its own git worktree on `kanban/<taskId>`. Edits are accepted inside it; writes outside it and history-rewriting git commands are refused. **Approve** lands the branch — see *Landing safely*. |
-| **Supervised** | Runs in the project folder, and every tool call that needs permission becomes an approval card: Allow or Deny, with a note. |
+| **Supervised** | Runs in the project folder, and every tool call that needs permission becomes an approval card: Allow or Deny, with a note. Tick **Work on its own branch** and it runs in its own worktree on `kanban/<taskId>` instead, like an autonomous task — still approving every write, and landing only when you press **Approve**. Commands that only read (`grep`, `wc`, `ls`, `git status`, `git diff`…) run without a card and are listed in the run log — switch that off in Settings → *Guardrails*. When the spec says a step needs your go-ahead (a live write, a deploy), Claude asks for it on a card rather than stopping. |
 | **Queue** | Per-project FIFO with a per-project cap and a global cap. Drag between Backlog and Queued. |
 | **Board MCP** | Every run gets `board_get_task`, `board_list_siblings`, `board_post_message`, `board_create_subtasks`, `board_set_summary`, `board_remember`, `board_memory`. |
 | **Approvals** | A global inbox with `a` / `y` / `n` and a tab-title badge, so an unattended run never stalls unnoticed. |
@@ -674,7 +693,9 @@ What stops an unattended run from doing damage, in Settings → *Runs & limits*:
   either ceiling **pauses the task and asks you** — *Continue* lets it spend one more stage's worth in the
   same session; *Stop* keeps what it did. Nothing is thrown away for money.
 - **Loop detection** — a stage repeating the same tool call is stopped and the reason recorded.
-- **Run ceilings** — max turns and cost per stage, and a bounded blast radius for subagents.
+- **Run ceilings** — max turns and cost per stage, and a bounded blast radius for subagents. A stage
+  that uses all its turns carries on in the same session (twice by default, *Continue after the turn
+  limit*) before it fails, so a long stage is not lost to the cap.
 - **Desktop notifications** when a task needs approval, is ready for review, or fails.
 
 ---

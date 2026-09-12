@@ -82,6 +82,9 @@ const toTask = (r: Row): Task => ({
   depends_on: json<string[]>(r.depends_on_json, []),
   related_to: json<string[]>(r.related_to_json, []),
   auto_queue_children: Number(r.auto_queue_children ?? 0) === 1,
+  plan_approval: r.plan_approval === null || r.plan_approval === undefined ? null : Number(r.plan_approval) === 1,
+  live: Number(r.live ?? 0) === 1,
+  own_branch: Number(r.own_branch ?? 0) === 1,
   triaged_at: (r.triaged_at as string) ?? null,
   archived_at: (r.archived_at as string) ?? null,
   resume_at: (r.resume_at as string) ?? null,
@@ -266,6 +269,9 @@ const TASK_COLUMNS: Record<string, (v: unknown) => SQLInputValue> = {
   branch: str, worktree_path: str, base_sha: str, summary: str, note: str, error: str, position: num,
   type: str, priority: str, labels: js, depends_on: js, related_to: js, triaged_at: str, archived_at: str, resume_at: str, pause_reason: str, budget_extra_usd: num, start_at: str, suggestion: js, plan_gate: js, onboarding: str,
   auto_queue_children: (v) => (v ? 1 : 0),
+  plan_approval: (v) => (v === null || v === undefined ? null : v ? 1 : 0),
+  live: (v) => (v ? 1 : 0),
+  own_branch: (v) => (v ? 1 : 0),
 };
 
 export type NewTask = {
@@ -285,6 +291,9 @@ export type NewTask = {
   related_to?: string[];
   auto_queue_children?: boolean;
   onboarding?: Task["onboarding"];
+  plan_approval?: boolean | null;
+  live?: boolean;
+  own_branch?: boolean;
 };
 
 /** Tiers used to be bare model ids; older rows are read as Claude models and rewritten on the next save. */
@@ -352,6 +361,10 @@ export class Repo {
       loadUserPlugins: (m.get("loadUserPlugins") ?? "true") !== "false",
       browserChecks: (m.get("browserChecks") ?? "true") !== "false",
       chromeInSupervised: m.get("chromeInSupervised") === "true",
+      autoAllowReadCommands: (m.get("autoAllowReadCommands") ?? "true") !== "false",
+      planApproval: m.get("planApproval") === "true",
+      autoContinueTurns: Number(m.get("autoContinueTurns") ?? 2),
+      liveReviewModel: m.get("liveReviewModel") || "claude-opus-5",
       liveView: (m.get("liveView") ?? "true") !== "false",
       maxCostPerTaskUsd: Number(m.get("maxCostPerTaskUsd") ?? 15),
       maxRepeatedToolCalls: Number(m.get("maxRepeatedToolCalls") ?? 8),
@@ -438,14 +451,16 @@ export class Repo {
     this.db
       .prepare(
         `INSERT INTO tasks(id, project_id, parent_id, milestone_id, title, spec_md, status, mode, pipeline_json, skills_json,
-                           type, priority, labels_json, depends_on_json, related_to_json, auto_queue_children, onboarding, position, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                           type, priority, labels_json, depends_on_json, related_to_json, auto_queue_children, onboarding, position, created_at, updated_at,
+                           plan_approval, live, own_branch)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id, t.project_id, t.parent_id ?? null, t.milestone_id ?? null, t.title, t.spec_md ?? "", t.status ?? "backlog",
         t.mode ?? "supervised", JSON.stringify(t.pipeline ?? []), JSON.stringify(t.skills ?? []),
         t.type ?? "feature", t.priority ?? "p2", JSON.stringify(t.labels ?? []), JSON.stringify(t.depends_on ?? []),
         JSON.stringify(t.related_to ?? []), t.auto_queue_children ? 1 : 0, t.onboarding ?? null, pos, now, now,
+        t.plan_approval === undefined || t.plan_approval === null ? null : t.plan_approval ? 1 : 0, t.live ? 1 : 0, t.own_branch ? 1 : 0,
       );
     return this.getTask(id)!;
   }

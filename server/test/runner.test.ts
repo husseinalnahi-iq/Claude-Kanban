@@ -260,6 +260,27 @@ test("project memory is capped, de-duplicated and injected into later prompts", 
   }
 });
 
+test("a Reject note reaches every stage of the next run, and only that run", async () => {
+  const f = fakeQuery();
+  const s = setup(f.fn);
+  try {
+    const task = s.repo.createTask({ project_id: s.project.id, title: "x", mode: "supervised", pipeline: ONE_STAGE });
+    s.runner.queueTask(task.id);
+    await until(() => s.repo.getTask(task.id)!.status === "review");
+    // Queueing clears the card's note; the prompt used to read it after that, so this never arrived.
+    s.runner.rejectTask(task.id, "Add the role-preservation guard before --apply.");
+    s.runner.retryTask(task.id);
+    await until(() => s.repo.getTask(task.id)!.status === "review" && f.calls.length === 2);
+    assert.match(f.calls[1].prompt, /## Why this was sent back[\s\S]*role-preservation guard/);
+
+    s.runner.retryTask(task.id);
+    await until(() => s.repo.getTask(task.id)!.status === "review" && f.calls.length === 3);
+    assert.doesNotMatch(f.calls[2].prompt, /Why this was sent back/, "a later plain retry carries no stale reason");
+  } finally {
+    s.cleanup();
+  }
+});
+
 function gate() {
   let open!: () => void;
   const p = new Promise<void>((r) => (open = r));
@@ -330,6 +351,40 @@ test("approve holds the task busy while git works; double approve is refused", a
     assert.deepEqual(g.calls.filter((c) => c === "merge"), ["merge"]);
   } finally {
     s.cleanup();
+  }
+});
+
+test("a supervised task on its own branch gets a worktree, still asks for every write, and lands on Approve (D203)", async () => {
+  const f = fakeQuery({ askWrite: true });
+  const g = fakeGit();
+  const s = setup(f.fn);
+  const runner = new TaskRunner({ repo: s.repo, bus: s.bus, queryFn: f.fn, git: g.git });
+  try {
+    const task = s.repo.createTask({ project_id: s.project.id, title: "own branch", mode: "supervised", own_branch: true, pipeline: ONE_STAGE });
+    runner.queueTask(task.id);
+    await until(() => s.repo.pendingApprovals(task.id).length === 1);
+    assert.ok(g.calls.includes("add"), "a worktree was made for a supervised task");
+    assert.equal(s.repo.getTask(task.id)!.branch, `kanban/${task.id}`);
+    runner.decideApproval(s.repo.pendingApprovals(task.id)[0].id, "allow", null);
+    await until(() => s.repo.getTask(task.id)!.status === "review");
+    assert.equal(f.decisions[0].behavior, "allow", "the write went through its approval card");
+    assert.ok(g.calls.includes("commit"), "the board commits the stage's work to the branch");
+    assert.match(f.calls[0].prompt, /## Working directory[\s\S]*kanban\//);
+    const done = await runner.approveTask(task.id);
+    assert.equal(done.status, "done");
+    assert.ok(g.calls.includes("merge"), "Approve merges the branch");
+  } finally {
+    s.cleanup();
+  }
+
+  const s2 = setup(fakeQuery().fn, { worktrees: "forbidden" });
+  try {
+    const t2 = s2.repo.createTask({ project_id: s2.project.id, title: "x", mode: "supervised", own_branch: true, pipeline: ONE_STAGE });
+    assert.throws(() => s2.runner.queueTask(t2.id), (e: unknown) => e instanceof PolicyError && /forbids worktrees/.test((e as Error).message));
+    const plain = s2.repo.createTask({ project_id: s2.project.id, title: "y", mode: "supervised", pipeline: ONE_STAGE });
+    assert.doesNotThrow(() => s2.runner.queueTask(plain.id), "a plain supervised task is unaffected");
+  } finally {
+    s2.cleanup();
   }
 });
 

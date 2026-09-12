@@ -23,6 +23,9 @@ const createSchema = z.object({
   labels: z.array(z.string().trim().toLowerCase()).max(8).optional(),
   depends_on: z.array(z.string()).max(20).optional(),
   auto_queue_children: z.boolean().optional(),
+  plan_approval: z.boolean().nullable().optional(),
+  live: z.boolean().optional(),
+  own_branch: z.boolean().optional(),
   /** Classify in the background after creating (type/priority/labels). */
   triage: z.boolean().optional(),
 });
@@ -41,6 +44,9 @@ const patchSchema = z.object({
   labels: z.array(z.string().trim().toLowerCase()).max(8).optional(),
   depends_on: z.array(z.string()).max(20).optional(),
   auto_queue_children: z.boolean().optional(),
+  plan_approval: z.boolean().nullable().optional(),
+  live: z.boolean().optional(),
+  own_branch: z.boolean().optional(),
   /** Only ever cleared from the UI ("dismiss"), never set. */
   suggestion: z.null().optional(),
 });
@@ -145,7 +151,10 @@ export async function taskRoutes(app: FastifyInstance, { repo, bus, runner }: Ap
     const id = idOf(req);
     const current = mustGet(id);
     const body = patchSchema.parse(req.body);
-    if ((body.mode || body.pipeline) && runner.isBusy(id)) throw new ConflictError("Cannot change mode or pipeline while the task is queued or running.");
+    if ((body.mode || body.pipeline || body.own_branch !== undefined) && runner.isBusy(id)) throw new ConflictError("Cannot change mode, branch or pipeline while the task is queued or running.");
+    if (body.own_branch !== undefined && body.own_branch !== current.own_branch && (current.branch || current.worktree_path)) {
+      throw new ConflictError(`This task has work on ${current.branch ?? "its worktree"}; approve or discard it before changing where it works.`);
+    }
     if (body.mode && body.mode !== current.mode && (current.branch || current.worktree_path)) {
       throw new ConflictError(`This task has work on ${current.branch ?? "its worktree"}; approve or discard it before changing mode.`);
     }

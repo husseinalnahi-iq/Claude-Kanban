@@ -5,12 +5,20 @@ import { useAppData } from "../lib/store.tsx";
 import { navigate } from "../lib/router.ts";
 import { Button, ErrorLine, Field, inputCls, Modal, useAction, ModeHelp } from "./ui.tsx";
 import { PipelineEditor } from "./PipelineEditor.tsx";
+import { SafetyOptions } from "./SafetyOptions.tsx";
 import { defaultWhen, startAtOf, WhenPicker, whenInvalid, type When } from "./WhenPicker.tsx";
 
 export function autonomousBlocked(p: ProjectWithGit): string | null {
   if (p.policy.autonomous === "forbidden") return "This project's policy forbids autonomous runs.";
   if (p.policy.worktrees === "forbidden") return "This project's policy forbids worktrees (autonomous runs need one).";
   if (!p.isGit) return "Not a git repository — autonomous runs need a worktree.";
+  return null;
+}
+
+/** Why a task here cannot work on its own branch (a git worktree), or null when it can. */
+export function branchBlocked(p: ProjectWithGit): string | null {
+  if (p.policy.worktrees === "forbidden") return "This project's policy forbids worktrees.";
+  if (!p.isGit) return "Not a git repository — a branch needs one.";
   return null;
 }
 
@@ -29,6 +37,10 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
   const [mode, setMode] = useState<Mode>("supervised");
   const [pipeline, setPipeline] = useState<Stage[]>(project.policy.defaultPipeline?.length ? project.policy.defaultPipeline : settings?.defaultPipeline ?? []);
   const [when, setWhen] = useState<When>(defaultWhen(initialWhen ?? "now"));
+  const [live, setLive] = useState(false);
+  const [ownBranch, setOwnBranch] = useState(false);
+  const noBranch = branchBlocked(project);
+  const [planApproval, setPlanApproval] = useState<boolean | null>(null);
   const { busy, error, run } = useAction();
   const invalid = whenInvalid(when);
 
@@ -40,7 +52,7 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
         onClose();
         return;
       }
-      const t = await api.createTask({ project_id: project.id, title, spec_md: spec, mode, pipeline, parent_id: parentId ?? null, milestone_id: milestoneId ?? null });
+      const t = await api.createTask({ project_id: project.id, title, spec_md: spec, mode, pipeline, parent_id: parentId ?? null, milestone_id: milestoneId ?? null, live, plan_approval: planApproval, own_branch: mode === "supervised" && ownBranch });
       const startAt = startAtOf(when);
       if (startAt) await api.scheduleTask(t.id, startAt);
       onClose();
@@ -62,7 +74,7 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
         <Field label="Spec (markdown)">
           <textarea className={`${inputCls} min-h-[120px] font-mono text-[12.5px]`} value={spec} onChange={(e) => setSpec(e.target.value)} placeholder="What done looks like, constraints, files…" />
         </Field>
-        <Field group label={<span className="flex items-center gap-1.5">Run mode <ModeHelp /></span>} hint={mode === "autonomous" ? "Runs in its own worktree on branch kanban/<id>; Approve merges it." : "Runs in the main checkout; every write waits for your approval."}>
+        <Field group label={<span className="flex items-center gap-1.5">Run mode <ModeHelp /></span>} hint={mode === "autonomous" ? "Runs in its own worktree on branch kanban/<id>; Approve merges it." : ownBranch && !noBranch ? "Runs on its own branch kanban/<id>; every write waits for your approval, and Approve merges it." : "Runs in the main checkout; every write waits for your approval."}>
           <div className="flex gap-2">
             {(["supervised", "autonomous"] as Mode[]).map((m) => (
               <button
@@ -80,6 +92,17 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
               </button>
             ))}
           </div>
+          {mode === "supervised" && when.kind !== "repeat" ? (
+            <label className="mt-2 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200" title={noBranch ?? undefined}>
+              <input type="checkbox" className="mt-1 accent-cyan" checked={ownBranch} disabled={!!noBranch} onChange={(e) => setOwnBranch(e.target.checked)} />
+              <span>
+                Work on its own branch
+                <span className="block text-[11.5px] text-ink-400">
+                  {noBranch ?? "Every write is still an approval card, but in its own copy of the project on branch kanban/<id> — nothing reaches your checkout until you approve."}
+                </span>
+              </span>
+            </label>
+          ) : null}
         </Field>
         <Field
           group
@@ -93,6 +116,20 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
         >
           <PipelineEditor value={pipeline} onChange={setPipeline} models={settings?.models ?? []} />
         </Field>
+        {when.kind !== "repeat" ? (
+          <Field group label="Safety">
+            <SafetyOptions
+              live={live}
+              planApproval={planApproval}
+              settingOn={settings?.planApproval ?? false}
+              liveModel={settings?.liveReviewModel ?? "claude-opus-5"}
+              onChange={(v) => {
+                if (v.live !== undefined) setLive(v.live);
+                if (v.plan_approval !== undefined) setPlanApproval(v.plan_approval);
+              }}
+            />
+          </Field>
+        ) : null}
         {!parentId ? (
           <Field group label="When">
             <WhenPicker value={when} onChange={setWhen} />

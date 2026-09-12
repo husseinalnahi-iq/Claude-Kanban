@@ -79,9 +79,11 @@ export function ModeHelp({ align = "left" }: { align?: "left" | "right" }) {
   );
 }
 
-export function ModeChip({ mode }: { mode: "autonomous" | "supervised" }) {
+export function ModeChip({ mode, ownBranch }: { mode: "autonomous" | "supervised"; ownBranch?: boolean }) {
   return mode === "autonomous" ? (
     <Chip className="border-amber/40 text-amber bg-amber/5" title="Autonomous: runs in its own git worktree, merged on Approve">auto</Chip>
+  ) : ownBranch ? (
+    <Chip className="border-cyan/40 text-cyan bg-cyan/5" title="Supervised on its own branch: every write is an approval card, and the work lands only when you approve">supervised · branch</Chip>
   ) : (
     <Chip className="border-cyan/40 text-cyan bg-cyan/5" title="Supervised: runs in the main checkout, every write is an approval card">supervised</Chip>
   );

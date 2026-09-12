@@ -6,7 +6,7 @@ export function clamp(text: string, max: number, tailShare = 0.3): string {
   if (t.length <= max) return t;
   const tail = Math.floor(max * tailShare);
   const head = max - tail;
-  return `${t.slice(0, head)}\n\n…[${t.length - max} characters trimmed — ask the board or read the files for the rest]…\n\n${t.slice(-tail)}`;
+  return `${t.slice(0, head)}\n\n…[${t.length - max} characters trimmed — \`board_get_task\` has the full text]…\n\n${t.slice(-tail)}`;
 }
 
 const LIMITS = {
@@ -14,6 +14,12 @@ const LIMITS = {
   parentSpec: 3000,
   previousResult: 6000,
   earlierResult: 1500,
+  /**
+   * A plan is the contract the later stages work to, so it is handed over whole. At 6,000 characters
+   * a real 8,600-character plan lost its middle — the execution steps, a safety guard among them —
+   * and the code stage never saw them (docs/DECISIONS.md D198).
+   */
+  plan: 40_000,
   siblings: 15,
   summary: 200,
   messages: 10,
@@ -34,6 +40,10 @@ export interface PromptCtx {
   parent?: { id: string; title: string; spec_md: string } | null;
   siblings: { id: string; title: string; status: string; summary: string | null }[];
   previousResult?: string | null;
+  /** Which stage produced `previousResult`: a plan is passed whole, anything else is clamped. */
+  previousStage?: StageName | null;
+  /** The task changes a live system (production data, a live business app…). D202. */
+  live?: boolean;
   /** Set when the previous stage ran on another provider: its output is labelled as such (D133). */
   previousFrom?: { provider: string; model: string } | null;
   /** Results of earlier stages (stage index → result), so review sees the plan, not just the code summary. */
@@ -95,14 +105,36 @@ function browserSection(ctx: PromptCtx): string | null {
   return lines.join("\n");
 }
 
+/** A plan the stage must work to: the one just before it, or (for review) any earlier one. */
+const hasPlan = (ctx: PromptCtx) => ctx.previousStage === "plan" || (ctx.earlierResults ?? []).some((e) => e.stage === "plan");
+
+/**
+ * Why these words exist: in a real run the code stage re-did the plan's investigation, dropped two of
+ * its steps (one a safety guard) and ended without saying so, and review approved it because it only
+ * checked the spec. A plan is a contract; the stages after it are told so, and review checks it.
+ */
+const PLAN_STEPS =
+  "Number the steps the next stage must carry out, in order, under an `## Execution steps` heading. Mark each step that must not be skipped — safety guards, dry-runs, backups, checks before a live change — with **(required)**. Put what you verified under its own heading, so the next stage can rely on it instead of checking again.";
+const FOLLOW_PLAN = [
+  "The plan above is your contract. Carry out every one of its execution steps, in order — above all the ones marked required and any safety measure it names (a guard, a dry-run, a backup, a check before a live change).",
+  "Trust what the plan says it verified; do not repeat its investigation. Check again only what you are about to change, or something that looks wrong — and if the plan turns out to be wrong, say so and why.",
+  "Leaving a step out, or doing it differently, is allowed only with a reason you state. Never drop one silently.",
+].join("\n");
+const PLAN_CHECKLIST =
+  "End your summary with a `## Plan steps` checklist: every execution step of the plan, marked done, or changed / skipped with the reason.";
+const REVIEW_PLAN =
+  "Check the change against the plan as well as the spec: every execution step of the plan must be done, or skipped with a stated reason. A step that was dropped silently — a safety guard above all — is a defect: name it and give `VERDICT: CHANGES_NEEDED`.";
+
 function stageInstructions(ctx: PromptCtx): string {
   const caps = ctx.capabilities ?? "sdk";
+  const plan = hasPlan(ctx);
   switch (ctx.stage) {
     case "plan":
       if (caps === "text") {
         return [
           "Produce an implementation plan for the task below. You cannot read files or run commands: plan from the spec, the file list and the context given here, and say explicitly what you would need to check in the code before implementing.",
           "If the task is too big for one focused session, list independent subtasks under a `## Subtasks` heading, each with a self-contained spec.",
+          PLAN_STEPS,
           "End with the plan as markdown; it is handed to the next stage.",
         ].join("\n");
       }
@@ -111,20 +143,26 @@ function stageInstructions(ctx: PromptCtx): string {
         caps === "cli"
           ? "If the task is too big for one focused session, list independent subtasks under a `## Subtasks` heading (each with a self-contained spec) and say so in your plan."
           : "If the task is too big for one focused session, split it into independent subtasks with `board_create_subtasks` (each with a self-contained spec) and say so in your plan.",
+        PLAN_STEPS,
         "End with the plan as markdown; it is handed to the next stage.",
       ].join("\n");
     case "code":
       return [
-        "Implement the task below, following the previous stage's plan when there is one. Keep the change focused on the spec.",
+        plan
+          ? "Implement the task below by carrying out the previous stage's plan. Keep the change focused on the spec."
+          : "Implement the task below, following the previous stage's plan when there is one. Keep the change focused on the spec.",
+        ...(plan ? [FOLLOW_PLAN] : []),
         ctx.verifyCommand
           ? `Before you finish, run \`${ctx.verifyCommand}\` and keep working until it passes — the board runs it too and will send the task back if it fails. Never weaken or delete a check to make it pass.`
           : "Verify your work (run the project's tests or build if it has them) and show the output rather than asserting success.",
         "End with a concise markdown summary of what you changed; it is handed to the next stage.",
+        ...(plan ? [PLAN_CHECKLIST] : []),
       ].join("\n");
     case "review": {
       if (caps === "text") {
         return [
           "Review the change below against the task's spec. You cannot run anything or open files: judge the diff as given, and say what you could not verify.",
+          ...(plan ? [REVIEW_PLAN] : []),
           "Point at concrete defects with file and line; do not expand scope.",
           "End with a line `VERDICT: APPROVE` or `VERDICT: CHANGES_NEEDED`, followed by your reasons.",
         ].join("\n");
@@ -132,6 +170,7 @@ function stageInstructions(ctx: PromptCtx): string {
       const how = ctx.baseSha ? `Inspect the changes with \`git diff ${ctx.baseSha}\`.` : "Inspect the files the previous stage changed.";
       return [
         `Review the changes made for the task below against its spec. ${how}`,
+        ...(plan ? [REVIEW_PLAN] : []),
         "Fix only clear defects; do not expand scope.",
         "End with a line `VERDICT: APPROVE` or `VERDICT: CHANGES_NEEDED`, followed by your reasons.",
       ].join("\n");
@@ -186,14 +225,17 @@ export function buildStagePrompt(ctx: PromptCtx): string {
     out.push(`\n## Picking up from another model\n${clamp(ctx.handover.trim(), LIMITS.previousResult)}`);
   }
   for (const earlier of ctx.earlierResults ?? []) {
-    out.push(`\n## Earlier stage result (${earlier.stage})\n${clamp(earlier.result, LIMITS.earlierResult)}`);
+    const limit = earlier.stage === "plan" ? LIMITS.plan : LIMITS.earlierResult;
+    out.push(`\n## Earlier stage result (${earlier.stage})\n${clamp(earlier.result, limit)}`);
   }
   if (ctx.previousResult?.trim()) {
     const from = ctx.previousFrom;
+    const what = ctx.previousStage === "plan" ? "The plan (previous stage)" : "Previous stage result";
     const heading = from
-      ? `## Previous stage result — produced by another model (${from.model} via ${from.provider})\nVerify its claims against the code; do not assume it is right.`
-      : "## Previous stage result";
-    out.push(`\n${heading}\n${clamp(ctx.previousResult, LIMITS.previousResult)}`);
+      ? `## ${what} — produced by another model (${from.model} via ${from.provider})\nVerify its claims against the code; do not assume it is right.`
+      : `## ${what}`;
+    const limit = ctx.previousStage === "plan" ? LIMITS.plan : LIMITS.previousResult;
+    out.push(`\n${heading}\n${clamp(ctx.previousResult, limit)}`);
   }
   if (ctx.capabilities === "text" && ctx.stage === "review") {
     const files = ctx.inlineDiff ?? [];
@@ -243,10 +285,30 @@ export function buildStagePrompt(ctx: PromptCtx): string {
   if (ctx.skills.length) {
     out.push(`\n## Skills\n${ctx.skills.map((s) => `- use the \`${s}\` skill`).join("\n")}`);
   }
-  if (ctx.mode === "autonomous" && ctx.branch) {
+  // Any task in its own worktree: every autonomous one, and a supervised one on its own branch (D203).
+  if (ctx.branch) {
     out.push(
       `\n## Working directory\nYou are in a git worktree on branch \`${ctx.branch}\`. Edit files freely inside it. ` +
         "Do not commit, push, switch branches, or touch files outside it — the board commits your changes after this stage.",
+    );
+  }
+  if (ctx.live) {
+    const lines: Record<StageName, string> = {
+      plan: "Say, for every step that changes the live system, what could go wrong for the people and data already there, how the next stage checks it before and after, and how it is undone.",
+      code: "Read before you write; dry-run before every live change; make each live change once, through its own clearly described step; then read the live system back and compare it with what you had before. A change you did not read back is not done.",
+      review: "Do not take the summary's word for it: read the live system yourself (read-only) and check that each claimed change is there, that nothing else changed, and that every safety step in the plan was carried out. A claim you did not check is not verified — say so.",
+      custom: "Read before you write, dry-run before every live change, and read the live system back afterwards.",
+    };
+    out.push(`\n## Live system\nThis task changes a live system — real data and real users. ${lines[ctx.stage]}`);
+  }
+  if (ctx.mode === "supervised" && (ctx.stage === "code" || ctx.stage === "custom")) {
+    // In a real run the spec said "no live write until I approve the command", and the code stage read
+    // that as "stop and leave it for later" — so the fix never ran, though a card was the approval.
+    out.push(
+      "\n## Approvals\nThis task is supervised: each command or file change is shown to the user as an Allow / Deny card before it runs. " +
+        "When the spec or plan says a step needs the user's go-ahead — a live write, a deploy, a migration, sending something — " +
+        "ask for it by proposing that exact command with a clear description, after any dry-run it calls for. The card is the approval; " +
+        "do not end the stage and leave the step for later. A denied card comes back with the user's reason: follow it.",
     );
   }
   if ((ctx.capabilities ?? "sdk") === "sdk") {

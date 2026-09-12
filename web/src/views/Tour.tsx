@@ -63,7 +63,7 @@ export function Tour({ hasProjects, onAddProject }: { hasProjects: boolean; onAd
     {
       n: "3",
       title: "Queue it and walk away",
-      body: "The bell calls you when it needs a decision: something to allow, a plan to pick, or a task at its cost ceiling. Approve what lands; Retry or Chat what doesn't.",
+      body: "The plan goes to the coder whole, and the reviewer checks every step was done. The bell calls you only when it needs a decision: a change to allow (just looking needs no card), a plan to pick, or a task at its cost ceiling. Approve what lands; Retry or Chat what doesn't.",
       action: null,
     },
   ];

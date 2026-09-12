@@ -22,7 +22,7 @@ type RateLimitInfo = {
 };
 import { RunQueue } from "./queue.ts";
 import { buildStagePrompt } from "./prompts.ts";
-import { autonomousGate, blockedCommand, isSafeMcp, killsByName, READ_ONLY_TOOLS, serverRule } from "./gate.ts";
+import { autonomousGate, blockedCommand, isSafeMcp, killsByName, READ_ONLY_TOOLS, readOnlyCommand, serverRule } from "./gate.ts";
 import { allowedMode, createBoardServer } from "./boardMcp.ts";
 import { CONFIDENCE_TO_APPLY, serialiseFileConflicts, triageTask, type Sizing, type TriageResult, type TriageSubtask } from "./triage.ts";
 import { describeImage, describeImageVia } from "./vision.ts";
@@ -44,7 +44,7 @@ import { QuotaReader, type LiveQuota } from "./providers/usage.ts";
 import type { Resolved, StageInvocation } from "./providers/types.ts";
 import { saveAttachment } from "../routes/attachments.ts";
 import { pickBrowser, realProbe } from "../setup/probe.ts";
-import { ANTHROPIC_PROVIDER_ID, ARTIFACT_EXTS, MAX_ATTACHMENT_BYTES, attachmentKind, supportsFastMode, type ClaudeModelsResult, type FastModeStatus } from "../types.ts";
+import { ANTHROPIC_PROVIDER_ID, ARTIFACT_EXTS, EFFORTS, usesWorktree, MAX_ATTACHMENT_BYTES, attachmentKind, supportsFastMode, type ClaudeModelsResult, type FastModeStatus } from "../types.ts";
 import { fromSdk, type SdkModelInfo } from "./claudeModels.ts";
 
 export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => AsyncIterable<SDKMessage>;
@@ -74,6 +74,9 @@ interface StartOpts {
   resume?: string;
 }
 
+/** The card note Discard leaves: not a reason for the next run. */
+const DISCARDED_NOTE = "work discarded";
+
 /** One live query() call. */
 interface Active {
   runId: string;
@@ -92,6 +95,12 @@ interface PipelineCtl {
 
 const STAGE_STATUS: Record<StageName, TaskStatus> = { plan: "planning", code: "running", review: "review", custom: "running" };
 const PLAN_DISALLOWED = ["Edit", "Write", "NotebookEdit", "MultiEdit"];
+
+/** What a stage that ran out of turns is told when it carries on in the same session (D201). */
+const CONTINUE_PROMPT =
+  "You reached this stage's turn limit before finishing. Nothing was lost: continue from exactly where you stopped. " +
+  "Do not redo steps you already finished or re-read what you already know. Finish the remaining work, then end with the summary this stage asks for " +
+  "(with the Plan steps checklist, if there is a plan).";
 /** Nothing is withheld from every run today; questions go to you as cards (see askApproval). */
 const ALWAYS_DISALLOWED: string[] = [];
 export const QUESTION_TOOL = "AskUserQuestion";
@@ -197,21 +206,28 @@ function eventType(msg: SDKMessage): string {
   return m.subtype ? `${m.type}:${m.subtype}` : m.type;
 }
 
+/** A shell command a supervised run may use without a card (Settings → Guardrails, D197). */
+function freeShellRead(name: string, input: unknown, readsFree: boolean): boolean {
+  return readsFree && (name === "Bash" || name === "PowerShell") && readOnlyCommand(String((input as { command?: unknown })?.command ?? ""));
+}
+
 /**
  * Supervised runs: force every non-read-only tool through the approval card, even when a settings
  * file pre-allows it (a PreToolUse "ask" overrides allow rules). See docs/DECISIONS.md D20.
  */
-const FORCE_ASK: HookCallbackMatcher[] = [
-  {
-    hooks: [
-      async (input) => {
-        const name = (input as { tool_name?: string }).tool_name ?? "";
-        if (READ_ONLY_TOOLS.has(name) || isSafeMcp(name)) return {};
-        return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask", permissionDecisionReason: "Supervised task: every write is approved on the board." } };
-      },
-    ],
-  },
-];
+function forceAsk(readsFree: boolean): HookCallbackMatcher[] {
+  return [
+    {
+      hooks: [
+        async (input) => {
+          const { tool_name: name = "", tool_input: toolInput } = input as { tool_name?: string; tool_input?: unknown };
+          if (READ_ONLY_TOOLS.has(name) || isSafeMcp(name) || freeShellRead(name, toolInput, readsFree)) return {};
+          return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask", permissionDecisionReason: "Supervised task: every write is approved on the board." } };
+        },
+      ],
+    },
+  ];
+}
 
 export class TaskRunner {
   readonly queue: RunQueue;
@@ -237,6 +253,8 @@ export class TaskRunner {
   /** Tasks inside an approve / discard / chat transition (git or session work in flight). */
   private holds = new Set<string>();
   private startOpts = new Map<string, StartOpts>();
+  /** Why a human sent the task back, for every stage of the run that follows (see queueTask). */
+  private rejectNotes = new Map<string, string>();
   private ports = new Map<string, number>();
   /** Live pictures of each task's browser, for the Browser tab. */
   readonly browserWatch: BrowserWatch;
@@ -368,6 +386,10 @@ export class TaskRunner {
         );
       }
     }
+    // A supervised task on its own branch needs a worktree too, and a repository to make one in (D203).
+    if (task.mode === "supervised" && task.own_branch && project.policy.worktrees === "forbidden") {
+      throw new PolicyError(`Project "${project.name}" forbids worktrees (policy.worktrees = "forbidden"). Turn off “Work on its own branch” for this task, or allow worktrees on the project.`);
+    }
   }
 
   /** Latest run per stage index. */
@@ -409,6 +431,11 @@ export class TaskRunner {
     }
     this.assertRunnable(task, project);
     this.startOpts.set(taskId, opts);
+    // The card's note is cleared below, so a Reject note is kept here for every stage of the new run.
+    // It used to be cleared first and read after, so "Why this was sent back" never reached a prompt.
+    const rejected = task.status === "backlog" && task.note && task.note !== DISCARDED_NOTE ? task.note : null;
+    if (rejected) this.rejectNotes.set(taskId, rejected);
+    else this.rejectNotes.delete(taskId);
     const updated = this.setTask(taskId, { status: "queued", error: null, note: null });
     this.queue.enqueue({ taskId, projectId: project.id, force });
     return updated;
@@ -423,7 +450,7 @@ export class TaskRunner {
   }
 
   private async ensureCwd(task: Task, project: Project): Promise<string> {
-    if (task.mode !== "autonomous") return project.path;
+    if (!usesWorktree(task)) return project.path;
     if (task.worktree_path && existsSync(task.worktree_path)) return task.worktree_path;
     if (!(await this.git.isGitRepo(project.path))) {
       // isGitRepo cannot tell "no git" from "not a repository"; the fix for each is different.
@@ -487,6 +514,9 @@ export class TaskRunner {
       // Reserved before the first prompt is written, so the prompt can name it.
       await this.portFor(taskId);
       let switches = 0;
+      // Stage index → automatic continues used after hitting the turn cap (D201).
+      const continued = new Map<number, number>();
+      let continuing = false;
 
       for (let i = opts.fromStage; i < task.pipeline.length; i++) {
         if (ctl.stopped) {
@@ -509,7 +539,7 @@ export class TaskRunner {
           task = this.repo.getTask(taskId)!;
           if (i === opts.fromStage) opts.resume = undefined;
         }
-        const stage = task.pipeline[i];
+        const stage = this.stageAt(task, i);
         const run = this.repo.createRun({
           task_id: taskId, stage: stage.stage, stage_index: i, model: stage.model, effort: stage.effort,
           provider: stage.provider && stage.provider !== ANTHROPIC_PROVIDER_ID ? stage.provider : null,
@@ -518,7 +548,8 @@ export class TaskRunner {
         this.setTask(taskId, { status: STAGE_STATUS[stage.stage], error: null });
 
         const gated = stage.stage === "code" || stage.stage === "custom";
-        const prompt = await this.stagePromptFor(task, i, project, cwd);
+        const prompt = continuing ? CONTINUE_PROMPT : await this.stagePromptFor(task, i, project, cwd);
+        continuing = false;
         this.handovers.delete(taskId);
         const outcome = await this.runQuery({
           task, project, run, cwd, ctl,
@@ -539,10 +570,25 @@ export class TaskRunner {
           });
           return;
         }
-        if (task.mode === "autonomous") {
+        if (usesWorktree(task)) {
           await this.commitWorktree(task, `kanban(${stage.stage})${outcome.ok ? "" : " [failed]"}: ${task.title}`);
         }
         if (!outcome.ok) {
+          // Out of turns is not a fault either: the session is intact, so carry on in it (D201).
+          const used = continued.get(i) ?? 0;
+          const sessionId = this.repo.getRun(run.id)?.session_id;
+          if (outcome.turnLimit && !ctl.stopped && sessionId && res.adapter.canResume && used < this.repo.getSettings().autoContinueTurns) {
+            continued.set(i, used + 1);
+            const note = `[board] The ${stage.stage} stage used all ${this.repo.getSettings().maxTurnsPerStage} turns — continuing in the same session (${used + 1} of ${this.repo.getSettings().autoContinueTurns}).`;
+            this.log(run.id, `\n${note}\n`);
+            const event = this.repo.insertEvent(run.id, "turns:continued", { type: "turns_continued", n: used + 1 });
+            this.bus.publish({ type: "event", runId: run.id, taskId, event });
+            opts.fromStage = i;
+            opts.resume = sessionId;
+            continuing = true;
+            i--;
+            continue;
+          }
           // Money, not a fault: wait for Continue or Stop rather than fail (D185).
           if (outcome.budgetStop) {
             this.pauseForCost(taskId, this.repo.taskCost(taskId), this.taskCeiling(task), outcome.error ?? "the stage reached its ceiling");
@@ -573,7 +619,7 @@ export class TaskRunner {
           const verdict = await this.verifyWorkspace(project, task, cwd, run.id);
           if (verdict && !verdict.ok) {
             this.verifyFailures.set(taskId, verdict.output);
-            if (task.mode === "autonomous") await this.commitWorktree(task, `kanban(${stage.stage}) [verify failed]: ${task.title}`);
+            if (usesWorktree(task)) await this.commitWorktree(task, `kanban(${stage.stage}) [verify failed]: ${task.title}`);
             this.setTask(taskId, {
               status: "failed",
               error: `Verification failed — \`${project.env.verifyCommand}\` did not pass. Retry sends the output back to the ${stage.stage} stage.`,
@@ -588,6 +634,16 @@ export class TaskRunner {
           if (critic && (await this.debate({ task, project, planRun: run, stageIndex: i, cwd, ctl, critic }))) return;
           if (ctl.stopped) {
             this.setTask(taskId, { status: "failed", error: "stopped by user" });
+            return;
+          }
+          // Plan approval (D200): nothing is written until the human has read the plan.
+          const plan = this.repo.getRun(run.id)?.result_md ?? "";
+          if (i + 1 < task.pipeline.length && plan.trim() && this.needsPlanApproval(this.repo.getTask(taskId)!)) {
+            this.setTask(taskId, {
+              status: "approval",
+              note: "Read the plan, then approve it, edit it, or send the task back.",
+              plan_gate: { kind: "approval", stage_index: i, created_at: nowIso(), original: plan },
+            });
             return;
           }
         }
@@ -607,9 +663,29 @@ export class TaskRunner {
     }
   }
 
+  /**
+   * The stage as it actually runs. A live task's review runs on Settings → liveReviewModel through
+   * your Claude login, at high effort or more, whatever its pipeline says (D202): in a real run a
+   * Sonnet review approved twice with real defects in a live-system change.
+   */
+  private stageAt(task: Task, i: number): Stage {
+    const stage = task.pipeline[i];
+    if (!task.live || stage.stage !== "review") return stage;
+    const model = this.repo.getSettings().liveReviewModel;
+    const same = stage.model === model && (!stage.provider || stage.provider === ANTHROPIC_PROVIDER_ID);
+    const effort = same && EFFORTS.indexOf(stage.effort) >= EFFORTS.indexOf("high") ? stage.effort : "high";
+    return { stage: "review", model, effort, ...(stage.prompt ? { prompt: stage.prompt } : {}) };
+  }
+
+  /** Whether the task waits for the human after its plan: its own choice, else Settings; always when live (D200, D202). */
+  private needsPlanApproval(task: Task): boolean {
+    if (task.live) return true;
+    return task.plan_approval ?? this.repo.getSettings().planApproval;
+  }
+
   /** The stage prompt, with what a tool-less model needs inlined (the diff, the file list). */
   private async stagePromptFor(task: Task, stageIndex: number, project: Project, cwd: string): Promise<string> {
-    const stage = task.pipeline[stageIndex];
+    const stage = this.stageAt(task, stageIndex);
     const res = this.providers.resolve(stage.provider);
     const capabilities = res.adapter.hasTools ? (res.adapter.kind === "cli" ? "cli" : "sdk") : "text";
     const ctx = { ...this.promptCtx(task, stageIndex, project), capabilities } as ReturnType<TaskRunner["promptCtx"]> & { capabilities: "sdk" | "cli" | "text"; inlineDiff?: unknown; fileList?: unknown };
@@ -670,7 +746,7 @@ export class TaskRunner {
     const revised = revision.ok ? extractRevisedPlan(this.repo.getRun(planRun.id)?.result_md) : "";
     // A failed revision must not leave the stage marked failed: the original plan still stands.
     if (!revision.ok) this.setRun(planRun.id, { status: "success", error: null, result_md: original });
-    if (task.mode === "autonomous") await this.commitWorktree(task, `kanban(debate): ${task.title}`);
+    if (usesWorktree(task)) await this.commitWorktree(task, `kanban(debate): ${task.title}`);
 
     this.setTask(task.id, {
       status: "approval",
@@ -689,12 +765,14 @@ export class TaskRunner {
     const gate = task.plan_gate;
     if (!gate) throw new ConflictError("This task is not waiting on a plan decision.");
     if (this.isBusy(taskId)) throw new ConflictError("Task is busy; wait for it to settle.");
-    const chosen = choice === "original" ? gate.original : choice === "revised" ? gate.revised : (text ?? "");
+    const chosen = choice === "original" ? gate.original : choice === "revised" ? gate.revised ?? "" : (text ?? "");
     if (!chosen.trim()) throw new ConflictError(choice === "revised" ? "There is no revised plan to use — pick the original or write your own." : "The plan text is empty.");
     const planRun = this.latestByStage(taskId).get(gate.stage_index);
     if (planRun) {
       this.setRun(planRun.id, { result_md: chosen, status: "success", error: null });
-      const event = this.repo.insertEvent(planRun.id, "debate:decision", { type: "debate_decision", choice });
+      const event = gate.kind === "approval"
+        ? this.repo.insertEvent(planRun.id, "plan:approved", { type: "plan_approved", edited: choice === "custom" })
+        : this.repo.insertEvent(planRun.id, "debate:decision", { type: "debate_decision", choice });
       this.bus.publish({ type: "event", runId: planRun.id, taskId, event });
     }
     const next = gate.stage_index + 1;
@@ -735,11 +813,13 @@ export class TaskRunner {
       parent: parent ? { id: parent.id, title: parent.title, spec_md: parent.spec_md } : null,
       siblings: this.repo.siblings(task).map((s) => ({ id: s.id, title: s.title, status: s.status, summary: s.summary })),
       previousResult: stageIndex > 0 ? prevRun?.result_md ?? null : null,
+      previousStage: stageIndex > 0 ? task.pipeline[stageIndex - 1]?.stage ?? null : null,
+      live: task.live,
       previousFrom: prevRun?.provider ? { provider: prevRun.provider, model: prevRun.model } : null,
       earlierResults,
       skills: task.skills,
       messages,
-      rejectNote: task.note,
+      rejectNote: this.rejectNotes.get(task.id) ?? null,
       verificationFailure: this.verifyFailures.get(task.id) ?? null,
       handover: this.handovers.get(task.id) ?? null,
       verifyCommand: project.env.verifyCommand,
@@ -800,7 +880,7 @@ export class TaskRunner {
     promptEvent?: boolean;
     /** When set, the model can't end its turn while this command fails. */
     verifyCommand?: string | null;
-  }): Promise<{ ok: boolean; error: string | null; providerId: string; budgetStop: boolean }> {
+  }): Promise<{ ok: boolean; error: string | null; providerId: string; budgetStop: boolean; turnLimit: boolean }> {
     const { task, run } = a;
     const abort = new AbortController();
     // Who runs this: Claude through your login, or one of the providers in Settings (D121).
@@ -847,6 +927,11 @@ export class TaskRunner {
           this.log(run.id, `\n[board] ${note}\n  ${command}\n`);
           return { behavior: "deny", message: note };
         }
+        // Reading needs no card: a supervised card is for what changes something (D197).
+        if (!autonomous && freeShellRead(toolName, input, settings.autoAllowReadCommands)) {
+          this.log(run.id, `\n[board] read-only command, run without a card:\n  ${command}\n`);
+          return { behavior: "allow", updatedInput: input };
+        }
       }
       // Browser tools have their own rules: looking at a local page is not a write (docs/DECISIONS.md D128).
       const browser = browserDecision(toolName, input, autonomous, a.cwd, browserDir);
@@ -874,7 +959,7 @@ export class TaskRunner {
       permissionMode: autonomous ? "acceptEdits" : "default",
       canUseTool,
       hooks: {
-        ...(autonomous ? {} : { PreToolUse: FORCE_ASK }),
+        ...(autonomous ? {} : { PreToolUse: forceAsk(settings.autoAllowReadCommands) }),
         // A message typed while the stage runs is handed over at the next tool call (D184).
         PostToolUse: steer.PostToolUse,
         // A waiting message holds the turn open first; then the deterministic gate: a code stage
@@ -947,6 +1032,7 @@ export class TaskRunner {
     let result: { ok: boolean; text: string | null; error: string | null; cost: number; inTok: number; outTok: number } | null = null;
     let thrown: string | null = null;
     let budgetStop = false;
+    let turnLimit = false;
     try {
       for await (const msg of stream) {
         const sid = (msg as { session_id?: string }).session_id;
@@ -1009,6 +1095,7 @@ export class TaskRunner {
           const ok = r.subtype === "success" && !r.is_error;
           // The SDK's own per-stage ceiling: the session is intact and can be resumed after Continue.
           if (r.subtype === "error_max_budget_usd") budgetStop = true;
+          if (r.subtype === "error_max_turns") turnLimit = true;
           // Where the dollar figure comes from is kept on the run: prices can be edited later (D123).
           let cost = r.total_cost_usd ?? 0;
           let costSource: Run["cost_source"] = "sdk";
@@ -1061,7 +1148,7 @@ export class TaskRunner {
       error,
     });
     this.bus.publish({ type: "run.finished", run: finished });
-    return { ok: !error, error, providerId: res.id, budgetStop: budgetStop && !a.ctl.stopped };
+    return { ok: !error, error, providerId: res.id, budgetStop: budgetStop && !a.ctl.stopped, turnLimit: turnLimit && !a.ctl.stopped };
   }
 
   /**
@@ -1714,7 +1801,7 @@ export class TaskRunner {
   /** What a model taking a stage over needs: where the work stands, and what the last one said. */
   private handoverText(task: Task, runId: string | undefined, from: string, why: string): string {
     const said = runId ? this.repo.lastAssistantText(runId, 1800) : "";
-    const where = task.mode === "autonomous"
+    const where = usesWorktree(task)
       ? "Its changes so far are in this worktree, committed as “[failed]” (see `git log -1 --stat` and `git status`)."
       : "Its changes so far are already in the folder (see `git status` and `git diff`).";
     return (
@@ -2166,7 +2253,7 @@ export class TaskRunner {
       throw new ConflictError(`This stage ran on ${this.providers.resolve(last.provider).label}, which cannot continue a session. Retry the stage or open a follow-up instead.`);
     }
     let cwd = project.path;
-    if (task.mode === "autonomous") {
+    if (usesWorktree(task)) {
       if (!task.worktree_path || !existsSync(task.worktree_path)) throw new ConflictError("The task worktree is gone; nothing to continue.");
       cwd = task.worktree_path;
     }
@@ -2182,7 +2269,7 @@ export class TaskRunner {
     void (async () => {
       try {
         const outcome = await this.runQuery({ task, project, run, cwd, ctl, prompt: text, resume: last.session_id!, stageStatus: "running", accumulate: true, verifyCommand: null });
-        if (task.mode === "autonomous") await this.commitWorktree(task, `kanban(chat): ${task.title}`);
+        if (usesWorktree(task)) await this.commitWorktree(task, `kanban(chat): ${task.title}`);
         if (!outcome.ok) {
           this.setRun(run.id, before); // the chat turn failed; the stage result it belonged to stands
           if (outcome.providerId === ANTHROPIC_PROVIDER_ID && this.pauseForLimit(taskId, outcome.error)) return;
@@ -2269,7 +2356,7 @@ export class TaskRunner {
         await this.git.removeWorktree(project.path, task.id, { deleteBranch: "force" });
       }
       this.ports.delete(taskId);
-      return this.setTask(taskId, { status: "backlog", branch: null, worktree_path: null, base_sha: null, note: "work discarded", plan_gate: null });
+      return this.setTask(taskId, { status: "backlog", branch: null, worktree_path: null, base_sha: null, note: DISCARDED_NOTE, plan_gate: null });
     });
   }
 
@@ -2424,6 +2511,9 @@ export class TaskRunner {
         mode: allowedMode(project, task.mode),
         pipeline: task.pipeline,
         skills: task.skills,
+        live: task.live,
+        plan_approval: task.plan_approval,
+        own_branch: task.own_branch,
         status: "backlog",
       });
       ids.push(child.id);
@@ -2474,6 +2564,9 @@ export class TaskRunner {
       mode: task.mode,
       pipeline: task.pipeline,
       skills: task.skills,
+      live: task.live,
+      plan_approval: task.plan_approval,
+      own_branch: task.own_branch,
       status: "backlog",
     });
     this.setTask(task.id, { related_to: [...new Set([...task.related_to, created.id])].slice(0, 10) });

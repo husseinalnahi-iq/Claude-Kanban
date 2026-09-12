@@ -159,3 +159,61 @@ test("analytics are computed in SQL, so nothing is silently dropped past a row l
   assert.deepEqual(agg.byModel.map((m) => m.runs).sort((a, b) => a - b), [1050, 1050]);
   assert.ok(!agg.byModel.some((m) => m.cost > 50), "another project's spend is not mixed in");
 });
+
+test("read-only shell commands a supervised run may use without a card (D197)", async () => {
+  const { readOnlyCommand } = await import("../src/engine/gate.ts");
+  // Seen in a real supervised run: each of these was a card someone had to click.
+  for (const cmd of [
+    String.raw`cd "C:\work\proj" && wc -l docs/notes.md`,
+    String.raw`cd "C:\work\proj" && grep -n "^## " docs/notes.md | tail -15`,
+    String.raw`cd "C:\work\proj" && git status --short && echo "---branch---" && git rev-parse --abbrev-ref HEAD`,
+    'cd "C:/work/proj" && find scripts/payments -maxdepth 1 -iname "api*"',
+    'cd "C:/work/proj" && git show HEAD -- docs/notes.md | tail -60',
+    "git diff abc123 --stat 2>/dev/null",
+    String.raw`git -C "C:\work\my proj" log --oneline -5`,
+    "Get-ChildItem -Recurse src | Select-String -Pattern TODO",
+    "ls src; cat package.json",
+    "sed -n 1,60p scripts/deploy.py; grep -n x docs/a.md | head -30",
+    "sed -n 495,560p schema.py",
+    "ls .claude/skills 2>/dev/null; ls docs",
+    // a `|` inside quotes is part of the pattern, not a pipe
+    'grep -n -i "sign.in\\|log in\\|Session Timeout" "docs/notes.md" "docs/todo.md"',
+  ]) assert.equal(readOnlyCommand(cmd), true, cmd);
+
+  for (const cmd of [
+    "python fix_access.py",
+    "python fix_access.py --apply",
+    'cat > "$SP/inv1.py" <<\'EOF\'\nprint(1)\nEOF',
+    "echo hi > notes.txt",
+    "grep -n x a.txt >> out.txt",
+    "find . -name '*.tmp' -delete",
+    "find . -exec rm {} ;",
+    "sort -o out.txt in.txt",
+    "sed -i s/a/b/ file.txt",
+    "sed -n 1p -i file.txt",
+    "sed s/a/b/w out.txt in.txt",
+    "sed -n '1e rm x' f",
+    "sed -n 1,5w out.txt in.txt",
+    "git commit -m wip",
+    "git add -A",
+    "git push origin main",
+    "git -c core.pager=evil log",
+    "git diff --output=patch.txt",
+    "git branch -D main",
+    "echo $(rm -rf x)",
+    'echo "$(rm -rf x)"',
+    "echo `rm -rf x`",
+    "cat a.txt | xargs rm",
+    "rm -rf node_modules",
+    "npm test",
+    "node -e \"require('fs').rmSync('x')\"",
+    "Get-ChildItem | Where-Object { Remove-Item $_ }",
+    "Get-ChildItem | Remove-Item",
+    String.raw`& "C:\tools\x.exe"`,
+    "ls & rm x",
+    'grep "unbalanced a.txt',
+    String.raw`grep "a\"; rm x; echo \"" f`,
+    "FOO=bar ls",
+    "",
+  ]) assert.equal(readOnlyCommand(cmd), false, cmd);
+});

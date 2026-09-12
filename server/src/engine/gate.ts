@@ -112,6 +112,78 @@ export function blockedCommand(cmd: string, blocked: string[]): string | null {
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+/**
+ * Programs that only read. A supervised run may use them without an approval card when
+ * `autoAllowReadCommands` is on. Deliberately short: nothing that can run other code (sed -i, awk
+ * system(), xargs, Where-Object scriptblocks) and nothing that writes a file of its own.
+ */
+const READ_PROGRAMS = new Set([
+  "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "ls", "dir", "find", "pwd", "echo", "printf",
+  "sort", "uniq", "cut", "tr", "diff", "file", "stat", "du", "df", "which", "where", "whoami", "date",
+  "basename", "dirname", "realpath", "tree", "jq", "true", "cd", "pushd", "popd",
+  "get-childitem", "gci", "get-content", "gc", "select-string", "sls", "test-path", "get-item", "gi",
+  "get-location", "gl", "resolve-path", "split-path", "join-path", "measure-object", "set-location", "sl",
+]);
+/** git subcommands that only read. Options that run a program or write a file are refused below. */
+const READ_GIT = new Set([
+  "status", "diff", "log", "show", "rev-parse", "ls-files", "blame", "describe", "shortlog", "cat-file", "grep",
+  "help", "version", "--version",
+]);
+/** Flags that turn a reading program into a writing (or program-running) one. */
+const WRITE_FLAGS: Record<string, RegExp> = {
+  find: /^-(delete|exec|execdir|ok|okdir|fprint0?|fprintf|fls)$/,
+  sort: /^(-o|--output(=.*)?)$/,
+  git: /^(-c|--output(=.*)?|--ext-diff|--exec(=.*)?|--upload-pack(=.*)?|--open-files-in-pager.*)$/,
+};
+/** Redirections that discard output rather than write a file. */
+const NULL_REDIRECT = /(^|\s)(&|[12])?>\s*(\/dev\/null|\$null|nul)(?=[\s;|&)]|$)|(^|\s)2>&1(?=[\s;|&)]|$)/gi;
+/** `sed` only as a printer: `-n` with `Np` / `N,Mp` scripts, nothing that writes (`-i`, `w`, `e`). */
+const SED_PRINT = /^(\d+(,\d+)?p|\$p)$/;
+
+/**
+ * True only when every part of a shell command is a known read-only program. Anything unusual — a
+ * redirect to a file, command substitution, a script block, an escaped quote the tokenizer could
+ * misread — makes it false, and the command gets its approval card as before (docs/DECISIONS.md D197).
+ */
+export function readOnlyCommand(cmd: string): boolean {
+  const c = cmd.trim();
+  if (!c) return false;
+  if (/`|\$\(|\\["']/.test(c)) return false;
+  if (((c.match(/"/g) ?? []).length % 2) || ((c.match(/'/g) ?? []).length % 2)) return false;
+  // What is left outside quotes decides what the shell does.
+  const bare = c.replace(/"[^"]*"|'[^']*'/g, "Q").replace(NULL_REDIRECT, " ");
+  if (/[<>{}]|\$\{|(^|[^&])&($|[^&])/.test(bare)) return false;
+  // Split on separators outside quotes only: `grep "a\|b" f` is one command, not two.
+  const masked = c.replace(/"[^"]*"|'[^']*'/g, (q) => q[0] + "_".repeat(q.length - 2) + q[0]);
+  const segments: string[] = [];
+  let from = 0;
+  for (const m of masked.matchAll(/&&|\|\||[;|\n]/g)) {
+    segments.push(c.slice(from, m.index));
+    from = m.index! + m[0].length;
+  }
+  segments.push(c.slice(from));
+  for (const segment of segments) {
+    const tokens = tokenize(segment.replace(NULL_REDIRECT, " "));
+    if (!tokens.length) continue;
+    const prog = (tokens[0].split(/[\\/]/).pop() ?? "").toLowerCase().replace(/\.exe$/, "");
+    const flags = WRITE_FLAGS[prog];
+    if (flags && tokens.slice(1).some((t) => flags.test(t))) return false;
+    if (prog === "sed") {
+      const args = tokens.slice(1);
+      if (args[0] !== "-n" || !args[1] || !SED_PRINT.test(args[1]) || args.slice(2).some((t) => t.startsWith("-"))) return false;
+      continue;
+    }
+    if (prog === "git") {
+      let i = 1;
+      while (i < tokens.length && tokens[i].startsWith("-") && tokens[i] !== "--version") i += /^(-C|--git-dir|--work-tree)$/.test(tokens[i]) ? 2 : 1;
+      if (!READ_GIT.has(tokens[i] ?? "")) return false;
+      continue;
+    }
+    if (!READ_PROGRAMS.has(prog)) return false;
+  }
+  return true;
+}
+
 /** Returns why a shell command is not allowed in an autonomous worktree, or null when it is fine. */
 export function shellViolation(cmd: string, cwd: string): string | null {
   if (/(^|[\s"'=;&|(`])\.\.([\\/]|$|[\s"';&|)])/.test(cmd)) return "it walks out of the worktree with `..`";

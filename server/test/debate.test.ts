@@ -51,9 +51,9 @@ test("plan → critic → revision in the planner's own session, then the task w
     const t = s.repo.getTask(task.id)!;
     assert.equal(t.plan_gate!.original, "PLAN v1");
     assert.equal(t.plan_gate!.revised, "PLAN v2 with migration");
-    assert.equal(t.plan_gate!.critique.objections.length, 2);
-    assert.equal(t.plan_gate!.critique.objections[0].severity, "high");
-    assert.equal(t.plan_gate!.critic.model, "claude-sonnet-5");
+    assert.equal(t.plan_gate!.critique!.objections.length, 2);
+    assert.equal(t.plan_gate!.critique!.objections[0].severity, "high");
+    assert.equal(t.plan_gate!.critic!.model, "claude-sonnet-5");
     const runs = s.repo.runsForTask(task.id);
     assert.equal(runs.length, 2);
     assert.equal(runs.find((r) => r.role === "critic")!.status, "success");

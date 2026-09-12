@@ -93,6 +93,9 @@ const LATER_COLUMNS: { table: string; column: string; ddl: string }[] = [
   { table: "approvals", column: "answer_json", ddl: "answer_json TEXT" },
   { table: "tasks", column: "pause_reason", ddl: "pause_reason TEXT" },
   { table: "tasks", column: "budget_extra_usd", ddl: "budget_extra_usd REAL NOT NULL DEFAULT 0" },
+  { table: "tasks", column: "plan_approval", ddl: "plan_approval INTEGER" },
+  { table: "tasks", column: "live", ddl: "live INTEGER NOT NULL DEFAULT 0" },
+  { table: "tasks", column: "own_branch", ddl: "own_branch INTEGER NOT NULL DEFAULT 0" },
 ];
 
 export function nowIso(): string {
@@ -144,6 +147,10 @@ export function openDb(file: string): DatabaseSync {
   seed.run("loadUserPlugins", "true");
   seed.run("browserChecks", "true");
   seed.run("chromeInSupervised", "false");
+  seed.run("autoAllowReadCommands", "true");
+  seed.run("planApproval", "false");
+  seed.run("autoContinueTurns", "2");
+  seed.run("liveReviewModel", "claude-opus-5");
   seed.run("liveView", "true");
   seed.run("maxCostPerTaskUsd", "15");
   seed.run("maxRepeatedToolCalls", "8");

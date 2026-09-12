@@ -13,6 +13,8 @@ export type Call = { prompt: string; options: Record<string, any> };
 export interface FakeOpts {
   sessionId?: string;
   fail?: boolean;
+  /** End with the SDK's turn-cap result (error_max_turns): the session is intact. */
+  maxTurns?: boolean;
   askWrite?: boolean;
   result?: string;
   /** Override the result's cost / usage (foreign providers report $0 from the SDK). */
@@ -49,6 +51,10 @@ export function fakeQuery(opts: FakeOpts = {}) {
       }
       if (params.options.abortController?.signal.aborted) return;
       yield { type: "assistant", session_id, message: { content: [{ type: "text", text: "working" }] } } as any;
+      if (o.maxTurns) {
+        yield { type: "result", subtype: "error_max_turns", is_error: true, errors: ["Reached maximum number of turns (60)"], total_cost_usd: 0.003, session_id, modelUsage: {} } as any;
+        return;
+      }
       if (o.fail) {
         yield { type: "result", subtype: "error_during_execution", is_error: true, errors: [typeof o.fail === "string" ? o.fail : "boom"], total_cost_usd: 0.002, session_id, modelUsage: {} } as any;
         throw new Error("Claude Code process exited with code 1");

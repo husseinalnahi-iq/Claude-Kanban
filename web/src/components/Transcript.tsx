@@ -81,6 +81,8 @@ function EventView({ ev }: { ev: EventRow }) {
   if (ev.type === "delegate:raw") return null;
   if (ev.type === "debate:skipped") return <div className="font-mono text-[11px] text-ink-500">debate skipped · {p.reason}</div>;
   if (ev.type === "debate:decision") return <div className="font-mono text-[11px] text-iris">plan chosen: {p.choice}</div>;
+  if (ev.type === "plan:approved") return <div className="font-mono text-[11px] text-iris">plan approved{p.edited ? " (edited by you)" : ""}</div>;
+  if (ev.type === "turns:continued") return <div className="font-mono text-[11px] text-amber">turn limit reached — continued in the same session ({p.n})</div>;
   if (ev.type === "system:init") {
     return (
       <div className="font-mono text-[11px] text-ink-500">

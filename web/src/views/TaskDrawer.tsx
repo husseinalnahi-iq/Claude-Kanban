@@ -23,11 +23,12 @@ import { DepGraph } from "../components/DepGraph.tsx";
 import { Gallery } from "../components/Gallery.tsx";
 import { CostPanel } from "../components/CostPanel.tsx";
 import { PlanGate } from "../components/PlanGate.tsx";
+import { SafetyOptions } from "../components/SafetyOptions.tsx";
 import { OutOfUsage } from "../components/OutOfUsage.tsx";
-import { autonomousBlocked, NewTaskForm } from "../components/forms.tsx";
+import { autonomousBlocked, branchBlocked, NewTaskForm } from "../components/forms.tsx";
 
-type Tab = "spec" | "pipeline" | "transcript" | "approvals" | "browser" | "diff" | "subtasks" | "files" | "messages" | "chat";
-const TABS: Tab[] = ["spec", "pipeline", "transcript", "approvals", "browser", "diff", "subtasks", "files", "messages", "chat"];
+type Tab = "spec" | "plan" | "pipeline" | "transcript" | "approvals" | "browser" | "diff" | "subtasks" | "files" | "messages" | "chat";
+const TABS: Tab[] = ["spec", "plan", "pipeline", "transcript", "approvals", "browser", "diff", "subtasks", "files", "messages", "chat"];
 
 /** Open a task's drawer on a given tab (the board's "live" chip opens the Browser tab). */
 let requestedTab: { taskId: string; tab: Tab } | null = null;
@@ -136,6 +137,7 @@ function SpecTab({ d }: { d: TaskDetail }) {
   const project = projects.find((p) => p.id === d.task.project_id);
   const { busy, error, run } = useAction();
   const blocked = project ? autonomousBlocked(project) : null;
+  const branchBlockedReason = project ? branchBlocked(project) : null;
   const [refining, setRefining] = useState(false);
   const t = d.task;
   const sug = t.suggestion;
@@ -207,6 +209,23 @@ function SpecTab({ d }: { d: TaskDetail }) {
               </button>
             ))}
           </div>
+          {t.mode === "supervised" ? (
+            <label className="mt-2 flex cursor-pointer items-start gap-1.5 text-[11.5px] text-ink-300" title={branchBlockedReason ?? undefined}>
+              <input
+                type="checkbox"
+                className="mt-0.5 accent-cyan"
+                checked={t.own_branch}
+                disabled={d.busy || !!branchBlockedReason || !!t.branch}
+                onChange={(e) => run(() => api.patchTask(t.id, { own_branch: e.target.checked }))}
+              />
+              <span>
+                Work on its own branch
+                <span className="block text-ink-500">
+                  {branchBlockedReason ?? (t.branch ? "Approve or discard its work to change this." : "Its own copy of the project; lands only when you approve.")}
+                </span>
+              </span>
+            </label>
+          ) : null}
         </div>
         <div>
           <div className="mb-1 text-[11px] uppercase tracking-wider text-ink-500">Workspace</div>
@@ -216,7 +235,7 @@ function SpecTab({ d }: { d: TaskDetail }) {
                 <div className="text-amber">{t.branch}</div>
                 <div className="truncate text-ink-500" title={t.worktree_path ?? ""}>{t.worktree_path}</div>
               </>
-            ) : t.mode === "autonomous" ? (
+            ) : t.mode === "autonomous" || t.own_branch ? (
               blocked ? <span className="text-rust">{blocked}</span> : "worktree created on first run"
             ) : (
               "main checkout"
@@ -310,8 +329,54 @@ function PipelineTab({ d }: { d: TaskDetail }) {
           Save pipeline
         </Button>
       </div>
+      <div className="border-t border-ink-800 pt-3">
+        <div className="mb-2 text-[11px] uppercase tracking-wider text-ink-500">Safety</div>
+        <SafetyOptions
+          live={d.task.live}
+          planApproval={d.task.plan_approval}
+          settingOn={settings?.planApproval ?? false}
+          liveModel={settings?.liveReviewModel ?? "claude-opus-5"}
+          onChange={(v) => void run(() => api.patchTask(d.task.id, v))}
+        />
+        {d.busy ? <p className="mt-1.5 text-[11.5px] text-ink-500">Changes apply from the next stage that starts.</p> : null}
+      </div>
     </div>
   );
+}
+
+/** The plan the code stage works to, next to the code stage's own report on each of its steps (D198). */
+function PlanTab({ d }: { d: TaskDetail }) {
+  const ok = d.runs.filter((r) => r.status === "success" && r.role !== "critic" && r.result_md?.trim());
+  const plan = [...ok].reverse().find((r) => r.stage === "plan");
+  const code = [...ok].reverse().find((r) => r.stage === "code" || r.stage === "custom");
+  const steps = code?.result_md ? planStepsOf(code.result_md) : null;
+  if (!plan) {
+    return <Empty>No plan yet. It appears here when the Plan stage finishes — and, with plan approval on, the task waits here for you before any code is written.</Empty>;
+  }
+  return (
+    <div className="space-y-4">
+      {steps ? (
+        <section className="rounded-lg border border-moss/30 bg-moss/5 p-3">
+          <div className="mb-1.5 text-[11px] uppercase tracking-wider text-moss">What the {code!.stage} stage did with each step · {modelLabel(code!)}</div>
+          <Markdown text={steps} className="text-[12.5px]" />
+        </section>
+      ) : code ? (
+        <p className="text-[12px] text-rust">The {code.stage} stage finished without a “Plan steps” checklist — check its result against the plan below.</p>
+      ) : null}
+      <section>
+        <div className="mb-1.5 flex items-center gap-2 text-[11px] uppercase tracking-wider text-ink-500">
+          Plan · {modelLabel(plan)} · {ago(plan.ended_at ?? plan.started_at)}
+        </div>
+        <Markdown text={plan.result_md!} className="text-[12.5px]" />
+      </section>
+    </div>
+  );
+}
+
+/** The "## Plan steps" section of a code stage's summary, up to the next heading of the same level. */
+function planStepsOf(md: string): string | null {
+  const m = /^##\s+Plan steps[^\n]*\n([\s\S]*?)(?=^##\s|(?![\s\S]))/im.exec(md);
+  return m && m[1].trim() ? m[1].trim() : null;
 }
 
 function TranscriptTab({ d, chat }: { d: TaskDetail; chat?: boolean }) {
@@ -629,7 +694,7 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
   const [tab, setTab] = useState<Tab | null>(() => takeRequested(taskId));
   const [showCost, setShowCost] = useState(false);
   const pending = d?.approvals.filter((a) => !a.decision) ?? [];
-  const current: Tab = tab ?? (d?.task.plan_gate ? "spec" : pending.length ? "approvals" : d && ["planning", "running"].includes(d.task.status) ? "transcript" : "spec");
+  const current: Tab = tab ?? (d?.task.plan_gate ? (d.task.plan_gate.kind === "approval" ? "plan" : "spec") : pending.length ? "approvals" : d && ["planning", "running"].includes(d.task.status) ? "transcript" : "spec");
 
   // Another task opened in the same drawer: its own default tab, or the one it was opened on.
   const shownTask = useRef(taskId);
@@ -664,7 +729,8 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
                   <span className={`text-[11px] font-semibold uppercase tracking-[0.08em] ${costPaused ? "text-rose" : STATUS_META[d.task.status].text}`}>
                     {creditOut ? "Needs you · out of credit" : costPaused ? "Needs you · cost" : STATUS_META[d.task.status].label}
                   </span>
-                  <ModeChip mode={d.task.mode} />
+                  <ModeChip mode={d.task.mode} ownBranch={d.task.own_branch} />
+                  {d.task.live ? <Chip className="border-rose/50 text-rose" title="Touches a live system: plan approval is on and review runs on the live review model">prod</Chip> : null}
                   <Chip className={PRIORITY_META[d.task.priority].tone} title={PRIORITY_META[d.task.priority].title}>{d.task.priority}</Chip>
                   <Chip className={TYPE_META[d.task.type].tone}>{TYPE_META[d.task.type].short}</Chip>
                   <span className="font-mono text-[10.5px] text-ink-500">{d.task.id}</span>
@@ -709,6 +775,7 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
             </nav>
             <div className={`min-h-0 flex-1 px-5 py-4 ${current === "transcript" || current === "chat" ? "flex flex-col" : "overflow-y-auto"}`}>
               {current === "spec" ? <SpecTab d={d} /> : null}
+              {current === "plan" ? <PlanTab d={d} /> : null}
               {current === "pipeline" ? <PipelineTab d={d} /> : null}
               {current === "transcript" ? <TranscriptTab d={d} /> : null}
               {current === "chat" ? <TranscriptTab d={d} chat /> : null}

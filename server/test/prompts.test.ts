@@ -94,3 +94,42 @@ test("autonomous gate: bypasses found in review are refused", () => {
   assert.equal(autonomousGate("mcp__plugin_context7_context7__query-docs", {}, cwd).behavior, "allow");
   assert.equal(autonomousGate("AskUserQuestion", {}, cwd).behavior, "deny");
 });
+
+// A real 8,600-character plan lost its middle — the execution steps and a safety guard — at the old
+// 6,000-character clamp, and the code stage never saw them (D198).
+const longPlan = `# Plan\n${"Root cause detail. ".repeat(250)}\n## Execution steps\n2. **(required)** snapshot every user's roles, then restore any lost\n${"Docs and risks. ".repeat(200)}`;
+
+test("a plan reaches the code stage whole; other results are still clamped", () => {
+  const code = buildStagePrompt({ ...base, previousResult: longPlan, previousStage: "plan" });
+  assert.ok(longPlan.length > 6000);
+  assert.match(code, /## The plan \(previous stage\)/);
+  assert.match(code, /snapshot every user's roles/);
+  assert.doesNotMatch(code, /characters trimmed/);
+  const custom = buildStagePrompt({ ...base, previousResult: longPlan, previousStage: "custom" });
+  assert.match(custom, /characters trimmed — `board_get_task` has the full text/);
+});
+
+test("code stage works to the plan and reports each step; review checks the plan", () => {
+  const code = buildStagePrompt({ ...base, previousResult: "## Execution steps\n1. do x", previousStage: "plan" });
+  assert.match(code, /The plan above is your contract/);
+  assert.match(code, /do not repeat its investigation/);
+  assert.match(code, /## Plan steps` checklist/);
+  const noPlan = buildStagePrompt({ ...base, previousStage: "custom" });
+  assert.doesNotMatch(noPlan, /your contract/);
+
+  const review = buildStagePrompt({
+    ...base, stage: "review", previousResult: "Changed a.ts", previousStage: "code",
+    earlierResults: [{ stage: "plan", result: longPlan }],
+  });
+  assert.match(review, /snapshot every user's roles/, "review sees the whole plan, not its first 1,500 characters");
+  assert.match(review, /dropped silently[^\n]*CHANGES_NEEDED/);
+  assert.match(buildStagePrompt({ ...base, stage: "plan" }), /\*\*\(required\)\*\*/);
+});
+
+test("supervised code stage asks for a gated step on a card instead of stopping", () => {
+  const sup = buildStagePrompt({ ...base, mode: "supervised", branch: null });
+  assert.match(sup, /## Approvals/);
+  assert.match(sup, /The card is the approval/);
+  assert.doesNotMatch(buildStagePrompt(base), /## Approvals/, "autonomous runs have no cards");
+  assert.doesNotMatch(buildStagePrompt({ ...base, mode: "supervised", branch: null, stage: "plan" }), /## Approvals/);
+});

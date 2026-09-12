@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { inputCls } from "./ui.tsx";
 
 export interface ModelOption {
@@ -18,6 +19,9 @@ export interface ModelOption {
  * A model picker for lists too long for a <select> (OpenRouter has hundreds): type to filter,
  * rows grouped under headings, and anything typed can be used as a model id as it is.
  */
+type Pos = { left: number; top?: number; bottom?: number; width: number; maxHeight: number };
+const samePos = (a: Pos | null, b: Pos) => !!a && a.left === b.left && a.top === b.top && a.bottom === b.bottom && a.width === b.width && a.maxHeight === b.maxHeight;
+
 export function ModelCombobox({
   value, onChange, options, note, loading, warn, placeholder,
 }: {
@@ -34,10 +38,11 @@ export function ModelCombobox({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
-  const [pos, setPos] = useState<{ left: number; top?: number; bottom?: number; width: number; maxHeight: number } | null>(null);
+  const [pos, setPos] = useState<Pos | null>(null);
   const button = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const filter = useRef<HTMLInputElement>(null);
 
   const q = query.trim().toLowerCase();
   const rows = useMemo(
@@ -49,20 +54,30 @@ export function ModelCombobox({
   const count = rows.length + (offerTyped ? 1 : 0);
   const current = options.find((o) => o.id === value);
 
-  // Fixed to the viewport so a dialog's scroll box cannot clip it; opens upward near the bottom edge.
-  const place = () => {
+  /**
+   * Fixed to the viewport so a dialog's scroll box cannot clip it, and re-measured while open so it
+   * stays under its button when the dialog scrolls. Width follows the button (a 600px minimum put the
+   * panel half a screen away from a picker in a narrow column), and an unchanged measurement sets no
+   * state: re-rendering on every scroll event made the list flicker and drift. The panel itself is
+   * portalled to <body>: a dialog card that animates has a transform, which makes IT the reference for
+   * position:fixed, and a tall card put the list hundreds of pixels off (docs/DECISIONS.md D204).
+   */
+  const measure = (): Pos | null => {
     const r = button.current?.getBoundingClientRect();
-    if (!r) return;
-    const width = Math.min(Math.max(r.width, 600), window.innerWidth - 16);
+    if (!r) return null;
+    const width = Math.min(Math.max(r.width, 320), 560, window.innerWidth - 16);
     const left = Math.min(Math.max(8, r.left), window.innerWidth - width - 8);
     const below = window.innerHeight - r.bottom - 8;
     const above = r.top - 8;
-    if (below >= 260 || below >= above) setPos({ left, top: r.bottom + 4, width, maxHeight: Math.min(420, below - 4) });
-    else setPos({ left, bottom: window.innerHeight - r.top + 4, width, maxHeight: Math.min(420, above - 4) });
+    return below >= 260 || below >= above
+      ? { left, top: r.bottom + 4, width, maxHeight: Math.min(420, below - 4) }
+      : { left, bottom: window.innerHeight - r.top + 4, width, maxHeight: Math.min(420, above - 4) };
   };
+  const place = () => setPos((prev) => { const next = measure(); return next && samePos(prev, next) ? prev : next; });
 
   useLayoutEffect(() => {
     if (open) place();
+    else setPos(null);
   }, [open]);
 
   useEffect(() => {
@@ -70,17 +85,33 @@ export function ModelCombobox({
     const away = (e: MouseEvent) => {
       if (!panel.current?.contains(e.target as Node) && !button.current?.contains(e.target as Node)) setOpen(false);
     };
+    // Coalesce a burst of scroll events into one measurement per frame.
+    let frame = 0;
+    const soon = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        place();
+      });
+    };
     const move = (e: Event) => {
-      if (!panel.current?.contains(e.target as Node)) place();
+      if (!panel.current?.contains(e.target as Node)) soon();
     };
     document.addEventListener("mousedown", away);
-    window.addEventListener("resize", place);
+    window.addEventListener("resize", soon);
     window.addEventListener("scroll", move, true);
     return () => {
+      if (frame) cancelAnimationFrame(frame);
       document.removeEventListener("mousedown", away);
-      window.removeEventListener("resize", place);
+      window.removeEventListener("resize", soon);
       window.removeEventListener("scroll", move, true);
     };
+  }, [open]);
+
+  // Focusing the filter must not scroll the dialog the button sits in — that moved the panel away
+  // from its button the moment it opened.
+  useEffect(() => {
+    if (open) filter.current?.focus({ preventScroll: true });
   }, [open]);
 
   useEffect(() => setActive(0), [q]);
@@ -144,7 +175,8 @@ export function ModelCombobox({
         {current?.free ? <span className="shrink-0 text-[10px] text-moss">free</span> : null}
         <span className="shrink-0 text-[10px] text-ink-500">▾</span>
       </button>
-      {open && pos ? (
+      {open && pos
+        ? createPortal(
         <div
           ref={panel}
           className="fixed z-[100] flex flex-col overflow-hidden rounded-lg border border-ink-700 bg-ink-900 shadow-2xl shadow-black/50"
@@ -157,7 +189,7 @@ export function ModelCombobox({
         >
           <div className="border-b border-ink-800 p-1.5">
             <input
-              autoFocus
+              ref={filter}
               className={`${inputCls} font-mono`}
               placeholder="filter, or type any model id…"
               value={query}
@@ -207,8 +239,10 @@ export function ModelCombobox({
           <div className="border-t border-ink-800 px-2.5 py-1 text-[10.5px] text-ink-500">
             {options.length} models · ↑↓ to move · Enter to pick · any id you type works too
           </div>
-        </div>
-      ) : null}
+        </div>,
+        document.body,
+      )
+        : null}
     </>
   );
 }

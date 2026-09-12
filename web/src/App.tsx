@@ -23,10 +23,11 @@ import { Skills } from "./views/Skills.tsx";
 import { Settings } from "./views/Settings.tsx";
 import { Tour } from "./views/Tour.tsx";
 import { Welcome } from "./components/Welcome.tsx";
-import { useWelcomeOpen } from "./lib/welcome.ts";
+import { closeWelcome, useWelcomeOpen } from "./lib/welcome.ts";
 import { Setup, useSetupCount } from "./views/Setup.tsx";
 import { ChatPanel } from "./components/chat/ChatPanel.tsx";
 import { TerminalDock } from "./components/TerminalDock.tsx";
+import { ErrorBoundary, StaleServerBanner } from "./components/ErrorBoundary.tsx";
 import { Button, Empty } from "./components/ui.tsx";
 
 const NAV: { view: View; label: string; key: string }[] = [
@@ -234,7 +235,9 @@ export function App() {
             <UsageMeters />
           </div>
         </div>
+        <StaleServerBanner />
         <main className="min-h-0 flex-1 overflow-hidden">
+          <ErrorBoundary key={`${route.view}:${route.projectId ?? ""}`}>
           {needsProject && !project ? (
             <div className="mx-auto mt-24 max-w-md space-y-4 text-center">
               <Empty>
@@ -261,15 +264,26 @@ export function App() {
           ) : route.view === "tour" ? (
             <Tour hasProjects={projects.length > 0} onAddProject={() => setAdding(true)} />
           ) : null}
+          </ErrorBoundary>
         </main>
-        <TerminalDock project={project} open={terminal} onClose={() => setTerminal(false)} />
+        <ErrorBoundary onClose={() => setTerminal(false)}>
+          <TerminalDock project={project} open={terminal} onClose={() => setTerminal(false)} />
+        </ErrorBoundary>
       </div>
 
-      {route.taskId ? <TaskDrawer taskId={route.taskId} onClose={() => navigate({ taskId: null })} /> : null}
-      {adding ? <NewProjectForm onClose={() => setAdding(false)} /> : null}
-      {searching ? <SearchModal projectId={project?.id} onClose={() => setSearching(false)} /> : null}
-      {chatting && project ? <ChatPanel project={project} onClose={() => setChatting(false)} /> : null}
-      {welcome ? <Welcome hasProjects={projects.length > 0} onAddProject={() => setAdding(true)} /> : null}
+      {route.taskId ? (
+        <ErrorBoundary key={route.taskId} onClose={() => navigate({ taskId: null })}>
+          <TaskDrawer taskId={route.taskId} onClose={() => navigate({ taskId: null })} />
+        </ErrorBoundary>
+      ) : null}
+      {adding ? <ErrorBoundary onClose={() => setAdding(false)}><NewProjectForm onClose={() => setAdding(false)} /></ErrorBoundary> : null}
+      {searching ? <ErrorBoundary onClose={() => setSearching(false)}><SearchModal projectId={project?.id} onClose={() => setSearching(false)} /></ErrorBoundary> : null}
+      {chatting && project ? (
+        <ErrorBoundary key={project.id} onClose={() => setChatting(false)}>
+          <ChatPanel project={project} onClose={() => setChatting(false)} />
+        </ErrorBoundary>
+      ) : null}
+      {welcome ? <ErrorBoundary onClose={closeWelcome}><Welcome hasProjects={projects.length > 0} onAddProject={() => setAdding(true)} /></ErrorBoundary> : null}
       <Toasts />
     </div>
   );

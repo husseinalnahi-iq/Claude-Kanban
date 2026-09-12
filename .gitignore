@@ -4,3 +4,7 @@ web/dist/
 .playwright-mcp/
 *.log
 .env
+
+# Local-only publishing rules (private names and excluded paths)
+.claude/publish.local.json
+.claude/*.local.*

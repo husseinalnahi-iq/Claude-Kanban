@@ -335,6 +335,9 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [forced, setForced] = useState(3);
   const [defMax, setDefMax] = useState(3);
   const [maxTurns, setMaxTurns] = useState(60);
+  const [autoContinue, setAutoContinue] = useState(2);
+  const [planApproval, setPlanApproval] = useState(false);
+  const [liveReviewModel, setLiveReviewModel] = useState("claude-opus-5");
   const [maxCost, setMaxCost] = useState(5);
   const [subDepth, setSubDepth] = useState(2);
   const [subMax, setSubMax] = useState(5);
@@ -363,6 +366,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [questionWait, setQuestionWait] = useState(0);
   const [browserChecks, setBrowserChecks] = useState(true);
   const [chrome, setChrome] = useState(false);
+  const [readsFree, setReadsFree] = useState(true);
   const [liveView, setLiveView] = useState(true);
   const [checklist, setChecklist] = useState("");
   const [notif, setNotif] = useState(notifyState());
@@ -379,6 +383,9 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
     setForced(settings.maxForcedParallel);
     setDefMax(settings.defaultMaxConcurrent);
     setMaxTurns(settings.maxTurnsPerStage);
+    setAutoContinue(settings.autoContinueTurns);
+    setPlanApproval(settings.planApproval);
+    setLiveReviewModel(settings.liveReviewModel);
     setMaxCost(settings.maxCostPerStageUsd);
     setSubDepth(settings.maxSubagentDepth);
     setSubMax(settings.maxConcurrentSubagents);
@@ -405,6 +412,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
     setQuestionWait(settings.questionWaitMin);
     setBrowserChecks(settings.browserChecks);
     setChrome(settings.chromeInSupervised);
+    setReadsFree(settings.autoAllowReadCommands);
     setLiveView(settings.liveView);
     setChecklist(settings.onboardingChecklist);
   }, [settings]);
@@ -415,7 +423,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
       setSettings(
         await api.patchSettings({
           models, defaultPipeline: pipeline, globalCap, serial, maxForcedParallel: forced, defaultMaxConcurrent: defMax,
-          maxTurnsPerStage: maxTurns, maxCostPerStageUsd: maxCost,
+          maxTurnsPerStage: maxTurns, maxCostPerStageUsd: maxCost, autoContinueTurns: autoContinue, planApproval, liveReviewModel,
           maxSubagentDepth: subDepth, maxConcurrentSubagents: subMax, cacheableSystemPrompt: cacheable,
           triageModel, chatModel, chatEffort, specModel, specEffort, visionModel: vision.model, visionProvider: vision.provider, autoSizing, tiers,
           providers: providers.map((p) => ({ ...p, models: p.models.filter((m) => m.id.trim()).map((m) => ({ ...m, label: m.label.trim() || m.id })) })),
@@ -430,6 +438,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           questionWaitMin: questionWait,
           browserChecks,
           chromeInSupervised: chrome,
+          autoAllowReadCommands: readsFree,
           liveView,
           onboardingChecklist: checklist,
         }),
@@ -648,9 +657,27 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           </p>
         </Section>
 
+        <Section title="Plan approval & live tasks" hint="Catch a wrong plan before any code is written, and put more care into tasks that touch real data.">
+          <label className="flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
+            <input type="checkbox" className="mt-1 accent-amber" checked={planApproval} onChange={(e) => setPlanApproval(e.target.checked)} />
+            <span>
+              Wait for my approval after every plan
+              <span className="block text-[11.5px] text-ink-400">
+                Supervised and autonomous alike: when the Plan stage finishes, the task waits in <b>Needs you</b> with the plan, and you
+                approve it, edit it, or send it back with a note. Each task can override this on its Pipeline tab.
+              </span>
+            </span>
+          </label>
+          <div className="mt-3" />
+          <Field label="Review model for live tasks" hint="A task marked “touches a live system” always waits for plan approval, and its review stage runs on this model at high effort, whatever its pipeline says.">
+            <ClaudeModelPicker value={liveReviewModel} onChange={setLiveReviewModel} models={models} />
+          </Field>
+        </Section>
+
         <Section title="Run ceilings" hint="Applied to every stage so a looping or runaway session stops by itself.">
           <div className="grid gap-3 md:grid-cols-2">
             <Field label="Max turns per stage"><input type="number" min={1} max={500} className={`${inputCls} font-mono`} value={maxTurns} onChange={(e) => setMaxTurns(Number(e.target.value) || 1)} /></Field>
+            <Field label="Continue after the turn limit" hint="A stage that uses all its turns carries on in the same session this many times (nothing is lost) before it fails. 0 = fail straight away."><input type="number" min={0} max={5} className={`${inputCls} font-mono`} value={autoContinue} onChange={(e) => setAutoContinue(Math.max(0, Math.min(5, Number(e.target.value) || 0)))} /></Field>
             <Field label="Max cost per stage (USD)"><input type="number" min={0.05} max={100} step={0.25} className={`${inputCls} font-mono`} value={maxCost} onChange={(e) => setMaxCost(Number(e.target.value) || 0.05)} /></Field>
             <Field label="Delegated stage timeout (minutes)" hint="Wall-clock ceiling for a stage on a text-only or CLI provider, which the board cannot meter mid-run."><input type="number" min={1} max={240} className={`${inputCls} font-mono`} value={delegateTimeout} onChange={(e) => setDelegateTimeout(Number(e.target.value) || 1)} /></Field>
             <Field label="Subagent nesting depth" hint="1 = a run may not spawn subagents that spawn more."><input type="number" min={1} max={5} className={`${inputCls} font-mono`} value={subDepth} onChange={(e) => setSubDepth(Number(e.target.value) || 1)} /></Field>
@@ -767,6 +794,17 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           >
             <textarea className={`${inputCls} mt-1 min-h-[120px] font-mono text-[12.5px]`} value={blocked} onChange={(e) => setBlocked(e.target.value)} />
           </Field>
+          <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
+            <input type="checkbox" className="mt-1 accent-amber" checked={readsFree} onChange={(e) => setReadsFree(e.target.checked)} />
+            <span>
+              Supervised tasks: run read-only commands without a card
+              <span className="block text-[11.5px] text-ink-400">
+                Commands that only look — <code>grep</code>, <code>wc</code>, <code>ls</code>, <code>git status</code>, <code>git diff</code> — run straight away
+                and are listed in the run log, so the cards you get are the ones that change something. Anything the board can't prove is
+                read-only (a script, a redirect to a file, <code>python</code>, <code>npm</code>) still asks.
+              </span>
+            </span>
+          </label>
           <div className="mt-3 grid gap-3 md:grid-cols-2">
             <Field label="Keep transcripts for (days)" hint="Runs, costs and results are kept forever; only the message-by-message detail of old finished runs is pruned, on restart.">
               <input type="number" min={1} max={365} className={`${inputCls} font-mono`} value={retention} onChange={(e) => setRetention(Number(e.target.value) || 1)} />

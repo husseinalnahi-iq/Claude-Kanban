@@ -83,6 +83,7 @@ export interface CliHealth {
 
 export const api = {
   health: () => req<CliHealth>("GET", "/health"),
+  version: () => req<{ startedAt: string; stale: boolean }>("GET", "/version"),
   setup: (fresh = false) => req<SetupReport>("GET", `/setup${fresh ? "?fresh=1" : ""}`),
   recheckSetup: (id: string) => req<SetupCheckResult>("POST", `/setup/${encodeURIComponent(id)}/check`, {}),
   fixSetup: (id: string, body: { kind: "run"; input?: Record<string, string> } | { kind: "claude" }) =>
@@ -101,11 +102,11 @@ export const api = {
 
   tasks: (projectId: string) => req<TaskCard[]>("GET", `/tasks?project=${encodeURIComponent(projectId)}`),
   task: (id: string) => req<TaskDetail>("GET", `/tasks/${id}`),
-  createTask: (b: { project_id: string; title: string; spec_md?: string; mode?: Mode; pipeline?: Stage[]; parent_id?: string | null; milestone_id?: string | null; skills?: string[] }) =>
+  createTask: (b: { project_id: string; title: string; spec_md?: string; mode?: Mode; pipeline?: Stage[]; parent_id?: string | null; milestone_id?: string | null; skills?: string[]; live?: boolean; plan_approval?: boolean | null; own_branch?: boolean }) =>
     req<Task>("POST", "/tasks", b),
   patchTask: (
     id: string,
-    b: Partial<Pick<Task, "title" | "spec_md" | "mode" | "pipeline" | "milestone_id" | "skills" | "position" | "parent_id" | "type" | "priority" | "labels" | "depends_on" | "auto_queue_children" | "suggestion">>,
+    b: Partial<Pick<Task, "title" | "spec_md" | "mode" | "pipeline" | "milestone_id" | "skills" | "position" | "parent_id" | "type" | "priority" | "labels" | "depends_on" | "auto_queue_children" | "suggestion" | "live" | "plan_approval" | "own_branch">>,
   ) =>
     req<Task>("PATCH", `/tasks/${id}`, b),
   deleteTask: (id: string) => req<{ ok: true }>("DELETE", `/tasks/${id}`),

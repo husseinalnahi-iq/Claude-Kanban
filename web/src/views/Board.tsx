@@ -46,6 +46,7 @@ function stoppedProvider(card: TaskCard): string | null {
 /** The in-progress badge: which stage is running, or why it is waiting. */
 function phase(card: TaskCard, asking?: boolean): { text: string; tone: string; title: string } {
   if (card.status === "approval" && asking) return { text: "asks you", tone: "border-iris/60 text-iris", title: "Claude has a question for you — open the task to answer" };
+  if (card.status === "approval" && card.plan_gate) return { text: "approve plan", tone: "border-iris/60 text-iris", title: "The plan is waiting for you — open the task to approve, edit or send it back" };
   if (card.status === "approval") return { text: "needs you", tone: "border-rose/60 text-rose", title: "Waiting for you to allow or deny something — open the task" };
   if (card.status === "paused" && card.pause_reason === "cost") return { text: "needs you · cost", tone: "border-rose/60 text-rose", title: "It reached its cost ceiling — open the task and press Continue or Stop" };
   if (card.status === "paused" && card.pause_reason === "provider") {
@@ -178,7 +179,10 @@ const Card = memo(function Card({
             {card.suggestion.type !== card.type ? card.suggestion.type : card.suggestion.priority}?
           </Chip>
         ) : null}
-        <span className="ml-auto"><ModeChip mode={card.mode} /></span>
+        <span className="ml-auto flex items-center gap-1">
+          {card.live ? <Chip className="border-rose/50 text-rose" title="Touches a live system: plan approval is on and review runs on the live review model">prod</Chip> : null}
+          <ModeChip mode={card.mode} ownBranch={card.own_branch} />
+        </span>
       </div>
       <div className="text-[13px] font-medium leading-snug text-ink-100">{card.title}</div>
       {card.summary ? <div className="mt-1.5 line-clamp-2 text-[12px] leading-snug text-ink-300">{card.summary}</div> : null}

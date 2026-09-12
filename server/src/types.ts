@@ -17,6 +17,9 @@ export type RunStatus = "running" | "approval" | "success" | "failed";
 export type ApprovalDecision = "allow" | "deny" | "expired" | "answered";
 
 export const TASK_STATUSES: TaskStatus[] = ["backlog", "queued", "planning", "running", "approval", "paused", "review", "done", "failed"];
+/** Whether a task works in its own git worktree: every autonomous task, and a supervised one with own_branch (D203). */
+export const usesWorktree = (t: { mode: Mode; own_branch?: boolean }): boolean => t.mode === "autonomous" || Boolean(t.own_branch);
+
 export const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
 
 export interface Stage {
@@ -217,14 +220,19 @@ export interface Objection {
 }
 
 /** A plan waiting for you to choose: the original, the critic's objections, and the revised plan. */
+/**
+ * A plan waiting for the human before any code is written. `debate`: a critic argued with it and a
+ * revision exists (D131). `approval`: plan approval is on for this task, so the plan alone waits (D200).
+ */
 export interface PlanGate {
+  kind?: "debate" | "approval";
   stage_index: number;
-  critic_run_id: string;
-  critic: { provider: string; model: string };
   created_at: string;
   original: string;
-  critique: { raw: string; objections: Objection[] };
-  revised: string;
+  critic_run_id?: string;
+  critic?: { provider: string; model: string };
+  critique?: { raw: string; objections: Objection[] };
+  revised?: string;
 }
 
 export interface ProviderTestResult {
@@ -347,6 +355,12 @@ export interface Task {
   related_to: string[];
   /** Queue this task's subtasks automatically as their dependencies clear. */
   auto_queue_children: boolean;
+  /** Wait for the human after the plan stage. null follows Settings → planApproval (D200). */
+  plan_approval: boolean | null;
+  /** Touches a live system (production data, a live business app…): plan approval is forced on and review runs on Settings → liveReviewModel (D202). */
+  live: boolean;
+  /** A supervised task that still works in its own worktree and branch, landing only on Approve (D203). Autonomous always does. */
+  own_branch: boolean;
   /** Set when the board classified this task, so the UI can show it was a guess. */
   triaged_at: string | null;
   /** Hidden from the board when set. Purely visual — the task, its runs and its history stay. */
@@ -715,6 +729,14 @@ export interface Settings {
   browserChecks: boolean;
   /** Also offer Claude in Chrome — your own signed-in Chrome — to supervised runs. Never autonomous ones. */
   chromeInSupervised: boolean;
+  /** Supervised runs use read-only shell commands (grep, wc, git status…) without an approval card. */
+  autoAllowReadCommands: boolean;
+  /** Every task waits for the human after its plan stage (a task can override it). D200. */
+  planApproval: boolean;
+  /** A stage that hits maxTurnsPerStage continues in the same session this many times before failing. D201. */
+  autoContinueTurns: number;
+  /** Claude model the review stage of a live task runs on, whatever its pipeline says. D202. */
+  liveReviewModel: string;
   /** Stream a live picture of each task's browser into its card (only while someone is watching). */
   liveView: boolean;
   /** Landing policy new projects start with. */
