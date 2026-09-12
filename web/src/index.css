@@ -75,9 +75,17 @@ body::before {
 /* A strip that scrolls sideways only when it must (the top bar beside an open chat), with no bar. */
 .no-scrollbar { scrollbar-width: none; }
 
+/* Keyboard focus ring for what has no focus style of its own: buttons, links, cards. */
 :focus-visible {
   outline: 1.5px solid var(--color-amber);
   outline-offset: 2px;
+}
+/* Text fields and selects already say they are focused by lighting up their own border. The ring on
+   top of that read as a stray rectangle floating around the box (the chat composer above all). */
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: none;
 }
 
 @keyframes pulse-ring {
