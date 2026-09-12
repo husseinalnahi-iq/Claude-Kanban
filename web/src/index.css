@@ -1,0 +1,120 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "IBM Plex Sans", ui-sans-serif, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+
+  /* graphite ground */
+  --color-ink-950: #0c0d0b;
+  --color-ink-900: #121310;
+  --color-ink-850: #171815;
+  --color-ink-800: #1d1e1a;
+  --color-ink-700: #292a25;
+  --color-ink-600: #3a3b34;
+  --color-ink-500: #57574e;
+  --color-ink-400: #83827a;
+  --color-ink-300: #aeaca2;
+  --color-ink-200: #d4d1c6;
+  --color-ink-100: #ebe8de;
+
+  /* signal colours — one per status */
+  --color-amber: #f2a93b;   /* running / live */
+  --color-cyan: #5ec8d8;    /* planning */
+  --color-rose: #f0567a;    /* approval — needs you */
+  --color-lime: #b5d95b;    /* review */
+  --color-moss: #6fa872;    /* done */
+  --color-rust: #e0643c;    /* failed */
+  --color-slate: #8d93a8;   /* queued */
+  --color-iris: #a394f0;    /* paused by a usage limit */
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-ink-950);
+  color: var(--color-ink-200);
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* faint grain + top glow so the ground is not a flat fill */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(1200px 500px at 70% -200px, rgb(242 169 59 / 0.07), transparent 70%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.035'/%3E%3C/svg%3E");
+}
+
+#root {
+  position: relative;
+  z-index: 1;
+}
+
+::selection {
+  background: rgb(242 169 59 / 0.35);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-ink-600) transparent;
+}
+
+:focus-visible {
+  outline: 1.5px solid var(--color-amber);
+  outline-offset: 2px;
+}
+
+@keyframes pulse-ring {
+  0% { box-shadow: 0 0 0 0 rgb(240 86 122 / 0.55); }
+  70% { box-shadow: 0 0 0 7px rgb(240 86 122 / 0); }
+  100% { box-shadow: 0 0 0 0 rgb(240 86 122 / 0); }
+}
+.pulse-rose { animation: pulse-ring 1.6s ease-out infinite; }
+
+@keyframes breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.breathe { animation: breathe 1.4s ease-in-out infinite; }
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.rise { animation: rise 0.28s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+
+@keyframes slide-in {
+  from { transform: translateX(24px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+.slide-in { animation: slide-in 0.22s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+
+/* rendered markdown */
+.md { line-height: 1.6; color: var(--color-ink-200); overflow-wrap: anywhere; }
+.md > * + * { margin-top: 0.6em; }
+.md h1, .md h2, .md h3, .md h4 { color: var(--color-ink-100); font-weight: 600; line-height: 1.3; margin-top: 1em; }
+.md h1 { font-size: 1.25em; } .md h2 { font-size: 1.12em; } .md h3 { font-size: 1.02em; }
+.md ul { list-style: disc; padding-left: 1.3em; } .md ol { list-style: decimal; padding-left: 1.4em; }
+.md li + li { margin-top: 0.2em; }
+.md code { font-family: var(--font-mono); font-size: 0.88em; background: var(--color-ink-800); border: 1px solid var(--color-ink-700); border-radius: 4px; padding: 0.05em 0.35em; }
+.md pre { background: var(--color-ink-900); border: 1px solid var(--color-ink-700); border-radius: 6px; padding: 0.7em 0.9em; overflow-x: auto; }
+.md pre code { background: none; border: 0; padding: 0; }
+.md a { color: var(--color-amber); text-decoration: underline; text-underline-offset: 2px; }
+.md blockquote { border-left: 2px solid var(--color-ink-600); padding-left: 0.8em; color: var(--color-ink-300); }
+.md table { border-collapse: collapse; font-size: 0.95em; display: block; overflow-x: auto; }
+.md th, .md td { border: 1px solid var(--color-ink-700); padding: 0.3em 0.6em; text-align: left; }
+.md hr { border-color: var(--color-ink-700); }

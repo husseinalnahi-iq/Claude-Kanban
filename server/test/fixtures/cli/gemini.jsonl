@@ -1,0 +1,6 @@
+{"type":"init","session_id":"gem-sess-1"}
+{"type":"message","content":"Looking at the code."}
+{"type":"tool_use","name":"read_file","input":{"path":"a.txt"}}
+{"type":"tool_result","output":"file contents","is_error":false}
+{"type":"message","content":"VERDICT: APPROVE"}
+{"type":"result","status":"success","stats":{"input_tokens":800,"output_tokens":40}}
