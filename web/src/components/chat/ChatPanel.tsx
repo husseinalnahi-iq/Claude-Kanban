@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Chat, ChatMessage, Effort } from "../../../../server/src/types.ts";
-import { claudeOptions, effortsFor, STATUS_TAG, useClaudeModels } from "../../lib/claudeModels.ts";
+import { effortsFor, useClaudeModels } from "../../lib/claudeModels.ts";
+import { ClaudeModelPicker, EffortSelect } from "../ClaudeModelPicker.tsx";
 import { api, type ProjectWithGit } from "../../lib/api.ts";
 import { useWs, watchChat } from "../../lib/ws.ts";
 import { navigate } from "../../lib/router.ts";
 import { useAppData } from "../../lib/store.tsx";
 import { Markdown } from "../../lib/markdown.tsx";
-import { ago, cost, shortModel } from "../../lib/format.ts";
+import { ago, cost } from "../../lib/format.ts";
 
 const STARTERS = [
   "What does this project do, in plain words?",
@@ -89,6 +90,8 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
   const claude = useClaudeModels();
   const chats = useChats(project.id);
   const [chatId, setChatId] = useState<string | null>(null);
+  // What a new chat will run on. An empty chat has no row to patch, so the choice waits here.
+  const [pending, setPending] = useState<{ model: string; effort: Effort } | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState("");
   const [text, setText] = useState("");
@@ -141,8 +144,20 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
   }, [close, listOpen]);
   useEffect(() => input.current?.focus(), [chatId]);
 
+  // What this chat runs on: its own row once it exists, otherwise the choice made here, else Settings.
+  const model = chat?.model ?? pending?.model ?? settings?.chatModel ?? "claude-sonnet-5";
+  const effort = (chat?.effort ?? pending?.effort ?? settings?.chatEffort ?? "medium") as Effort;
+  const setModel = (id: string) => {
+    const next = effortsFor(id, claude.result);
+    const keep = next.efforts.includes(effort) ? effort : next.efforts[0] ?? effort;
+    if (chat) void api.patchChat(chat.id, { model: id, ...(keep === effort ? {} : { effort: keep }) });
+    else setPending({ model: id, effort: keep });
+  };
+  const setEffort = (e: Effort) => (chat ? void api.patchChat(chat.id, { effort: e }) : setPending({ model, effort: e }));
+
   const newChat = async () => {
     const c = await api.createChat(project.id);
+    if (pending) await api.patchChat(c.id, pending).catch(() => {});
     setChatId(c.id);
     setListOpen(false);
   };
@@ -155,6 +170,8 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
       if (!id) {
         const c = await api.createChat(project.id);
         id = c.id;
+        // The chat row exists only now, so the model picked before the first message lands here.
+        if (pending) await api.patchChat(c.id, pending).catch(() => {});
         setChatId(c.id);
         watchChat(c.id);
       }
@@ -176,7 +193,7 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
 
   return (
     <aside
-      className={`fixed inset-y-0 right-0 z-30 flex w-[460px] max-w-full flex-col border-l border-ink-700 bg-ink-900 shadow-2xl shadow-black/50 ${closing ? "slide-out-right" : "slide-in-right"}`}
+      className={`fixed inset-y-0 right-0 z-30 flex w-[460px] max-w-full flex-col border-l border-ink-700 bg-ink-900 xl:w-[540px] shadow-2xl shadow-black/50 ${closing ? "slide-out-right" : "slide-in-right"}`}
       aria-label="Chat"
     >
       <header className="flex items-center gap-2 border-b border-ink-800 px-4 py-3">
@@ -185,7 +202,10 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
           onClick={() => setListOpen((v) => !v)}
           title="Your chats about this project"
         >
-          <span className="min-w-0 truncate text-[14px] font-semibold text-ink-100">{chat?.title ?? "Chat"}</span>
+          <span className="min-w-0 flex-1">
+            <span className="block min-w-0 truncate text-[14px] font-semibold text-ink-100">{chat?.title ?? "New chat"}</span>
+            <span className="block min-w-0 truncate text-[10.5px] text-ink-500">{project.name}</span>
+          </span>
           <span className={`text-[10px] text-ink-500 transition-transform ${listOpen ? "rotate-180" : ""}`}>▾</span>
         </button>
         {chat?.busy ? <span className="breathe h-1.5 w-1.5 rounded-full bg-amber" title="Writing a reply" /> : null}
@@ -259,11 +279,12 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
                 {STARTERS.map((s, i) => (
                   <button
                     key={s}
-                    className="rise block w-full cursor-pointer rounded-lg border border-ink-700 px-3 py-2 text-[12.5px] text-ink-300 transition-colors hover:border-amber/50 hover:text-ink-100"
+                    className="rise group flex w-full cursor-pointer items-center gap-2 rounded-lg border border-ink-700 px-3 py-2 text-left text-[12.5px] text-ink-300 transition-colors hover:border-amber/50 hover:bg-amber/5 hover:text-ink-100"
                     style={{ animationDelay: `${80 + i * 50}ms` }}
                     onClick={() => void send(s)}
                   >
-                    {s}
+                    <span className="min-w-0 flex-1">{s}</span>
+                    <span className="shrink-0 text-[11px] text-ink-600 transition-colors group-hover:text-amber">→</span>
                   </button>
                 ))}
               </div>
@@ -296,44 +317,25 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
               }
             }}
           />
-          <div className="flex items-center gap-2 px-2 pb-2">
-            <select
-              className="cursor-pointer rounded bg-transparent px-1 font-mono text-[10.5px] text-ink-400 hover:text-ink-200"
-              value={chat?.model ?? settings?.chatModel ?? "claude-sonnet-5"}
-              disabled={!chat}
-              onChange={(e) => chat && void api.patchChat(chat.id, { model: e.target.value })}
-              title="Model for this chat"
-            >
-              {(() => {
-                // Your list and what your login has; ids that are not Claude models are left out.
-                const current = chat?.model ?? settings?.chatModel ?? "claude-sonnet-5";
-                const ids = claudeOptions(settings?.models ?? [], claude.result).filter((o) => o.tag !== STATUS_TAG.invalid).map((o) => o.id);
-                return [...new Set([...ids, current])].map((id) => <option key={id} value={id}>{shortModel(id)}</option>);
-              })()}
-            </select>
-            {(() => {
-              const { efforts, none } = effortsFor(chat?.model ?? settings?.chatModel ?? "", claude.result);
-              const value = chat?.effort ?? settings?.chatEffort ?? "medium";
-              return (
-                <select
-                  className="cursor-pointer rounded bg-transparent px-1 font-mono text-[10.5px] text-ink-400 hover:text-ink-200"
-                  value={value}
-                  disabled={!chat || none}
-                  onChange={(e) => chat && void api.patchChat(chat.id, { effort: e.target.value as Effort })}
-                  title={none ? "This model has no effort setting" : "How hard it thinks: higher is slower and costs more"}
-                >
-                  {[...new Set([...efforts, value])].map((x) => <option key={x} value={x}>{none ? "—" : x}</option>)}
-                </select>
-              );
-            })()}
-            <span className="ml-auto text-[10.5px] text-ink-600">Enter to send · Shift+Enter new line</span>
+          <div className="flex items-center gap-1.5 border-t border-ink-800/70 px-2 py-1.5">
+            {/* The same pickers the pipeline uses, and they work before the first message: an empty
+                chat has no row to patch yet, so the choice is held here and used when it is created. */}
+            <div className="w-[148px] shrink-0" title="Model for this chat">
+              <ClaudeModelPicker value={model} onChange={setModel} models={settings?.models ?? []} />
+            </div>
+            {effortsFor(model, claude.result).none ? null : (
+              <div className="w-[104px] shrink-0">
+                <EffortSelect model={model} value={effort} onChange={setEffort} />
+              </div>
+            )}
+            <span className="ml-auto hidden truncate pr-1 text-[10.5px] text-ink-600 xl:inline">Enter to send · Shift+Enter new line</span>
             {chat?.busy ? (
-              <button className="cursor-pointer rounded-md border border-rust/50 px-2.5 py-1 text-[12px] text-rust hover:bg-rust/10" onClick={() => chat && void api.stopChat(chat.id)}>
+              <button className="shrink-0 cursor-pointer rounded-md border border-rust/50 px-2.5 py-1.5 text-[12px] text-rust hover:bg-rust/10" onClick={() => chat && void api.stopChat(chat.id)}>
                 ■ Stop
               </button>
             ) : (
               <button
-                className="cursor-pointer rounded-md bg-amber px-3 py-1 text-[12px] font-semibold text-ink-950 transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
+                className="shrink-0 cursor-pointer rounded-md bg-amber px-3 py-1.5 text-[12px] font-semibold text-ink-950 transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
                 disabled={!text.trim()}
                 onClick={() => void send()}
               >
