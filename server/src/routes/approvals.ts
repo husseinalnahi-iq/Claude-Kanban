@@ -16,6 +16,6 @@ export async function approvalRoutes(app: FastifyInstance, { repo, runner }: App
     const { id } = req.params as { id: string };
     const body = z.object({ answers: z.record(z.string(), z.string().trim().min(1).max(4000)) }).parse(req.body);
     if (!Object.keys(body.answers).length) throw Object.assign(new Error("Pick or type an answer first."), { statusCode: 400 });
-    return runner.answerQuestion(id, body.answers);
+    return runner.answerApproval(id, body.answers);
   });
 }

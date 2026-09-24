@@ -36,7 +36,20 @@ function tally<T extends string>(items: T[], keys: T[]): { key: T; count: number
   return [...counts.entries()].map(([key, count]) => ({ key, count }));
 }
 
+export interface StageStat {
+  stage: string;
+  runs: number;
+  medianMinutes: number;
+  medianCost: number;
+}
+
 export async function analyticsRoutes(app: FastifyInstance, { repo, runner }: AppDeps) {
+  /** Typical time and cost of each kind of stage, so the new-task form can say what a plan stage adds (D205). */
+  app.get("/stats/stages", async (req) => {
+    const { project } = req.query as { project?: string };
+    return repo.stageStats(project) satisfies StageStat[];
+  });
+
   app.get("/analytics", async (req) => {
     const { project, days } = req.query as { project?: string; days?: string };
     const window = Math.min(120, Math.max(7, Number(days) || 30));

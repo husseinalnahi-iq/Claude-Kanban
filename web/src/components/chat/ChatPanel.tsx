@@ -8,6 +8,7 @@ import { navigate } from "../../lib/router.ts";
 import { useAppData } from "../../lib/store.tsx";
 import { Markdown } from "../../lib/markdown.tsx";
 import { ago, cost } from "../../lib/format.ts";
+import { useAsk } from "../Ask.tsx";
 
 const STARTERS = [
   "What does this project do, in plain words?",
@@ -183,6 +184,13 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
       setText(t);
     }
   };
+  const dialog = useAsk();
+  // The board's own dialog, not confirm(): the browser's is dismissed unseen in embedded browsers (D193).
+  const remove = async (c: Chat) => {
+    if (!(await dialog.confirm({ title: `Delete “${c.title}” for good?`, message: "The chat and its messages are removed. Cards it made stay.", confirmLabel: "Delete", danger: true }))) return;
+    await api.deleteChat(c.id);
+    if (c.id === chatId) setChatId(null);
+  };
   const archive = (c: Chat, on: boolean) => {
     setLeaving((s) => new Set(s).add(c.id));
     setTimeout(() => {
@@ -193,7 +201,7 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
 
   return (
     <aside
-      className={`fixed inset-y-0 right-0 z-30 flex w-[460px] max-w-full flex-col border-l border-ink-700 bg-ink-900 xl:w-[540px] shadow-2xl shadow-black/50 ${closing ? "slide-out-right" : "slide-in-right"}`}
+      className={`fixed inset-y-0 right-0 z-30 flex w-[460px] max-w-full flex-col border-l border-ink-700 bg-ink-900 xl:w-[540px] kb-raise ${closing ? "slide-out-right" : "slide-in-right"}`}
       aria-label="Chat"
     >
       <header className="flex items-center gap-2 border-b border-ink-800 px-4 py-3">
@@ -247,7 +255,7 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
                         <button className="cursor-pointer font-mono text-[10.5px] text-ink-400 hover:text-amber" onClick={() => archive(c, false)}>restore</button>
                         <button
                           className="cursor-pointer font-mono text-[10.5px] text-ink-500 hover:text-rust"
-                          onClick={() => confirm(`Delete “${c.title}” for good?`) && void api.deleteChat(c.id).then(() => c.id === chatId && setChatId(null))}
+                          onClick={() => void remove(c)}
                         >
                           delete
                         </button>
@@ -345,6 +353,7 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
           </div>
         </div>
       </footer>
+      {dialog.element}
     </aside>
   );
 }

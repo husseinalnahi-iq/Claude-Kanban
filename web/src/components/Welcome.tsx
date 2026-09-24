@@ -29,23 +29,23 @@ export function Welcome({ hasProjects, onAddProject }: { hasProjects: boolean; o
   const more = ALL_FEATURES.length - HEADLINES.length;
 
   return (
-    <div className="kb-scrim fixed inset-0 z-[60] flex items-center justify-center bg-ink-950/80 p-4 backdrop-blur-[3px]" role="dialog" aria-modal="true" aria-labelledby="kb-welcome-title">
+    <div className="kb-scrim fixed inset-0 z-[60] flex items-center justify-center bg-[var(--kb-scrim)] p-4 backdrop-blur-[3px]" role="dialog" aria-modal="true" aria-labelledby="kb-welcome-title">
       <TourStyles />
-      <div className="kb-welcome relative max-h-[94vh] w-full max-w-[940px] overflow-y-auto overflow-x-hidden rounded-2xl border border-ink-700 bg-ink-900 shadow-2xl shadow-black/70">
+      <div className="kb-welcome relative max-h-[94vh] w-full max-w-[940px] overflow-y-auto overflow-x-hidden rounded-2xl border border-ink-700 bg-ink-900 kb-raise">
         {/* a warm light from the corner and a faint grid, so it reads as a place, not a form */}
         <div
           aria-hidden
           className="pointer-events-none absolute inset-0"
           style={{
             background:
-              "radial-gradient(620px 300px at 0% 0%, rgb(242 169 59 / .13), transparent 70%), radial-gradient(520px 260px at 100% 100%, rgb(94 200 216 / .07), transparent 70%)",
+              "radial-gradient(620px 300px at 0% 0%, color-mix(in srgb, var(--color-amber) 13%, transparent), transparent 70%), radial-gradient(520px 260px at 100% 100%, color-mix(in srgb, var(--color-cyan) 9%, transparent), transparent 70%)",
           }}
         />
         <div
           aria-hidden
           className="pointer-events-none absolute inset-x-0 top-0 h-[260px] opacity-[.35]"
           style={{
-            backgroundImage: "linear-gradient(var(--color-ink-800) 1px, transparent 1px), linear-gradient(90deg, var(--color-ink-800) 1px, transparent 1px)",
+            backgroundImage: "linear-gradient(var(--color-ink-700) 1px, transparent 1px), linear-gradient(90deg, var(--color-ink-700) 1px, transparent 1px)",
             backgroundSize: "28px 28px",
             maskImage: "linear-gradient(to bottom, black, transparent)",
           }}

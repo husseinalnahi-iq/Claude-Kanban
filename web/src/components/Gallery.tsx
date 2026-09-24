@@ -91,7 +91,7 @@ function Preview({ a, onClose }: { a: Attachment; onClose: () => void }) {
           <div className="font-mono text-[11px] uppercase tracking-[0.15em] text-ink-500">{TYPE_LABEL[ext] ?? ext.slice(1)}</div>
           <div className="text-[13px] text-ink-200">{a.name}</div>
           <div className="text-[12px] text-ink-500">{kb(a.bytes)} — this format opens in its own application.</div>
-          <a href={api.attachmentUrl(a.id)} download={a.name} className="rounded-md bg-amber px-3 py-1.5 text-[13px] font-semibold text-ink-950 hover:bg-[#ffbb55]">
+          <a href={api.attachmentUrl(a.id)} download={a.name} className="rounded-md bg-amber px-3 py-1.5 text-[13px] font-semibold text-ink-950 hover:bg-[var(--kb-amber-hover)]">
             Download
           </a>
         </div>
@@ -138,7 +138,7 @@ function Preview({ a, onClose }: { a: Attachment; onClose: () => void }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-ink-950/90 p-6" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-[var(--kb-scrim-strong)] p-6" onClick={onClose}>
       <div className="w-full max-w-4xl" onClick={(e) => e.stopPropagation()}>{body()}</div>
       <div className="flex items-center gap-3 font-mono text-[11.5px] text-ink-400">
         <span>{a.name} · {kb(a.bytes)}{a.note ? ` · ${a.note}` : ""}</span>

@@ -104,7 +104,7 @@ export function BellControl() {
       </div>
 
       {open ? (
-        <div className="rise absolute right-0 top-[calc(100%+6px)] z-50 w-[420px] rounded-xl border border-ink-700 bg-ink-900 p-4 shadow-2xl shadow-black/60">
+        <div className="rise absolute right-0 top-[calc(100%+6px)] z-50 w-[420px] rounded-xl border border-ink-700 bg-ink-900 p-4 kb-raise">
           <div className="mb-3 flex items-center justify-between">
             <span className="text-[13px] font-semibold text-ink-100">Notifications</span>
             <button

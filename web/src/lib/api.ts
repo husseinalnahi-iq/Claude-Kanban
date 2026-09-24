@@ -10,7 +10,7 @@ export type { LocalModelsStatus };
 export type ProviderRow = Provider & { hasSecret: boolean };
 export type { ProviderPreset };
 
-import type { Analytics } from "../../../server/src/routes/analytics.ts";
+import type { Analytics, StageStat } from "../../../server/src/routes/analytics.ts";
 import type { InstructionFile } from "../../../server/src/routes/claudeMd.ts";
 import type { TriageResult } from "../../../server/src/engine/triage.ts";
 import type { SearchHit } from "../../../server/src/routes/search.ts";
@@ -136,6 +136,8 @@ export const api = {
   approve: (id: string) => req<Task>("POST", `/tasks/${id}/approve`),
   reject: (id: string, note: string | null) => req<Task>("POST", `/tasks/${id}/reject`, { note }),
   discard: (id: string) => req<Task>("POST", `/tasks/${id}/discard`),
+  escalate: (id: string) => req<Task>("POST", `/tasks/${id}/escalate`),
+  answerQuestion: (id: string, questionId: string, answer: string) => req<Task>("POST", `/tasks/${id}/questions/${questionId}`, { answer }),
   chat: (id: string, body: string) => req<Run>("POST", `/tasks/${id}/message`, { body }),
   diff: (id: string) => req<DiffFile[]>("GET", `/tasks/${id}/diff`),
 
@@ -158,6 +160,7 @@ export const api = {
     req<SearchHit[]>("GET", `/search?q=${encodeURIComponent(q)}${projectId ? `&project=${encodeURIComponent(projectId)}` : ""}`),
   followUp: (taskId: string, b: { title?: string; note?: string; type?: Task["type"] }) => req<Task>("POST", `/tasks/${taskId}/follow-up`, b),
 
+  stageStats: (projectId: string) => req<StageStat[]>("GET", `/stats/stages?project=${encodeURIComponent(projectId)}`),
   analytics: (projectId: string | undefined, days: number) =>
     req<Analytics>("GET", `/analytics?days=${days}${projectId ? `&project=${encodeURIComponent(projectId)}` : ""}`),
   specStatus: (taskId: string) => req<{ versions: SpecVersion[]; rewriting: { model: string; note: string } | null }>("GET", `/tasks/${taskId}/spec`),
@@ -186,7 +189,8 @@ export const api = {
   /** A task paused because Claude or a provider ran out: carry its stage on elsewhere now. */
   switchStage: (id: string, body: { provider: string; model: string; remember?: boolean }) => req<Task>("POST", `/tasks/${id}/switch`, body),
   refreshLimits: () => req<UsageLimit[]>("POST", "/limits/refresh"),
-  acceptSuggestion: (id: string, what: { fields?: boolean; pipeline?: boolean }) => req<Task>("POST", `/tasks/${id}/accept-suggestion`, what),
+  dismissSuggestion: (id: string, what: { fields?: boolean; pipeline?: boolean; mode?: boolean; live?: boolean }) => req<Task>("POST", `/tasks/${id}/dismiss-suggestion`, what),
+  acceptSuggestion: (id: string, what: { fields?: boolean; pipeline?: boolean; mode?: boolean; live?: boolean }) => req<Task>("POST", `/tasks/${id}/accept-suggestion`, what),
   planDecision: (id: string, b: { choice: "original" | "revised" | "custom"; text?: string }) => req<Task>("POST", `/tasks/${id}/plan-decision`, b),
   describeAttachment: (id: string) => req<{ description: string }>("POST", `/attachments/${id}/describe`),
 

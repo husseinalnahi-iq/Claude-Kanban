@@ -89,6 +89,9 @@ const LATER_COLUMNS: { table: string; column: string; ddl: string }[] = [
   { table: "tasks", column: "plan_gate_json", ddl: "plan_gate_json TEXT" },
   { table: "tasks", column: "onboarding", ddl: "onboarding TEXT" },
   { table: "projects", column: "system", ddl: "system INTEGER NOT NULL DEFAULT 0" },
+  { table: "tasks", column: "blocked_json", ddl: "blocked_json TEXT" },
+  { table: "tasks", column: "questions_json", ddl: "questions_json TEXT NOT NULL DEFAULT '[]'" },
+  { table: "tasks", column: "checkout_json", ddl: "checkout_json TEXT" },
   { table: "tasks", column: "start_at", ddl: "start_at TEXT" },
   { table: "approvals", column: "answer_json", ddl: "answer_json TEXT" },
   { table: "tasks", column: "pause_reason", ddl: "pause_reason TEXT" },
@@ -147,7 +150,7 @@ export function openDb(file: string): DatabaseSync {
   seed.run("loadUserPlugins", "true");
   seed.run("browserChecks", "true");
   seed.run("chromeInSupervised", "false");
-  seed.run("autoAllowReadCommands", "true");
+  seed.run("autoAllowReadOnly", "true");
   seed.run("planApproval", "false");
   seed.run("autoContinueTurns", "2");
   seed.run("liveReviewModel", "claude-opus-5");

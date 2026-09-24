@@ -79,7 +79,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode; onClose?: ()
       </div>
     );
     return onClose ? (
-      <div className="fixed right-4 top-16 z-50 w-[380px] rounded-lg border border-ink-700 bg-ink-900 p-4 shadow-2xl">{body}</div>
+      <div className="fixed right-4 top-16 z-50 w-[380px] rounded-lg border border-ink-700 bg-ink-900 p-4 kb-raise">{body}</div>
     ) : (
       <div className="mx-auto mt-16 max-w-lg px-6">{body}</div>
     );

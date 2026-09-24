@@ -354,7 +354,7 @@ test("approve holds the task busy while git works; double approve is refused", a
   }
 });
 
-test("a supervised task on its own branch gets a worktree, still asks for every write, and lands on Approve (D203)", async () => {
+test("a supervised task on its own branch gets a worktree, still asks for every write, and lands on Approve (D234)", async () => {
   const f = fakeQuery({ askWrite: true });
   const g = fakeGit();
   const s = setup(f.fn);

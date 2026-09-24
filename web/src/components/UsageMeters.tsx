@@ -137,7 +137,7 @@ export function UsageMeters() {
       </button>
 
       {open ? (
-        <div className="rise absolute right-0 top-[calc(100%+6px)] z-50 w-[340px] rounded-xl border border-ink-700 bg-ink-900 p-4 shadow-2xl shadow-black/60">
+        <div className="rise absolute right-0 top-[calc(100%+6px)] z-50 w-[340px] rounded-xl border border-ink-700 bg-ink-900 p-4 kb-raise">
           <div className="mb-3 flex items-baseline justify-between">
             <span className="text-[13px] font-semibold text-ink-100">Claude usage</span>
             <span className="font-mono text-[10.5px] text-ink-500">{newest ? `as of ${ago(newest)}` : "not measured yet"}</span>

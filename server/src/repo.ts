@@ -94,6 +94,9 @@ const toTask = (r: Row): Task => ({
   suggestion: json<Task["suggestion"]>(r.suggestion_json, null),
   onboarding: (r.onboarding as Task["onboarding"]) ?? null,
   plan_gate: json<Task["plan_gate"]>(r.plan_gate_json, null),
+  blocked: json<Task["blocked"]>(r.blocked_json, null),
+  questions: json<Task["questions"]>(r.questions_json, []),
+  checkout: json<Task["checkout"]>(r.checkout_json, null),
   mode: r.mode as Mode,
   pipeline: json<Stage[]>(r.pipeline_json, []),
   skills: json<string[]>(r.skills_json, []),
@@ -252,6 +255,9 @@ function setClause(patch: Record<string, unknown>, columns: Record<string, (v: u
       : k === "related_to" ? "related_to_json"
       : k === "suggestion" ? "suggestion_json"
       : k === "plan_gate" ? "plan_gate_json"
+      : k === "blocked" ? "blocked_json"
+      : k === "questions" ? "questions_json"
+      : k === "checkout" ? "checkout_json"
       : k === "days" ? "days_json"
       : k;
     sets.push(`${col} = ?`);
@@ -267,7 +273,7 @@ const js = (v: unknown) => JSON.stringify(v);
 const TASK_COLUMNS: Record<string, (v: unknown) => SQLInputValue> = {
   parent_id: str, milestone_id: str, title: str, spec_md: str, status: str, mode: str, pipeline: js, skills: js,
   branch: str, worktree_path: str, base_sha: str, summary: str, note: str, error: str, position: num,
-  type: str, priority: str, labels: js, depends_on: js, related_to: js, triaged_at: str, archived_at: str, resume_at: str, pause_reason: str, budget_extra_usd: num, start_at: str, suggestion: js, plan_gate: js, onboarding: str,
+  type: str, priority: str, labels: js, depends_on: js, related_to: js, triaged_at: str, archived_at: str, resume_at: str, pause_reason: str, budget_extra_usd: num, start_at: str, suggestion: js, plan_gate: js, blocked: js, questions: js, checkout: js, onboarding: str,
   auto_queue_children: (v) => (v ? 1 : 0),
   plan_approval: (v) => (v === null || v === undefined ? null : v ? 1 : 0),
   live: (v) => (v ? 1 : 0),
@@ -361,7 +367,7 @@ export class Repo {
       loadUserPlugins: (m.get("loadUserPlugins") ?? "true") !== "false",
       browserChecks: (m.get("browserChecks") ?? "true") !== "false",
       chromeInSupervised: m.get("chromeInSupervised") === "true",
-      autoAllowReadCommands: (m.get("autoAllowReadCommands") ?? "true") !== "false",
+      autoAllowReadOnly: (m.get("autoAllowReadOnly") ?? "true") !== "false",
       planApproval: m.get("planApproval") === "true",
       autoContinueTurns: Number(m.get("autoContinueTurns") ?? 2),
       liveReviewModel: m.get("liveReviewModel") || "claude-opus-5",
@@ -727,6 +733,40 @@ export class Repo {
    * loading every run into memory and silently dropping everything past the first 2000 — the
    * dashboard would quietly show partial numbers with no way to tell.
    */
+  /**
+   * What one stage typically costs here: median minutes and dollars of the last 50 finished runs of
+   * each kind (debate critics excluded). Median, because one long approval wait skews a mean (D205).
+   */
+  stageStats(projectId?: string): { stage: string; runs: number; medianMinutes: number; medianCost: number }[] {
+    const where = projectId ? "AND tasks.project_id = ?" : "";
+    const rows = this.db
+      .prepare(
+        `SELECT runs.stage AS stage, runs.cost_usd AS cost, runs.started_at AS started, runs.ended_at AS ended
+         FROM runs JOIN tasks ON tasks.id = runs.task_id
+         WHERE runs.status = 'success' AND runs.role = 'stage' AND runs.ended_at IS NOT NULL ${where}
+         ORDER BY runs.started_at DESC LIMIT 600`,
+      )
+      .all(...(projectId ? [projectId] : [])) as { stage: string; cost: number; started: string; ended: string }[];
+    const median = (xs: number[]) => {
+      const s = [...xs].sort((a, b) => a - b);
+      return s.length ? s[Math.floor(s.length / 2)] : 0;
+    };
+    const byStage = new Map<string, { minutes: number[]; cost: number[] }>();
+    for (const r of rows) {
+      const b = byStage.get(r.stage) ?? { minutes: [], cost: [] };
+      if (b.minutes.length >= 50) continue;
+      b.minutes.push(Math.max(0, (Date.parse(r.ended) - Date.parse(r.started)) / 60_000));
+      b.cost.push(Number(r.cost) || 0);
+      byStage.set(r.stage, b);
+    }
+    return [...byStage.entries()].map(([stage, b]) => ({
+      stage,
+      runs: b.minutes.length,
+      medianMinutes: Number(median(b.minutes).toFixed(1)),
+      medianCost: Number(median(b.cost).toFixed(2)),
+    }));
+  }
+
   runAggregates(projectId?: string): {
     daily: { date: string; cost: number; runs: number }[];
     byModel: { key: string; cost: number; runs: number }[];

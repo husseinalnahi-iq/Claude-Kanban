@@ -8,7 +8,7 @@ const PIPE = [
   { stage: "review", model: "claude-sonnet-5", effort: "medium" },
 ] as const;
 
-test("plan approval: the task waits after its plan, and Approve carries on to code (D200)", async () => {
+test("plan approval: the task waits after its plan, and Approve carries on to code (D231)", async () => {
   const f = fakeQuery({ byCall: (i) => (i === 0 ? { result: "## Execution steps\n1. do it" } : undefined) });
   const s = setup(f.fn);
   try {
@@ -68,7 +68,7 @@ test("plan approval: Send back returns the task to Backlog with the note", async
   }
 });
 
-test("a live task: plan approval is forced on and review runs on the live review model (D202)", async () => {
+test("a live task: plan approval is forced on and review runs on the live review model (D233)", async () => {
   const f = fakeQuery();
   const s = setup(f.fn);
   try {
@@ -88,7 +88,7 @@ test("a live task: plan approval is forced on and review runs on the live review
   }
 });
 
-test("a stage that runs out of turns carries on in the same session, then stops after the limit (D201)", async () => {
+test("a stage that runs out of turns carries on in the same session, then stops after the limit (D232)", async () => {
   const f = fakeQuery({ sessionId: "sess-code", byCall: (i) => (i === 0 ? { maxTurns: true } : undefined) });
   const s = setup(f.fn);
   try {

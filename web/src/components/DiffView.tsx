@@ -13,7 +13,7 @@ function Patch({ patch }: { patch: string }) {
         <div
           key={i}
           className={
-            l.startsWith("+") ? "bg-moss/10 text-[#b9dcb0]" : l.startsWith("-") ? "bg-rust/10 text-[#f0a58c]" : l.startsWith("@@") ? "text-cyan/80 pt-1" : "text-ink-400"
+            l.startsWith("+") ? "bg-moss/10 text-[var(--kb-diff-add)]" : l.startsWith("-") ? "bg-rust/10 text-[var(--kb-diff-del)]" : l.startsWith("@@") ? "text-cyan/80 pt-1" : "text-ink-400"
           }
         >
           {l || " "}

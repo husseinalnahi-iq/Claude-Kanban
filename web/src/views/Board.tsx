@@ -121,14 +121,19 @@ const Card = memo(function Card({
 }) {
   const draggable = card.status === "backlog" || card.status === "queued";
   const live = ["planning", "running", "approval"].includes(card.status);
+  // Shown on the card: alert() is dismissed unseen in embedded browsers (D193).
+  const [actionError, setActionError] = useState<string | null>(null);
   const act = async (e: React.MouseEvent, fn: () => Promise<unknown>) => {
     e.stopPropagation();
+    setActionError(null);
     try {
       await fn();
     } catch (err) {
-      alert(err instanceof Error ? err.message : String(err));
+      setActionError(err instanceof Error ? err.message : String(err));
     }
   };
+  // Retrying a sandbox block in the same mode would only hit the same wall: that is decided in the task.
+  const needsSwitch = card.status === "failed" && card.blocked?.needs === "supervised" && card.mode === "autonomous";
   return (
     <div
       draggable={draggable}
@@ -151,6 +156,14 @@ const Card = memo(function Card({
           <Chip key={l} className="border-ink-700 text-ink-400 normal-case">{l}</Chip>
         ))}
         {blocked ? <Chip className="border-slate/50 text-slate" title="Waiting on another task">blocked</Chip> : null}
+        {card.questions?.some((q) => !q.answer) ? (
+          <Chip className="border-cyan/60 font-semibold text-cyan" title={card.questions.filter((q) => !q.answer).map((q) => q.text).join("\n")}>
+            {card.questions.filter((q) => !q.answer).length} question{card.questions.filter((q) => !q.answer).length === 1 ? "" : "s"} for you
+          </Chip>
+        ) : null}
+        {card.blocked && card.status === "failed" ? (
+          <Chip className="border-rose/60 font-semibold text-rose" title={`${card.blocked.reason} — open the task`}>blocked · needs you</Chip>
+        ) : null}
         {watching ? (
           <button
             className="rise flex cursor-pointer items-center gap-1 rounded border border-rose/50 bg-rose/10 px-1.5 py-px font-mono text-[10px] font-semibold uppercase tracking-wide text-rose hover:bg-rose/20"
@@ -186,7 +199,12 @@ const Card = memo(function Card({
       </div>
       <div className="text-[13px] font-medium leading-snug text-ink-100">{card.title}</div>
       {card.summary ? <div className="mt-1.5 line-clamp-2 text-[12px] leading-snug text-ink-300">{card.summary}</div> : null}
-      {card.error && card.status === "failed" ? <div className="mt-1.5 line-clamp-2 font-mono text-[11px] text-rust">{card.error}</div> : null}
+      {card.blocked && card.status === "failed" ? (
+        <div className="mt-1.5 line-clamp-2 text-[11.5px] text-rose">{card.blocked.reason}</div>
+      ) : card.error && card.status === "failed" ? (
+        <div className="mt-1.5 line-clamp-2 font-mono text-[11px] text-rust">{card.error}</div>
+      ) : null}
+      {actionError ? <div className="mt-1.5 line-clamp-3 text-[11.5px] text-rust">{actionError}</div> : null}
       {card.note && card.status === "backlog" ? <div className="mt-1.5 line-clamp-2 text-[11.5px] italic text-ink-400">“{card.note}”</div> : null}
       {card.start_at && (card.status === "backlog" || card.status === "failed") ? (
         <div className="rise mt-1.5 flex items-center gap-2 rounded-md border border-cyan/40 bg-cyan/5 px-2 py-1 text-[11.5px] text-cyan">
@@ -264,7 +282,7 @@ const Card = memo(function Card({
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
           {card.cost_usd > 0 ? <span className="font-mono text-[10.5px] text-ink-400">{cost(card.cost_usd)}</span> : null}
-          {card.status === "backlog" || card.status === "failed" ? (
+          {(card.status === "backlog" || card.status === "failed") && !needsSwitch ? (
             <>
               <button
                 className="rounded border border-ink-600 px-1.5 py-px font-mono text-[10.5px] text-ink-300 opacity-0 transition-opacity hover:border-amber hover:text-amber group-hover:opacity-100 cursor-pointer"

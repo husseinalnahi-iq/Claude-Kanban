@@ -1,5 +1,5 @@
 /**
- * Did a delegated provider run out, rather than the work go wrong? (docs/DECISIONS.md D194)
+ * Did a delegated provider run out, rather than the work go wrong? (docs/DECISIONS.md D225)
  *
  * Three answers, because each wants a different next step:
  * - window: a usage window is used up (5-hour, weekly…). It comes back by itself, often at a time the

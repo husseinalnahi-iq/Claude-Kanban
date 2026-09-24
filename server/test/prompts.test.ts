@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildStagePrompt, type PromptCtx } from "../src/engine/prompts.ts";
-import { autonomousGate } from "../src/engine/gate.ts";
+import { absolutePaths, autonomousGate, escalationHint, readViolation } from "../src/engine/gate.ts";
 
 const base: PromptCtx = {
   stage: "code",
@@ -52,7 +52,9 @@ test("plan stage asks for subtasks via the board; custom stage uses the custom p
 test("autonomous gate", () => {
   const cwd = "C:\\work\\proj\\.kanban\\wt\\t_1";
   const allow = (tool: string, input: Record<string, unknown>) => autonomousGate(tool, input, cwd).behavior === "allow";
-  assert.equal(allow("Read", { file_path: "C:\\anywhere\\x.ts" }), true);
+  assert.equal(allow("Read", { file_path: "C:\\anywhere\\x.ts" }), false, "reads stay inside the worktree too (D187)");
+  assert.equal(allow("Read", { file_path: `${cwd}\\src\\a.ts` }), true);
+  assert.equal(allow("Read", { file_path: "src/a.ts" }), true);
   assert.equal(allow("Edit", { file_path: `${cwd}\\src\\a.ts` }), true);
   assert.equal(allow("Write", { file_path: "src/relative.ts" }), true, "relative paths resolve inside cwd");
   assert.equal(allow("Write", { file_path: "C:\\other\\x.ts" }), false);
@@ -95,8 +97,87 @@ test("autonomous gate: bypasses found in review are refused", () => {
   assert.equal(autonomousGate("AskUserQuestion", {}, cwd).behavior, "deny");
 });
 
+test("autonomous reads: the main checkout's secrets are out of reach, attachments and skills are not (D187)", () => {
+  const repo = "C:\\Users\\me\\CloudSync\\Client Work Folder\\Acme-Ledger";
+  const cwd = `${repo}\\.kanban\\wt\\t_1`;
+  const roots = ["C:\\Users\\me\\.claude-kanban\\attachments\\t_1", "C:\\Users\\me\\.claude\\skills"];
+  const read = (tool: string, input: Record<string, unknown>) => readViolation(tool, input, cwd, roots);
+  // Seen in a real run: the secrets a worktree deliberately leaves out, one Read away.
+  assert.match(read("Read", { file_path: `${repo}\\.codex-secrets\\bizapp-api.json` }) ?? "", /refused/);
+  assert.match(read("Read", { file_path: "C:\\Users\\me\\.claude-kanban\\secrets.json" }) ?? "", /refused/, "the board's own provider keys");
+  assert.match(read("Grep", { pattern: "api_key", path: repo }) ?? "", /refused/);
+  assert.match(read("Glob", { pattern: "/c/Users/me/CloudSync/**/*.json" }) ?? "", /refused/, "an absolute glob is a path");
+  assert.equal(read("Glob", { pattern: "**/*.ts" }), null, "a relative glob searches the worktree");
+  assert.equal(read("Read", { file_path: "C:\\Users\\me\\.claude-kanban\\attachments\\t_1\\shot.png" }), null, "this task's attachments");
+  assert.equal(read("Read", { file_path: "C:\\Users\\me\\.claude\\skills\\bizapp\\SKILL.md" }), null, "skills");
+  assert.match(read("Read", { file_path: "C:\\Users\\me\\.claude-kanban\\attachments\\t_2\\other.png" }) ?? "", /refused/, "another task's attachments");
+  assert.equal(read("Bash", { command: "cat x" }), null, "shell commands have their own check");
+});
+
+test("absolute paths are read the way a shell would, whatever quotes sit elsewhere in the command (D188)", () => {
+  // The command that exposed it: a heredoc whose body the old tokenizer mis-paired, cutting the path at "Client".
+  const cmd = `cd "/c/Users/me/Client Work Folder/proj/.kanban/wt/t_1" && python - <<'EOF'\nimport json\nc=json.load(open(r"C:\\Users\\me\\Client Work Folder\\proj\\.codex-secrets\\bizapp-api.json"))\nprint("it's here")\nEOF`;
+  assert.deepEqual(absolutePaths(cmd), ["/c/Users/me/Client Work Folder/proj/.kanban/wt/t_1", "C:\\Users\\me\\Client Work Folder\\proj\\.codex-secrets\\bizapp-api.json"]);
+  assert.deepEqual(absolutePaths("ls /c/tmp/x && type C:\\a\\b.txt"), ["/c/tmp/x", "C:\\a\\b.txt"]);
+  assert.deepEqual(absolutePaths("curl -s https://example.com/api && git clone https://github.com/a/b"), [], "a URL is not a path");
+
+  const cwd = "C:\\Users\\me\\Client Work Folder\\proj\\.kanban\\wt\\t_1";
+  const gate = (command: string) => autonomousGate("Bash", { command }, cwd);
+  assert.equal(gate(`cat "${cwd}\\notes it's.md"`).behavior, "allow", "a quoted in-worktree path with spaces is inside");
+  assert.equal(gate(`python - <<'EOF'\nprint("don't")\nopen(r"${cwd}\\data.json")\nEOF`).behavior, "allow", "an apostrophe in a heredoc no longer splits the path");
+  assert.equal(gate("curl -s https://example.com").behavior, "allow", "a URL used to be refused as the path s://example.com");
+  assert.equal(gate(`python -c "open(r'C:\\Users\\me\\Client Work Folder\\proj\\.env')"`).behavior, "deny");
+});
+
+test("every autonomous refusal says how to escalate, and the third one says to stop (D186)", () => {
+  assert.match(escalationHint(1), /board_report_blocked[\s\S]*supervised/);
+  assert.doesNotMatch(escalationHint(2), /stop trying/);
+  assert.match(escalationHint(3), /refusal number 3[\s\S]*stop trying/);
+});
+
+test("autonomous plan and code stages are told to report a sandbox wall instead of routing round it", () => {
+  for (const stage of ["plan", "code"] as const) {
+    const p = buildStagePrompt({ ...base, stage, capabilities: "sdk" });
+    assert.match(p, /board_report_blocked` with needs "supervised"/);
+    assert.match(p, /Do not look for a way round the sandbox/);
+  }
+  assert.doesNotMatch(buildStagePrompt({ ...base, stage: "code", mode: "supervised", branch: null }), /sandboxed/, "supervised runs are not sandboxed");
+});
+
+test("plan hands facts on; code answers every ask; review judges against the spec, not the previous stage (D189, D190)", () => {
+  assert.match(buildStagePrompt({ ...base, stage: "plan" }), /## Facts established/);
+  const code = buildStagePrompt({ ...base, stage: "code" });
+  assert.match(code, /Treat the plan's established facts as done work/);
+  assert.match(code, /"show me \/ explain how" request is part of the task/);
+  for (const caps of ["sdk", "text"] as const) {
+    const review = buildStagePrompt({ ...base, stage: "review", capabilities: caps, inlineDiff: [] });
+    assert.match(review, /not against what the previous stage says it did/);
+    assert.match(review, /✅ delivered or ❌ not delivered/);
+    assert.match(review, /VERDICT: BLOCKED/);
+  }
+  assert.match(buildStagePrompt({ ...base, stage: "review" }), /says it was blocked or only partly done has not delivered: never approve it/);
+});
+
+test("a rerun after a block is told what stopped it, and a supervised rerun knows it can now reach it", () => {
+  const priorBlock = { reason: "The script lives only in live BizApp; its credentials are outside the worktree.", needs: "supervised" as const, ask: "Run supervised.", mode: "autonomous" as const };
+  const p = buildStagePrompt({ ...base, mode: "supervised", branch: null, priorBlock });
+  assert.match(p, /## What stopped the last attempt\nThe script lives only in live BizApp/);
+  assert.match(p, /It asked: Run supervised\./);
+  assert.match(p, /It now runs supervised, in the main checkout/);
+  const again = buildStagePrompt({ ...base, priorBlock: { ...priorBlock, mode: "supervised" }, mode: "supervised", branch: null });
+  assert.match(again, /Check whether what stopped it has changed/, "no claim of new access when the mode did not change");
+});
+
+test("a long plan reaches the code stage whole: the steps in its middle are not trimmed", () => {
+  const plan = `# Plan\n${"step detail. ".repeat(800)}\n## Facts established\n- the script is INVOICE-PAY-SCRIPT`;
+  assert.ok(plan.length > 6000 && plan.length < 12000);
+  const p = buildStagePrompt({ ...base, previousResult: plan, previousStage: "plan" });
+  assert.doesNotMatch(p, /characters trimmed/);
+  assert.match(p, /INVOICE-PAY-SCRIPT/);
+});
+
 // A real 8,600-character plan lost its middle — the execution steps and a safety guard — at the old
-// 6,000-character clamp, and the code stage never saw them (D198).
+// 6,000-character clamp, and the code stage never saw them (D229).
 const longPlan = `# Plan\n${"Root cause detail. ".repeat(250)}\n## Execution steps\n2. **(required)** snapshot every user's roles, then restore any lost\n${"Docs and risks. ".repeat(200)}`;
 
 test("a plan reaches the code stage whole; other results are still clamped", () => {
@@ -132,4 +213,13 @@ test("supervised code stage asks for a gated step on a card instead of stopping"
   assert.match(sup, /The card is the approval/);
   assert.doesNotMatch(buildStagePrompt(base), /## Approvals/, "autonomous runs have no cards");
   assert.doesNotMatch(buildStagePrompt({ ...base, mode: "supervised", branch: null, stage: "plan" }), /## Approvals/);
+});
+
+test("the Board section names one way to ask per mode (D239)", () => {
+  const sup = buildStagePrompt({ ...base, mode: "supervised", branch: null });
+  assert.match(sup, /Ask the person with `AskUserQuestion`/);
+  assert.doesNotMatch(sup, /Nobody is watching this run/);
+  const auto = buildStagePrompt(base);
+  assert.match(auto, /Nobody is watching this run, so every question for the person goes through `board_ask`/);
+  assert.doesNotMatch(auto, /AskUserQuestion/);
 });

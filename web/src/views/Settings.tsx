@@ -6,6 +6,7 @@ import { useAppData } from "../lib/store.tsx";
 import { navigate } from "../lib/router.ts";
 import { Button, ErrorLine, Field, Help, ModeHelp, Switch, inputCls, useAction } from "../components/ui.tsx";
 import { PipelineEditor } from "../components/PipelineEditor.tsx";
+import { useAsk } from "../components/Ask.tsx";
 import { ProviderPicker } from "../components/ProviderPicker.tsx";
 import { ClaudeModelPicker, EffortSelect } from "../components/ClaudeModelPicker.tsx";
 import { ClaudeModelList } from "./settings/ClaudeModelList.tsx";
@@ -15,7 +16,7 @@ import { ProviderSettings } from "./settings/ProviderSettings.tsx";
 import { GitSettings } from "./settings/GitSettings.tsx";
 import { ClaudeMdSettings } from "./settings/ClaudeMdSettings.tsx";
 import { SessionToolsPanel } from "./settings/ToolsSettings.tsx";
-import { COLUMN_SIZES, setViewPrefs, useViewPrefs, ZOOMS } from "../lib/view.ts";
+import { COLUMN_SIZES, setViewPrefs, THEMES, useViewPrefs, ZOOMS } from "../lib/view.ts";
 import { disableNotifications, enableNotifications, notifyState } from "../lib/notify.ts";
 
 function Section({ title, hint, children }: { title: string; hint?: string; children: React.ReactNode }) {
@@ -157,6 +158,21 @@ function ProjectSettings({ project }: { project: ProjectWithGit }) {
   const [name, setName] = useState(project.name);
   const [policy, setPolicy] = useState(project.policy);
   const { busy, error, run } = useAction();
+  const dialog = useAsk();
+  const removeProject = async () => {
+    const ok = await dialog.confirm({
+      title: `Remove "${project.name}" from the board?`,
+      message: "Its tasks and runs are deleted from Claude Kanban. The folder on disk is untouched.",
+      confirmLabel: "Remove",
+      danger: true,
+    });
+    if (!ok) return;
+    await run(async () => {
+      await api.deleteProject(project.id);
+      await reloadProjects();
+      navigate({ projectId: null, view: "board", taskId: null });
+    });
+  };
   useEffect(() => {
     setName(project.name);
     setPolicy(project.policy);
@@ -193,18 +209,8 @@ function ProjectSettings({ project }: { project: ProjectWithGit }) {
       </div>
       <div className="mt-4"><ErrorLine error={error} /></div>
       <div className="mt-4 flex justify-between">
-        <Button
-          variant="danger"
-          busy={busy}
-          onClick={() =>
-            confirm(`Remove "${project.name}" from the board? Its tasks and runs are deleted from Claude Kanban (the folder is untouched).`) &&
-            run(async () => {
-              await api.deleteProject(project.id);
-              await reloadProjects();
-              navigate({ projectId: null, view: "board", taskId: null });
-            })
-          }
-        >
+        {dialog.element}
+        <Button variant="danger" busy={busy} onClick={() => void removeProject()}>
           Remove project
         </Button>
         <Button variant="primary" busy={busy} onClick={() => run(async () => { await api.patchProject(project.id, { name, policy: { worktrees: policy.worktrees, autonomous: policy.autonomous, maxConcurrent: policy.maxConcurrent } }); await reloadProjects(); })}>
@@ -217,10 +223,25 @@ function ProjectSettings({ project }: { project: ProjectWithGit }) {
 
 /** How the board is displayed on this screen. Stored per machine, applied immediately. */
 function AppearanceSettings() {
-  const { zoom, columns } = useViewPrefs();
+  const { zoom, columns, theme } = useViewPrefs();
   return (
-    <Section title="Size and layout" hint="Applies to this computer only, straight away — there is nothing to save.">
+    <Section title="Theme, size and layout" hint="Applies to this computer only, straight away — there is nothing to save.">
       <div className="space-y-4">
+        <Field label="Theme" group>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {THEMES.map((t) => (
+              <button
+                key={t.value}
+                onClick={() => setViewPrefs({ theme: t.value })}
+                title={t.hint}
+                className={`rounded-md border px-3 py-1.5 font-mono text-[12px] transition-colors cursor-pointer ${theme === t.value ? "border-amber bg-amber/10 text-amber" : "border-ink-700 text-ink-300 hover:border-ink-500"}`}
+              >
+                {t.label}
+              </button>
+            ))}
+            <span className="ml-2 text-[11.5px] text-ink-500">Auto follows this computer's light/dark setting.</span>
+          </div>
+        </Field>
         <Field label="Interface size" group>
           <div className="flex flex-wrap items-center gap-1.5">
             {ZOOMS.map((z) => (
@@ -366,7 +387,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [questionWait, setQuestionWait] = useState(0);
   const [browserChecks, setBrowserChecks] = useState(true);
   const [chrome, setChrome] = useState(false);
-  const [readsFree, setReadsFree] = useState(true);
+  const [readOnlyNoCard, setReadOnlyNoCard] = useState(true);
   const [liveView, setLiveView] = useState(true);
   const [checklist, setChecklist] = useState("");
   const [notif, setNotif] = useState(notifyState());
@@ -412,7 +433,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
     setQuestionWait(settings.questionWaitMin);
     setBrowserChecks(settings.browserChecks);
     setChrome(settings.chromeInSupervised);
-    setReadsFree(settings.autoAllowReadCommands);
+    setReadOnlyNoCard(settings.autoAllowReadOnly);
     setLiveView(settings.liveView);
     setChecklist(settings.onboardingChecklist);
   }, [settings]);
@@ -438,7 +459,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           questionWaitMin: questionWait,
           browserChecks,
           chromeInSupervised: chrome,
-          autoAllowReadCommands: readsFree,
+          autoAllowReadOnly: readOnlyNoCard,
           liveView,
           onboardingChecklist: checklist,
         }),
@@ -794,17 +815,6 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           >
             <textarea className={`${inputCls} mt-1 min-h-[120px] font-mono text-[12.5px]`} value={blocked} onChange={(e) => setBlocked(e.target.value)} />
           </Field>
-          <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
-            <input type="checkbox" className="mt-1 accent-amber" checked={readsFree} onChange={(e) => setReadsFree(e.target.checked)} />
-            <span>
-              Supervised tasks: run read-only commands without a card
-              <span className="block text-[11.5px] text-ink-400">
-                Commands that only look — <code>grep</code>, <code>wc</code>, <code>ls</code>, <code>git status</code>, <code>git diff</code> — run straight away
-                and are listed in the run log, so the cards you get are the ones that change something. Anything the board can't prove is
-                read-only (a script, a redirect to a file, <code>python</code>, <code>npm</code>) still asks.
-              </span>
-            </span>
-          </label>
           <div className="mt-3 grid gap-3 md:grid-cols-2">
             <Field label="Keep transcripts for (days)" hint="Runs, costs and results are kept forever; only the message-by-message detail of old finished runs is pruned, on restart.">
               <input type="number" min={1} max={365} className={`${inputCls} font-mono`} value={retention} onChange={(e) => setRetention(Number(e.target.value) || 1)} />
@@ -888,6 +898,17 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
               <span className="block text-[11.5px] text-ink-400">
                 Your own Chrome, signed in to your accounts — for checks that need your login. Every action in it is an approval card,
                 and autonomous tasks never get it, whatever this says. Needs the Claude in Chrome extension.
+              </span>
+            </span>
+          </label>
+          <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
+            <input type="checkbox" className="mt-1 accent-amber" checked={readOnlyNoCard} onChange={(e) => setReadOnlyNoCard(e.target.checked)} />
+            <span>
+              Supervised tasks run read-only commands without a card
+              <span className="block text-[11.5px] text-ink-400">
+                <span className="font-mono">grep</span>, <span className="font-mono">ls</span>, <span className="font-mono">git log</span>,{" "}
+                <span className="font-mono">sed -n</span> and the like, inside the project. Anything that could write a file, run a program or touch a
+                credentials file still asks. They show in the transcript as allowed by the board.
               </span>
             </span>
           </label>

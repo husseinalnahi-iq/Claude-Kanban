@@ -9,7 +9,11 @@ export interface ViewPrefs {
   zoom: number;
   /** Column width in pixels, or "fill" to share the window evenly with no dead space on the right. */
   columns: number | "fill";
+  /** Dark, light, or whatever this computer is set to. */
+  theme: Theme;
 }
+
+export type Theme = "system" | "light" | "dark";
 
 export const ZOOMS = [85, 100, 115, 125, 150];
 export const COLUMN_SIZES: { label: string; value: number | "fill" }[] = [
@@ -19,9 +23,14 @@ export const COLUMN_SIZES: { label: string; value: number | "fill" }[] = [
   { label: "L", value: 320 },
   { label: "XL", value: 380 },
 ];
+export const THEMES: { label: string; value: Theme; hint: string }[] = [
+  { label: "Auto", value: "system", hint: "Follows this computer's light/dark setting" },
+  { label: "Light", value: "light", hint: "Always light" },
+  { label: "Dark", value: "dark", hint: "Always dark" },
+];
 
-const KEY = "kanban.view";
-const DEFAULTS: ViewPrefs = { zoom: 100, columns: "fill" };
+export const KEY = "kanban.view";
+const DEFAULTS: ViewPrefs = { zoom: 100, columns: "fill", theme: "system" };
 
 function read(): ViewPrefs {
   try {
@@ -31,6 +40,7 @@ function read(): ViewPrefs {
     return {
       zoom: ZOOMS.includes(Number(v.zoom)) ? Number(v.zoom) : DEFAULTS.zoom,
       columns: v.columns === "fill" || typeof v.columns === "number" ? v.columns : DEFAULTS.columns,
+      theme: v.theme === "light" || v.theme === "dark" || v.theme === "system" ? v.theme : DEFAULTS.theme,
     };
   } catch {
     return DEFAULTS;
@@ -64,4 +74,20 @@ export function useViewPrefs(): ViewPrefs {
     };
   }, []);
   return v;
+}
+
+/**
+ * Paints the chosen theme onto <html>, and keeps following the computer while the choice is "system".
+ * The same attribute is set by a tiny script in index.html before first paint, so this only ever
+ * confirms what is already on screen — there is no flash of the wrong theme on load.
+ */
+export function applyTheme(theme: Theme): () => void {
+  const media = window.matchMedia("(prefers-color-scheme: light)");
+  const paint = () => {
+    document.documentElement.dataset.theme = theme === "system" ? (media.matches ? "light" : "dark") : theme;
+  };
+  paint();
+  if (theme !== "system") return () => {};
+  media.addEventListener("change", paint);
+  return () => media.removeEventListener("change", paint);
 }

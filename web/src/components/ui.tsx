@@ -3,8 +3,8 @@ import { useEffect, useState, type ButtonHTMLAttributes, type ReactNode } from "
 type Variant = "primary" | "ghost" | "danger" | "outline" | "go";
 
 const VARIANTS: Record<Variant, string> = {
-  primary: "bg-amber text-ink-950 hover:bg-[#ffbb55] font-semibold",
-  go: "bg-lime/90 text-ink-950 hover:bg-lime font-semibold",
+  primary: "bg-amber text-ink-950 hover:bg-[var(--kb-amber-hover)] font-semibold",
+  go: "bg-lime text-ink-950 hover:bg-[var(--kb-lime-hover)] font-semibold",
   outline: "border border-ink-600 text-ink-200 hover:border-ink-400 hover:text-ink-100 bg-ink-850",
   ghost: "text-ink-300 hover:text-ink-100 hover:bg-ink-800",
   danger: "border border-rust/50 text-rust hover:bg-rust/10",
@@ -54,7 +54,7 @@ export function Help({ children, width = "w-[300px]", align = "left" }: { childr
         ?
       </span>
       <span
-        className={`pointer-events-none absolute bottom-[calc(100%+8px)] z-50 ${align === "right" ? "right-0" : "left-0"} ${width} rounded-lg border border-ink-600 bg-ink-950 px-3 py-2 text-[12px] font-normal normal-case leading-snug tracking-normal text-ink-200 opacity-0 shadow-xl shadow-black/60 transition-opacity group-hover/help:opacity-100 group-focus-within/help:opacity-100`}
+        className={`pointer-events-none absolute bottom-[calc(100%+8px)] z-50 ${align === "right" ? "right-0" : "left-0"} ${width} rounded-lg border border-ink-600 bg-ink-950 px-3 py-2 text-[12px] font-normal normal-case leading-snug tracking-normal text-ink-200 opacity-0 kb-raise-sm transition-opacity group-hover/help:opacity-100 group-focus-within/help:opacity-100`}
       >
         {children}
       </span>
@@ -97,8 +97,8 @@ export function Modal({ title, onClose, children, width = "max-w-xl" }: { title:
   }, [onClose]);
   return (
     // The overlay scrolls, so a form taller than the window (a long pipeline) still reaches its buttons.
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink-950/75 backdrop-blur-[2px] p-6 pt-[8vh]" onMouseDown={onClose}>
-      <div className={`rise w-full ${width} rounded-xl border border-ink-700 bg-ink-900 shadow-2xl shadow-black/60`} onMouseDown={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-[var(--kb-scrim)] backdrop-blur-[2px] p-6 pt-[8vh]" onMouseDown={onClose}>
+      <div className={`rise w-full ${width} rounded-xl border border-ink-700 bg-ink-900 kb-raise`} onMouseDown={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-ink-700 px-5 py-3">
           <h2 className="text-[14px] font-semibold text-ink-100">{title}</h2>
           <button className="text-ink-400 hover:text-ink-100 cursor-pointer text-lg leading-none" onClick={onClose} aria-label="Close">×</button>

@@ -87,11 +87,14 @@ opens that page for you if not). A ZIP copy does not update itself — the one-l
 2. **Add a project**: *+ Add project* in the left bar → pick a folder (an existing project, or an empty
    folder for a new one).
 3. **Create a task**: the **+** on the *Backlog* column → a title, and a few lines on what “done” looks
-   like → *Create task*.
-4. **Queue it**: hover the card → **queue**. It moves to **In progress** while Claude plans, codes and
-   reviews it; anything that needs you shows as **needs you**.
-5. **Review it**: when it reaches **Review**, open the card and look at the changes. **Approve** lands
-   them in your project; **Reject** keeps them aside with your note, and you can re-run any stage.
+   like → **Create & queue** (or **Create** to keep it in Backlog for later).
+4. **Watch it**: it moves to **In progress** while Claude plans, codes and reviews it; anything that
+   needs you shows as **needs you**. If a stage cannot do the work from where it runs — an autonomous
+   run needs a live system it is sandboxed from, say — the card says **blocked · needs you** with the
+   reason, and **Switch to supervised & run** carries on from that stage.
+5. **Review it**: when it reaches **Review**, open the card: the **Result** is on top, with the review's
+   verdict. **Approve** lands the changes in your project; **Reject** keeps them aside with your reason,
+   which the next run is told first. You can re-run any stage.
 
 The **Tour** tab explains every feature in a few minutes.
 
@@ -155,11 +158,14 @@ terminal* (with a one-click **Repair** if its terminal part is missing) and, opt
 ## Answer Claude's questions
 
 Sometimes only you can make a call: which design, which of two approaches, what a vague request
-meant. Claude then stops and asks. The card shows **asks you**, the bell rings, and the question
+meant. In a **supervised** task Claude then stops and asks. The card shows **asks you**, the bell rings, and the question
 appears in the task (and on the **Approvals** tab) with options to pick; you can also type your own
 answer. **Let Claude decide** hands it back. By default the task waits for you, however long it takes.
 To keep night work moving instead, Settings → Runs & limits → *When Claude asks you a question* lets
 Claude decide after 15 minutes to 4 hours; it says what it chose in its summary.
+
+An **autonomous** task never stops to ask — nobody is watching it. It puts the question on the card
+with the answer it is going with, and carries on; answer it there and the next stage gets your answer.
 
 ## Approve the plan first, and mark live tasks
 
@@ -172,7 +178,8 @@ Settings, always wait, or never wait — its **Pipeline** tab, or *Safety* when 
 Tick **Touches a live system** on a task that changes real data — a production database, a live business app, a
 deployed site. It gets a **prod** chip, always waits for plan approval, every stage is told to dry-run
 and read back each live change, and its review runs on *Settings → Review model for live tasks* (Opus by
-default) and checks the live system itself instead of trusting the summary.
+default) and checks the live system itself instead of trusting the summary. When a new task reads like
+live-system work, the board offers **Mark it live** on the card; nothing changes until you click it.
 
 The **Plan** tab of every task shows the plan the code stage worked to, next to the code stage's own
 *Plan steps* checklist — each step done, changed or skipped, and why.
@@ -340,7 +347,7 @@ restarting it.
 | **Autonomous** | Runs in its own git worktree on `kanban/<taskId>`. Edits are accepted inside it; writes outside it and history-rewriting git commands are refused. **Approve** lands the branch — see *Landing safely*. |
 | **Supervised** | Runs in the project folder, and every tool call that needs permission becomes an approval card: Allow or Deny, with a note. Tick **Work on its own branch** and it runs in its own worktree on `kanban/<taskId>` instead, like an autonomous task — still approving every write, and landing only when you press **Approve**. Commands that only read (`grep`, `wc`, `ls`, `git status`, `git diff`…) run without a card and are listed in the run log — switch that off in Settings → *Guardrails*. When the spec says a step needs your go-ahead (a live write, a deploy), Claude asks for it on a card rather than stopping. |
 | **Queue** | Per-project FIFO with a per-project cap and a global cap. Drag between Backlog and Queued. |
-| **Board MCP** | Every run gets `board_get_task`, `board_list_siblings`, `board_post_message`, `board_create_subtasks`, `board_set_summary`, `board_remember`, `board_memory`. |
+| **Board MCP** | Every run gets `board_get_task`, `board_list_siblings`, `board_post_message`, `board_create_subtasks`, `board_set_summary`, `board_remember`, `board_memory`, `board_report_blocked`. |
 | **Approvals** | A global inbox with `a` / `y` / `n` and a tab-title badge, so an unattended run never stalls unnoticed. |
 | **Dashboard** | Needs-you, open, done, spend, median task time, first-pass rate, throughput, cost by model, where runs fail. Every chart has a table view. |
 | **Sessions** | Every run across projects: state, model, effort, cost, tokens, elapsed. |
@@ -486,7 +493,7 @@ A model with no price at all is shown as *subscription* — $0, with the tokens 
 The board meters each stage itself against the per-stage ceiling, since the SDK cannot price a model id
 it does not know.
 
-**When a provider runs out** (D194). A delegated stage's error is read for what it is
+**When a provider runs out** (D225). A delegated stage's error is read for what it is
 (`engine/providers/limits.ts`): a **window** (z.ai 1308/1310, Kimi Code's 5-hour and weekly 403s,
 Ollama's session limit…), **credit** (z.ai 1113, HTTP 402, "insufficient balance", an expired plan) or
 **busy** (concurrency, 429 with no usage words). Anything else is an ordinary failure. The provider is
@@ -501,7 +508,7 @@ it waits in the queue, and a stage about to start on it pauses without calling i
 clears the record. Claude's own limit can move to `Settings.claudeFallback` the same way.
 `POST /api/tasks/:id/switch {provider, model, remember}` is the pause card's **Switch & continue**.
 
-**Usage** (D195). `GET /api/providers/usage` returns each enabled provider's own figures where it has an
+**Usage** (D226). `GET /api/providers/usage` returns each enabled provider's own figures where it has an
 API for them (`engine/providers/usage.ts`): z.ai's `/api/monitor/usage/quota/limit` (5-hour and weekly
 percentages), Kimi Code's `/coding/v1/usages`, OpenRouter's `/api/v1/credits`, Moonshot's balance. It
 adds what the board's runs sent there in the last 5 hours and 7 days, and the out record. Reads are free,
@@ -689,6 +696,21 @@ What stops an unattended run from doing damage, in Settings → *Runs & limits*:
   in both modes and cannot be switched off. A real run once "stopped its dev server" that way and took
   every Node process on the machine with it, the board included. Killing your own PID is fine, and the
   board itself stops whatever a stage leaves running on its reserved port.
+- **The autonomous sandbox** — an autonomous run reads, writes and runs commands only inside its own
+  worktree (plus its task's attachments and your skills), so the gitignored `.env` and API keys of your
+  main checkout are out of its reach. Every refusal tells it to report **blocked** instead of looking for
+  a way round; after five, the board stops the stage and marks it blocked itself.
+- **Blocked is not done** — a stage that reports it cannot do the task stops the pipeline there: no
+  "success", no next stage, no Approve. Review judges the result against what you asked, item by item.
+- **Questions on the card** — a stage that needs your decision but can carry on puts the question on
+  the card with its default (`board_ask`); your answer reaches the next stage. That is how autonomous
+  runs ask; a supervised run stops and asks on a card instead (see *Answer Claude's questions*).
+- **Credentials on approval cards** — a card that would print a `.env`, key or secrets file into the
+  transcript says so in red, and the Approvals page's `y` shortcut will not allow it.
+- **Fewer cards for reading** — supervised runs run commands that can only read (`grep`, `ls`,
+  `git log` …) inside the project without a card (Settings, on by default); anything that could write asks.
+- **A shared checkout** — a supervised run notes what was already uncommitted when it started, leaves
+  it alone, and lists the files it changed, so you commit only this task's work.
 - **A per-task cost ceiling** on top of the per-stage one. Three stages at $5 was already $15. Reaching
   either ceiling **pauses the task and asks you** — *Continue* lets it spend one more stage's worth in the
   same session; *Stop* keeps what it did. Nothing is thrown away for money.

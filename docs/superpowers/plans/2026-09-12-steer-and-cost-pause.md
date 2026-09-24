@@ -544,9 +544,9 @@ In *What a task costs* add a line: `A task that hits a ceiling shows **needs you
 
 | # | Decision | Why |
 |---|---|---|
-| D184 | A message typed on a running task is delivered by a **PostToolUse hook as `additionalContext`**, and a **Stop hook blocks the turn's end** while one is undelivered; a cursor on the run's active record decides what is new | The SDK's streaming input cannot interrupt a turn in progress; hooks are the one path that reaches the model mid-turn without restarting the session. The Stop guard means a message never waits for a tool call that never comes |
-| D185 | Cost ceilings **pause for a decision** (`pause_reason: "cost"`, no `resume_at`) instead of failing; Continue grants **one per-stage ceiling** to the task and resumes the same session | A task stopped at 90 % for money and thrown away is the most expensive outcome there is. Granting one stage at a time keeps the decision small and repeatable; keeping the session means nothing finished is redone |
-| D186 | A cost pause is reported as **needs you**, not as a paused-by-limit event | It waits for a person; the limit pause does not. The colour and sound should say which |
+| D215 | A message typed on a running task is delivered by a **PostToolUse hook as `additionalContext`**, and a **Stop hook blocks the turn's end** while one is undelivered; a cursor on the run's active record decides what is new | The SDK's streaming input cannot interrupt a turn in progress; hooks are the one path that reaches the model mid-turn without restarting the session. The Stop guard means a message never waits for a tool call that never comes |
+| D216 | Cost ceilings **pause for a decision** (`pause_reason: "cost"`, no `resume_at`) instead of failing; Continue grants **one per-stage ceiling** to the task and resumes the same session | A task stopped at 90 % for money and thrown away is the most expensive outcome there is. Granting one stage at a time keeps the decision small and repeatable; keeping the session means nothing finished is redone |
+| D217 | A cost pause is reported as **needs you**, not as a paused-by-limit event | It waits for a person; the limit pause does not. The colour and sound should say which |
 ```
 
 - [ ] **Step 5:** `npm test` and `npm run typecheck` → all green. Do not commit: the working tree also carries the uncommitted schedules work; report both to the user.

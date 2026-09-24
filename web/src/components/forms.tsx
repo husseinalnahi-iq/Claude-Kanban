@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Mode, Stage } from "../../../server/src/types.ts";
 import { api, type FolderProbe, type ProjectWithGit } from "../lib/api.ts";
+import type { StageStat } from "../../../server/src/routes/analytics.ts";
 import { useAppData } from "../lib/store.tsx";
 import { navigate } from "../lib/router.ts";
 import { Button, ErrorLine, Field, inputCls, Modal, useAction, ModeHelp } from "./ui.tsx";
@@ -35,7 +36,8 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
   const [title, setTitle] = useState("");
   const [spec, setSpec] = useState("");
   const [mode, setMode] = useState<Mode>("supervised");
-  const [pipeline, setPipeline] = useState<Stage[]>(project.policy.defaultPipeline?.length ? project.policy.defaultPipeline : settings?.defaultPipeline ?? []);
+  const full: Stage[] = project.policy.defaultPipeline?.length ? project.policy.defaultPipeline : settings?.defaultPipeline ?? [];
+  const [pipeline, setPipeline] = useState<Stage[]>(full);
   const [when, setWhen] = useState<When>(defaultWhen(initialWhen ?? "now"));
   const [live, setLive] = useState(false);
   const [ownBranch, setOwnBranch] = useState(false);
@@ -43,8 +45,18 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
   const [planApproval, setPlanApproval] = useState<boolean | null>(null);
   const { busy, error, run } = useAction();
   const invalid = whenInvalid(when);
+  // "Quick change": the same pipeline without its plan stage. A one-file fix taken through plan → code →
+  // review took 70 minutes here; the plan was a whole extra session for a change that needed none (D205).
+  const quick = full.filter((s) => s.stage !== "plan");
+  const [stats, setStats] = useState<StageStat[]>([]);
+  useEffect(() => {
+    api.stageStats(project.id).then(setStats, () => setStats([]));
+  }, [project.id]);
+  const planStat = stats.find((s) => s.stage === "plan");
+  const same = (a: Stage[], b: Stage[]) => JSON.stringify(a) === JSON.stringify(b);
 
-  const submit = () =>
+  // "Create & queue" is the usual intent; plain Create keeps it in Backlog for later (D194).
+  const submit = (queue: boolean) =>
     run(async () => {
       if (when.kind === "repeat") {
         // A repeating schedule is a template: no card now, a fresh one each time it comes round.
@@ -54,7 +66,20 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
       }
       const t = await api.createTask({ project_id: project.id, title, spec_md: spec, mode, pipeline, parent_id: parentId ?? null, milestone_id: milestoneId ?? null, live, plan_approval: planApproval, own_branch: mode === "supervised" && ownBranch });
       const startAt = startAtOf(when);
-      if (startAt) await api.scheduleTask(t.id, startAt);
+      if (startAt) {
+        // A start time means "not now": the scheduler queues it when the time comes, so Create & queue
+        // does not also queue it now.
+        await api.scheduleTask(t.id, startAt);
+      } else if (queue) {
+        try {
+          await api.queue(t.id);
+        } catch (e) {
+          // The task exists; open it so the reason it could not start is on screen, not lost with this form.
+          onClose();
+          navigate({ taskId: t.id });
+          throw e;
+        }
+      }
       onClose();
       navigate({ taskId: t.id });
     });
@@ -65,7 +90,8 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
         className="space-y-4"
         onSubmit={(e) => {
           e.preventDefault();
-          void submit();
+          // Subtasks are usually written as a set and queued together, so Enter only creates one.
+          void submit(!parentId);
         }}
       >
         <Field label="Title">
@@ -114,6 +140,32 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
             </>
           }
         >
+          {quick.length && quick.length < full.length ? (
+            <div className="mb-2 flex flex-wrap items-center gap-1.5">
+              {([
+                ["Quick change", quick, "For a small, clear change: no plan stage"],
+                ["Full", full, "When deciding the approach is the hard part"],
+              ] as const).map(([label, stages, title]) => (
+                <button
+                  key={label}
+                  type="button"
+                  title={title}
+                  onClick={() => setPipeline([...stages])}
+                  className={`rounded-md border px-2 py-1 text-[11.5px] cursor-pointer ${
+                    same(pipeline, [...stages]) ? "border-amber/60 bg-amber/10 text-amber" : "border-ink-700 text-ink-300 hover:border-ink-500"
+                  }`}
+                >
+                  <b>{label}</b> · <span className="font-mono">{stages.map((s) => s.stage).join(" → ")}</span>
+                </button>
+              ))}
+              <span className="text-[11.5px] text-ink-400">
+                {planStat
+                  ? `A plan stage here takes about ${Math.round(planStat.medianMinutes)} min and $${planStat.medianCost.toFixed(2)} (median of ${planStat.runs}).`
+                  : "A plan stage is a whole extra session."}{" "}
+                Skip it for a small, clear change.
+              </span>
+            </div>
+          ) : null}
           <PipelineEditor value={pipeline} onChange={setPipeline} models={settings?.models ?? []} />
         </Field>
         {when.kind !== "repeat" ? (
@@ -138,9 +190,18 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
         <ErrorLine error={error} />
         <div className="flex justify-end gap-2">
           <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button type="submit" variant="primary" busy={busy} disabled={!title.trim() || !!invalid} title={invalid ?? undefined}>
-            {when.kind === "repeat" ? "Create schedule" : when.kind === "now" ? "Create task" : "Create & schedule"}
-          </Button>
+          {when.kind === "now" ? (
+            <>
+              <Button type="button" busy={busy} disabled={!title.trim()} onClick={() => void submit(false)} title="Create it in Backlog without starting it">
+                Create
+              </Button>
+              <Button type="submit" variant="primary" busy={busy} disabled={!title.trim()} title="Create it and put it in the queue">Create &amp; queue</Button>
+            </>
+          ) : (
+            <Button type="submit" variant="primary" busy={busy} disabled={!title.trim() || !!invalid} title={invalid ?? undefined}>
+              {when.kind === "repeat" ? "Create schedule" : "Create & schedule"}
+            </Button>
+          )}
         </div>
       </form>
     </Modal>

@@ -75,7 +75,7 @@ export function Tour({ hasProjects, onAddProject }: { hasProjects: boolean; onAd
         <div
           aria-hidden
           className="pointer-events-none absolute inset-x-0 top-0 h-[420px]"
-          style={{ background: "radial-gradient(700px 300px at 15% 0%, rgb(242 169 59 / .10), transparent 70%)" }}
+          style={{ background: "radial-gradient(700px 300px at 15% 0%, color-mix(in srgb, var(--color-amber) 10%, transparent), transparent 70%)" }}
         />
 
         {/* hero */}

@@ -13,7 +13,7 @@ const SEV: Record<Objection["severity"], string> = {
 
 /**
  * A plan waiting for the human before any code is written. After a debate (D131): the original plan,
- * the critic's objections and the revised plan, pick one. With plan approval on (D200): the plan
+ * the critic's objections and the revised plan, pick one. With plan approval on (D231): the plan
  * alone — approve it, edit it, or send the task back with a note.
  */
 export function PlanGate({ d }: { d: TaskDetail }) {

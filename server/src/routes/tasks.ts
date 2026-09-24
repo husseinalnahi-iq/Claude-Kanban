@@ -178,8 +178,12 @@ export async function taskRoutes(app: FastifyInstance, { repo, bus, runner }: Ap
 
   /** Accept what triage suggested: its labels, or the pipeline it sized, or both. */
   app.post("/tasks/:id/accept-suggestion", async (req) => {
-    const body = z.object({ fields: z.boolean().default(false), pipeline: z.boolean().default(false) }).parse(req.body ?? {});
+    const body = z.object({ fields: z.boolean().default(false), pipeline: z.boolean().default(false), mode: z.boolean().default(false), live: z.boolean().default(false) }).parse(req.body ?? {});
     return runner.acceptSuggestion(idOf(req), body);
+  });
+  app.post("/tasks/:id/dismiss-suggestion", async (req) => {
+    const body = z.object({ fields: z.boolean().default(false), pipeline: z.boolean().default(false), mode: z.boolean().default(false), live: z.boolean().default(false) }).parse(req.body ?? {});
+    return runner.dismissSuggestion(idOf(req), body);
   });
 
   /** Look at an attached image with the cheap vision model now, instead of waiting for the upload hook. */
@@ -250,6 +254,12 @@ export async function taskRoutes(app: FastifyInstance, { repo, bus, runner }: Ap
     return runner.rejectTask(idOf(req), body.note ?? null);
   });
   app.post("/tasks/:id/discard", async (req) => runner.discardTask(idOf(req)));
+  app.post("/tasks/:id/questions/:qid", async (req) => {
+    const body = z.object({ answer: z.string().trim().min(1).max(4000) }).parse(req.body);
+    return runner.answerQuestion(idOf(req), (req.params as { qid: string }).qid, body.answer);
+  });
+  /** A task the sandbox blocked: drop its worktree, switch it to supervised and run it again from the blocked stage. */
+  app.post("/tasks/:id/escalate", async (req) => runner.escalateToSupervised(idOf(req)));
   app.post("/tasks/:id/plan-decision", async (req) => {
     const body = z.object({ choice: z.enum(["original", "revised", "custom"]), text: z.string().max(200_000).optional() }).parse(req.body);
     return runner.decidePlan(idOf(req), body.choice, body.text);

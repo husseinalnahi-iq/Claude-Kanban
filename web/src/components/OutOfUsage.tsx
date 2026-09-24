@@ -26,7 +26,7 @@ function suggestion(task: Task, i: number, settings: Settings): TierRef {
 /**
  * A task paused because Claude or a delegated provider ran out: say what happened, and offer the
  * three ways on — wait (it carries on by itself when a reset time is known), switch the stage to
- * another provider now (the next model picks up where it stopped), or stop (D194).
+ * another provider now (the next model picks up where it stopped), or stop (D225).
  */
 export function OutOfUsage({ task, states, settings }: { task: Task; states: string[]; settings: Settings }) {
   const i = stoppedStage(task, states);

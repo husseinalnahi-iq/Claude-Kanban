@@ -147,7 +147,7 @@ test("Gemini stats become usage; an overloaded error pauses to try again later, 
     setCliSpawn(fakeChild({ lines: err }).spawnFn);
     const t2 = s.repo.createTask({ project_id: s.project.id, title: "e", spec_md: "x", mode: "supervised", pipeline: [{ stage: "plan", model: "gemini-3.8-pro", effort: "low", provider: "gemini" }] });
     s.runner.queueTask(t2.id);
-    // An overloaded model is "busy" (D194): it waits ten minutes rather than failing.
+    // An overloaded model is "busy" (D225): it waits ten minutes rather than failing.
     await until(() => s.repo.getTask(t2.id)!.status === "paused", 15_000);
     assert.match(s.repo.getTask(t2.id)!.note ?? "", /too busy right now: .*model overloaded/);
     assert.ok(s.repo.getTask(t2.id)!.resume_at);

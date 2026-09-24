@@ -160,8 +160,11 @@ test("analytics are computed in SQL, so nothing is silently dropped past a row l
   assert.ok(!agg.byModel.some((m) => m.cost > 50), "another project's spend is not mixed in");
 });
 
-test("read-only shell commands a supervised run may use without a card (D197)", async () => {
-  const { readOnlyCommand } = await import("../src/engine/gate.ts");
+test("read-only shell commands a supervised run may use without a card (D228)", async () => {
+  // One detector for both lineages' cases (D240): private's isReadOnlyShell, which also keeps the
+  // command inside the project and away from credentials files.
+  const { isReadOnlyShell } = await import("../src/engine/gate.ts");
+  const readOnlyCommand = (cmd: string) => isReadOnlyShell(cmd, String.raw`C:\work\proj`);
   // Seen in a real supervised run: each of these was a card someone had to click.
   for (const cmd of [
     String.raw`cd "C:\work\proj" && wc -l docs/notes.md`,
@@ -170,7 +173,6 @@ test("read-only shell commands a supervised run may use without a card (D197)", 
     'cd "C:/work/proj" && find scripts/payments -maxdepth 1 -iname "api*"',
     'cd "C:/work/proj" && git show HEAD -- docs/notes.md | tail -60',
     "git diff abc123 --stat 2>/dev/null",
-    String.raw`git -C "C:\work\my proj" log --oneline -5`,
     "Get-ChildItem -Recurse src | Select-String -Pattern TODO",
     "ls src; cat package.json",
     "sed -n 1,60p scripts/deploy.py; grep -n x docs/a.md | head -30",
@@ -215,5 +217,9 @@ test("read-only shell commands a supervised run may use without a card (D197)", 
     String.raw`grep "a\"; rm x; echo \"" f`,
     "FOO=bar ls",
     "",
+    // Private's rule, kept by D240: another folder, even to read, and any credentials file get a card.
+    String.raw`git -C "C:\work\my proj" log --oneline -5`,
+    "cat .env",
+    String.raw`type C:\Users\someone\notes.txt`,
   ]) assert.equal(readOnlyCommand(cmd), false, cmd);
 });

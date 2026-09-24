@@ -40,17 +40,32 @@ function asking() {
   return { fn, results };
 }
 
-test("a question becomes a card, and your answer goes back in the tool's own answers field", async () => {
-  for (const mode of ["supervised", "autonomous"] as const) {
+test("an autonomous run is told to use board_ask instead: no card, no stall (D239)", async () => {
+  const q = asking();
+  const s = setup(q.fn);
+  try {
+    // autonomous runs work in a git worktree, so the project must be a repository with a commit
+    const git = (...a: string[]) => execFileSync("git", a, { cwd: s.dir });
+    git("init", "-q", "-b", "main");
+    writeFileSync(join(s.dir, "a.txt"), "a");
+    git("add", "-A");
+    git("-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-qm", "init");
+    const task = s.repo.createTask({ project_id: s.project.id, title: "ask autonomous", mode: "autonomous", pipeline: ONE });
+    s.runner.queueTask(task.id);
+    await until(() => q.results.length === 1);
+    assert.equal(q.results[0].behavior, "deny");
+    assert.match(q.results[0].message, /board_ask/);
+    assert.equal(s.repo.pendingApprovals(task.id).length, 0, "nothing waits on a card");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("a question in a supervised run becomes a card, and your answer goes back in the tool's own answers field (D218, D239)", async () => {
+  for (const mode of ["supervised"] as const) {
     const q = asking();
     const s = setup(q.fn);
     try {
-      // autonomous runs work in a git worktree, so the project must be a repository with a commit
-      const git = (...a: string[]) => execFileSync("git", a, { cwd: s.dir });
-      git("init", "-q", "-b", "main");
-      writeFileSync(join(s.dir, "a.txt"), "a");
-      git("add", "-A");
-      git("-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-qm", "init");
       const task = s.repo.createTask({ project_id: s.project.id, title: `ask ${mode}`, mode, pipeline: ONE });
       s.runner.queueTask(task.id);
       await until(() => s.repo.pendingApprovals(task.id).length === 1);
@@ -60,7 +75,7 @@ test("a question becomes a card, and your answer goes back in the tool's own ans
       assert.ok(s.seen.some((m: WsMessage) => m.type === "approval.requested"), "and it alerts like an approval");
 
       assert.throws(() => s.runner.decideApproval(card.id, "allow"), /needs an answer/);
-      const answered = s.runner.answerQuestion(card.id, { "Which colour should the button be?": "Green" });
+      const answered = s.runner.answerApproval(card.id, { "Which colour should the button be?": "Green" });
       assert.equal(answered.decision, "answered");
       assert.deepEqual(answered.answers, { "Which colour should the button be?": "Green" });
       await until(() => q.results.length === 1);

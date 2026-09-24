@@ -75,7 +75,7 @@ function ToastCard({ t, onClose }: { t: Shown; onClose: () => void }) {
     <div
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      className={`kb-toast relative w-[360px] overflow-hidden rounded-xl border bg-ink-900/95 shadow-2xl shadow-black/60 backdrop-blur ${t.leaving ? "kb-toast-out" : ""} ${t.kind === "allClear" ? "kb-shimmer" : ""}`}
+      className={`kb-toast relative w-[360px] overflow-hidden rounded-xl border bg-ink-900/95 kb-raise backdrop-blur ${t.leaving ? "kb-toast-out" : ""} ${t.kind === "allClear" ? "kb-shimmer" : ""}`}
       style={{
         borderColor: tint(info.color, 45),
         backgroundImage: `radial-gradient(120% 90% at 0% 0%, ${tint(info.color, 16)}, transparent 55%)`,
@@ -183,7 +183,7 @@ const CSS = `
 }
 .kb-shimmer::before {
   content: ""; position: absolute; inset: 0; pointer-events: none;
-  background: linear-gradient(105deg, transparent 35%, color-mix(in srgb, var(--color-cyan) 22%, transparent) 50%, transparent 65%);
+  background: linear-gradient(105deg, transparent 35%, var(--kb-shimmer) 50%, transparent 65%);
   transform: translateX(-100%); animation: kb-sweep 1.8s .2s ease-in-out 2;
 }
 @keyframes kb-sweep { to { transform: translateX(100%); } }

@@ -6,6 +6,7 @@ import { navigate } from "../lib/router.ts";
 import { useAppData } from "../lib/store.tsx";
 import { clock, until } from "../lib/format.ts";
 import { Button, ErrorLine, Modal, Switch, useAction } from "./ui.tsx";
+import { useAsk } from "./Ask.tsx";
 import { defaultWhen, describeDays, startAtOf, WhenPicker, whenInvalid, type When } from "./WhenPicker.tsx";
 
 /** A project's repeating schedules, kept live over the websocket. */
@@ -104,6 +105,13 @@ export function SchedulesPanel({ project, cards, schedules, onClose, onNew }: {
   const [error, setError] = useState<string | null>(null);
   const [closing, setClosing] = useState(false);
   const { leaving, leave } = useLeaving();
+  const dialog = useAsk();
+  const remove = async (s: Schedule) => {
+    // The board's own dialog, not confirm(): the browser's is dismissed unseen in embedded browsers (D193).
+    if (await dialog.confirm({ title: `Delete the schedule "${s.title}"?`, message: "Cards it already made stay.", confirmLabel: "Delete", danger: true })) {
+      leave(s.id, () => api.deleteSchedule(s.id));
+    }
+  };
   const close = () => {
     setClosing(true);
     setTimeout(onClose, 180);
@@ -117,8 +125,8 @@ export function SchedulesPanel({ project, cards, schedules, onClose, onNew }: {
 
   return (
     <div className="fixed inset-0 z-40">
-      <div className={`absolute inset-0 bg-ink-950/50 ${closing ? "fade-out" : "fade-in"}`} onClick={close} />
-      <aside className={`absolute inset-y-0 right-0 flex w-[440px] max-w-full flex-col border-l border-ink-700 bg-ink-900 shadow-2xl ${closing ? "slide-out-right" : "slide-in-right"}`}>
+      <div className={`absolute inset-0 bg-[var(--kb-scrim-soft)] ${closing ? "fade-out" : "fade-in"}`} onClick={close} />
+      <aside className={`absolute inset-y-0 right-0 flex w-[440px] max-w-full flex-col border-l border-ink-700 bg-ink-900 kb-raise ${closing ? "slide-out-right" : "slide-in-right"}`}>
         <header className="flex items-center gap-3 border-b border-ink-800 px-5 py-4">
           <div>
             <h2 className="text-[15px] font-semibold text-ink-100">Schedules</h2>
@@ -143,7 +151,7 @@ export function SchedulesPanel({ project, cards, schedules, onClose, onNew }: {
                     <Button size="sm" variant="ghost" onClick={() => void api.runSchedule(s.id).then((t) => navigate({ taskId: t.id }), (e: Error) => setError(e.message))}>
                       ▶ Run now
                     </Button>
-                    <Button size="sm" variant="ghost" onClick={() => confirm(`Delete the schedule "${s.title}"? Cards it already made stay.`) && leave(s.id, () => api.deleteSchedule(s.id))}>
+                    <Button size="sm" variant="ghost" onClick={() => void remove(s)}>
                       Delete
                     </Button>
                   </div>
@@ -191,6 +199,7 @@ export function SchedulesPanel({ project, cards, schedules, onClose, onNew }: {
           )}
         </footer>
       </aside>
+      {dialog.element}
     </div>
   );
 }

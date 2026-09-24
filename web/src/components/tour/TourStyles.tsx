@@ -38,7 +38,7 @@ const CSS = `
 .kb-card { transition: left .75s cubic-bezier(.65,0,.35,1), border-color .4s, box-shadow .4s; }
 .kb-lane-on { transition: background-color .4s, color .4s; }
 .kb-ask { animation: kb-ask 1.1s ease-out infinite; }
-@keyframes kb-ask { 0% { box-shadow: 0 0 0 0 rgb(240 86 122 / .55) } 70%,100% { box-shadow: 0 0 0 9px rgb(240 86 122 / 0) } }
+@keyframes kb-ask { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-rose) 55%, transparent) } 70%,100% { box-shadow: 0 0 0 9px color-mix(in srgb, var(--color-rose) 0%, transparent) } }
 .kb-bit { position: absolute; width: 4px; height: 7px; border-radius: 1px; animation: kb-burst .9s cubic-bezier(.15,.8,.3,1) forwards; }
 @keyframes kb-burst { from { transform: translate(0,0) rotate(0); opacity: 1 } to { transform: translate(var(--dx), var(--dy)) rotate(var(--r)); opacity: 0 } }
 .kb-type::after { content: "▍"; margin-left: 1px; animation: kb-blink 1s steps(1) infinite; color: var(--color-amber); }

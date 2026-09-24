@@ -1,19 +1,20 @@
 import { useState, type ReactNode } from "react";
 
 /**
- * Small hand-built SVG charts. Palettes are the dataviz reference instance, stepped for our dark
- * surface (#121310) and checked with the skill's validator — categorical, 2-series and the ordinal
- * priority ramp all pass lightness, chroma, CVD separation, normal-vision and contrast.
+ * Small hand-built SVG charts. Palettes are the dataviz reference instance, checked with the skill's
+ * validator — categorical, 2-series and the ordinal priority ramp all pass lightness, chroma, CVD
+ * separation, normal-vision and contrast. The values live in index.css so they follow the theme; the
+ * categorical six clear 3:1 on both surfaces and are shared, the priority ramp flips direction.
  */
-export const CATEGORICAL = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300"];
-export const SERIES_A = "#3987e5";
-export const SERIES_B = "#199e70";
-export const MONEY = "#d95926";
-/** p0 (most urgent) → p3, one hue, visible steps. */
-export const PRIORITY_RAMP = ["#b7d3f6", "#6da7ec", "#2a78d6", "#184f95"];
+export const CATEGORICAL = ["var(--kb-cat-1)", "var(--kb-cat-2)", "var(--kb-cat-3)", "var(--kb-cat-4)", "var(--kb-cat-5)", "var(--kb-cat-6)"];
+export const SERIES_A = "var(--kb-cat-1)";
+export const SERIES_B = "var(--kb-cat-3)";
+export const MONEY = "var(--kb-cat-2)";
+/** p0 (most urgent) → p3, one hue, visible steps, most urgent furthest from the ground. */
+export const PRIORITY_RAMP = ["var(--kb-prio-0)", "var(--kb-prio-1)", "var(--kb-prio-2)", "var(--kb-prio-3)"];
 
-const AXIS = "#3a3b34";
-const INK_MUTED = "#83827a";
+const AXIS = "var(--color-ink-600)";
+const INK_MUTED = "var(--color-ink-400)";
 
 export function Panel({ title, hint, children, right }: { title: string; hint?: string; children: ReactNode; right?: ReactNode }) {
   return (
@@ -193,9 +194,9 @@ export function LineChart({
         })}
         {hover !== null ? (
           <g>
-            <line x1={x(hover)} x2={x(hover)} y1={padT} y2={height - padB} stroke="#57574e" strokeWidth={1} />
+            <line x1={x(hover)} x2={x(hover)} y1={padT} y2={height - padB} stroke="var(--color-ink-500)" strokeWidth={1} />
             {series.map((s, si) => (
-              <circle key={s.label} cx={x(hover)} cy={y(points[hover].values[si] ?? 0)} r={4} fill={s.color} stroke="#121310" strokeWidth={2} />
+              <circle key={s.label} cx={x(hover)} cy={y(points[hover].values[si] ?? 0)} r={4} fill={s.color} stroke="var(--color-ink-900)" strokeWidth={2} />
             ))}
           </g>
         ) : null}

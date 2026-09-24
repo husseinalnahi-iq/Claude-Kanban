@@ -88,7 +88,7 @@ function TestResult({ r }: { r: ProviderTestResult }) {
 }
 
 /**
- * What happens when this provider runs out mid-task (D194): by default the task waits for it to come
+ * What happens when this provider runs out mid-task (D225): by default the task waits for it to come
  * back (a usage window) or asks you (credit that ran out). A fallback carries the stage on instead.
  */
 function RunsOut({ p, onChange }: { p: Provider; onChange: (p: Provider) => void }) {

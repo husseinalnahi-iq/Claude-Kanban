@@ -86,7 +86,7 @@ export function WhenPicker({ value, onChange, allowNow = true }: { value: When; 
             type="button"
             onClick={() => value.kind !== o.kind && onChange(defaultWhen(o.kind))}
             className={`rounded-md border px-2.5 py-1.5 text-left transition-all duration-200 cursor-pointer ${
-              value.kind === o.kind ? "border-cyan/70 bg-cyan/10 text-cyan shadow-[0_0_0_3px_rgb(80_200_220/0.08)]" : "border-ink-700 text-ink-300 hover:border-ink-500"
+              value.kind === o.kind ? "border-cyan/70 bg-cyan/10 text-cyan shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-cyan)_8%,transparent)]" : "border-ink-700 text-ink-300 hover:border-ink-500"
             }`}
           >
             <div className="text-[12.5px] font-semibold">{o.label}</div>

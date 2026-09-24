@@ -26,6 +26,9 @@ import { PlanGate } from "../components/PlanGate.tsx";
 import { SafetyOptions } from "../components/SafetyOptions.tsx";
 import { OutOfUsage } from "../components/OutOfUsage.tsx";
 import { autonomousBlocked, branchBlocked, NewTaskForm } from "../components/forms.tsx";
+import { useAsk } from "../components/Ask.tsx";
+import { BlockedPanel, CheckoutNote, QuestionsPanel, ResultPanel } from "../components/Outcome.tsx";
+import { CredentialWarning } from "../components/CredentialWarning.tsx";
 
 type Tab = "spec" | "plan" | "pipeline" | "transcript" | "approvals" | "browser" | "diff" | "subtasks" | "files" | "messages" | "chat";
 const TABS: Tab[] = ["spec", "plan", "pipeline", "transcript", "approvals", "browser", "diff", "subtasks", "files", "messages", "chat"];
@@ -91,15 +94,15 @@ function ApprovalInput({ a }: { a: Approval }) {
     return (
       <div>
         <div className="font-mono text-[12px] text-ink-100">{input.file_path}</div>
-        <pre className="mt-1 max-h-56 overflow-auto rounded bg-ink-950 px-2.5 py-2 font-mono text-[11.5px] text-[#b9dcb0] whitespace-pre-wrap">{String(input.content ?? "")}</pre>
+        <pre className="mt-1 max-h-56 overflow-auto rounded bg-ink-950 px-2.5 py-2 font-mono text-[11.5px] text-[var(--kb-diff-add)] whitespace-pre-wrap">{String(input.content ?? "")}</pre>
       </div>
     );
   if (a.tool_name === "Edit")
     return (
       <div className="space-y-1">
         <div className="font-mono text-[12px] text-ink-100">{input.file_path}</div>
-        <pre className="max-h-40 overflow-auto rounded bg-rust/10 px-2.5 py-1.5 font-mono text-[11.5px] text-[#f0a58c] whitespace-pre-wrap">{String(input.old_string ?? "")}</pre>
-        <pre className="max-h-40 overflow-auto rounded bg-moss/10 px-2.5 py-1.5 font-mono text-[11.5px] text-[#b9dcb0] whitespace-pre-wrap">{String(input.new_string ?? "")}</pre>
+        <pre className="max-h-40 overflow-auto rounded bg-rust/10 px-2.5 py-1.5 font-mono text-[11.5px] text-[var(--kb-diff-del)] whitespace-pre-wrap">{String(input.old_string ?? "")}</pre>
+        <pre className="max-h-40 overflow-auto rounded bg-moss/10 px-2.5 py-1.5 font-mono text-[11.5px] text-[var(--kb-diff-add)] whitespace-pre-wrap">{String(input.new_string ?? "")}</pre>
       </div>
     );
   return <pre className="max-h-56 overflow-auto rounded bg-ink-950 px-2.5 py-2 font-mono text-[11.5px] text-ink-300 whitespace-pre-wrap">{JSON.stringify(input, null, 2)}</pre>;
@@ -121,6 +124,7 @@ function PendingToolApproval({ a }: { a: Approval }) {
         <span className="truncate text-[12.5px] text-ink-200">{a.title === a.tool_name ? "" : a.title}</span>
         <span className="ml-auto font-mono text-[10.5px] text-ink-500">{ago(a.created_at)}</span>
       </div>
+      <CredentialWarning a={a} />
       <ApprovalInput a={a} />
       <div className="mt-2.5 flex items-center gap-2">
         <input className={inputCls} placeholder="Note to Claude (optional, sent with Deny)" value={note} onChange={(e) => setNote(e.target.value)} />
@@ -143,6 +147,8 @@ function SpecTab({ d }: { d: TaskDetail }) {
   const sug = t.suggestion;
   return (
     <div className="space-y-5">
+      {["review", "done"].includes(t.status) ? <ResultPanel d={d} /> : null}
+      <CheckoutNote d={d} />
       <div className="flex flex-wrap items-center gap-2">
         <select className={`${inputCls} w-auto! font-mono text-[12px]`} value={t.type} onChange={(e) => run(() => api.patchTask(t.id, { type: e.target.value as typeof t.type }))}>
           {TASK_TYPES.map((x) => <option key={x} value={x}>{x}</option>)}
@@ -164,11 +170,38 @@ function SpecTab({ d }: { d: TaskDetail }) {
           <span className="font-mono">{sug.type} · {sug.priority}</span>
           <span className="text-ink-500">({Math.round((sug.confidence ?? 0) * 100)}% sure)</span>
           <Button size="sm" variant="go" onClick={() => run(() => api.acceptSuggestion(t.id, { fields: true }))}>Accept</Button>
-          <Button size="sm" variant="ghost" onClick={() => run(() => api.patchTask(t.id, { suggestion: null } as never))}>Dismiss</Button>
+          <Button size="sm" variant="ghost" onClick={() => run(() => api.dismissSuggestion(t.id, { fields: true }))}>Dismiss</Button>
         </div>
       ) : null}
-      {/* The board sizes the pipeline to the task, but never applies it: the wrong guess here costs money. */}
-      {sug?.pipeline?.length && !samePipeline(sug.pipeline, t.pipeline) ? (
+      {/* A task that needs a live system cannot be done from an autonomous run's sandbox (D191). */}
+      {sug?.mode && sug.mode !== t.mode && t.status === "backlog" && !d.busy ? (
+        <div className="rounded-lg border border-cyan/40 bg-cyan/5 px-3 py-2 text-[12.5px]">
+          <div className="mb-1 flex flex-wrap items-center gap-2">
+            <span className="text-cyan">Claude suggests running this {sug.mode}</span>
+          </div>
+          {sug.mode_reason ? <div className="mb-1.5 text-ink-300">{sug.mode_reason}</div> : null}
+          <div className="flex justify-end gap-2">
+            <Button size="sm" variant="go" onClick={() => run(() => api.acceptSuggestion(t.id, { mode: true }))}>Switch to {sug.mode}</Button>
+            <Button size="sm" variant="ghost" onClick={() => run(() => api.dismissSuggestion(t.id, { mode: true }))}>Keep {t.mode}</Button>
+          </div>
+        </div>
+      ) : null}
+      {/* Triage saw that this changes a live system: offered as a live task, never applied by itself (D241). */}
+      {sug?.live && !t.live && t.status === "backlog" && !d.busy ? (
+        <div className="rounded-lg border border-rose/40 bg-rose/5 px-3 py-2 text-[12.5px]">
+          <div className="mb-1 flex flex-wrap items-center gap-2">
+            <span className="text-rose">Claude thinks this touches a live system</span>
+          </div>
+          {sug.live_reason ? <div className="mb-1.5 text-ink-300">{sug.live_reason}</div> : null}
+          <div className="flex justify-end gap-2">
+            <Button size="sm" variant="go" onClick={() => run(() => api.acceptSuggestion(t.id, { live: true }))}>Mark it live</Button>
+            <Button size="sm" variant="ghost" onClick={() => run(() => api.dismissSuggestion(t.id, { live: true }))}>It isn't</Button>
+          </div>
+        </div>
+      ) : null}
+      {/* The board sizes the pipeline to the task, but never applies it: the wrong guess here costs money.
+          Only before it runs: a sizing shown under a finished run is noise (D191). */}
+      {sug?.pipeline?.length && !samePipeline(sug.pipeline, t.pipeline) && t.status === "backlog" && !d.busy ? (
         <div className="rounded-lg border border-amber/40 bg-amber/5 px-3 py-2 text-[12.5px]">
           <div className="mb-1 flex flex-wrap items-center gap-2">
             <span className="text-amber">Claude sized this task</span>
@@ -183,7 +216,7 @@ function SpecTab({ d }: { d: TaskDetail }) {
             </span>
             <span className="ml-auto flex gap-2">
               <Button size="sm" variant="go" busy={d.busy} onClick={() => run(() => api.acceptSuggestion(t.id, { pipeline: true }))}>Use it</Button>
-              <Button size="sm" variant="ghost" onClick={() => run(() => api.patchTask(t.id, { suggestion: null } as never))}>Keep default</Button>
+              <Button size="sm" variant="ghost" onClick={() => run(() => api.dismissSuggestion(t.id, { pipeline: true }))}>Keep default</Button>
             </span>
           </div>
         </div>
@@ -344,7 +377,7 @@ function PipelineTab({ d }: { d: TaskDetail }) {
   );
 }
 
-/** The plan the code stage works to, next to the code stage's own report on each of its steps (D198). */
+/** The plan the code stage works to, next to the code stage's own report on each of its steps (D229). */
 function PlanTab({ d }: { d: TaskDetail }) {
   const ok = d.runs.filter((r) => r.status === "success" && r.role !== "critic" && r.result_md?.trim());
   const plan = [...ok].reverse().find((r) => r.stage === "plan");
@@ -554,13 +587,46 @@ function Actions({ d }: { d: TaskDetail }) {
   const t = d.task;
   const { settings } = useAppData();
   const { busy, error, setError, run } = useAction();
+  const dialog = useAsk();
   const [stageIdx, setStageIdx] = useState<number | "">("");
   const hasWork = !!(t.branch || t.worktree_path);
   const live = d.busy;
   const retry = () => run(() => api.retry(t.id, stageIdx === "" ? undefined : stageIdx));
+  const reject = async () => {
+    const note = await dialog.ask({
+      title: "Send it back",
+      message: "Why? The reason stays on the card and the next run is told it before anything else. The worktree is kept.",
+      input: { placeholder: "What's wrong or missing" },
+      confirmLabel: "Reject",
+      danger: true,
+    });
+    if (note !== null) await run(() => api.reject(t.id, note || null));
+  };
+  const followUp = async () => {
+    const note = await dialog.ask({ title: "Follow-up task", message: "What's wrong or what's next? It goes into the new task's spec.", input: { placeholder: "Optional" }, confirmLabel: "Create follow-up" });
+    if (note === null) return;
+    await run(async () => {
+      const created = await api.followUp(t.id, { note: note || undefined });
+      navigate({ taskId: created.id });
+    });
+  };
+  const discard = async () => {
+    if (await dialog.confirm({ title: `Discard ${t.branch ?? "this work"}?`, message: "Removes the worktree and deletes the branch with its changes. The card and its note stay.", confirmLabel: "Discard", danger: true })) {
+      await run(() => api.discard(t.id));
+    }
+  };
+  const remove = async () => {
+    if (await dialog.confirm({ title: `Delete "${t.title}"?`, message: "The task, its runs and its transcript are removed from the board.", confirmLabel: "Delete", danger: true })) {
+      await run(async () => {
+        await api.deleteTask(t.id);
+        navigate({ taskId: null });
+      });
+    }
+  };
   const [scheduling, setScheduling] = useState(false);
   return (
     <div className="border-b border-ink-800 px-5 py-2.5">
+      {dialog.element}
       <div className="flex flex-wrap items-center gap-2">
         {t.status === "backlog" && !live ? (
           <>
@@ -606,7 +672,7 @@ function Actions({ d }: { d: TaskDetail }) {
             <Button variant="go" busy={busy} onClick={() => run(() => api.approve(t.id))} title={t.mode === "autonomous" ? `Merge ${t.branch} --no-ff into the project's current branch` : "Mark done"}>
               ✓ Approve{t.mode === "autonomous" && t.branch ? " & merge" : ""}
             </Button>
-            <Button busy={busy} onClick={() => { const note = prompt("Why? (kept on the card; the worktree is kept)"); if (note !== null) void run(() => api.reject(t.id, note || null)); }}>Reject</Button>
+            <Button busy={busy} onClick={() => void reject()}>Reject</Button>
           </>
         ) : null}
         {(t.status === "failed" || t.status === "review") && !live ? (
@@ -620,20 +686,9 @@ function Actions({ d }: { d: TaskDetail }) {
             <Button busy={busy} onClick={retry}>↻ Retry</Button>
           </div>
         ) : null}
-        {t.status === "failed" && !live ? <Button variant="ghost" busy={busy} onClick={() => run(() => api.reject(t.id, null))}>Back to backlog</Button> : null}
+        {t.status === "failed" && !live && !t.blocked ? <Button variant="ghost" busy={busy} onClick={() => run(() => api.reject(t.id, null))}>Back to backlog</Button> : null}
         {["done", "review"].includes(t.status) && !live ? (
-          <Button
-            busy={busy}
-            title="Start a fresh task that carries this one's outcome — better than reopening an old session days later"
-            onClick={() => {
-              const note = prompt("What's wrong or what's next? (goes into the new task's spec)");
-              if (note === null) return;
-              void run(async () => {
-                const created = await api.followUp(t.id, { note: note || undefined });
-                navigate({ taskId: created.id });
-              });
-            }}
-          >
+          <Button busy={busy} title="Start a fresh task that carries this one's outcome — better than reopening an old session days later" onClick={() => void followUp()}>
             ↪ Follow-up task
           </Button>
         ) : null}
@@ -646,12 +701,12 @@ function Actions({ d }: { d: TaskDetail }) {
             <span className="font-mono">&gt;_</span> Terminal here
           </Button>
           {hasWork && !live ? (
-            <Button variant="danger" busy={busy} onClick={() => confirm(`Discard ${t.branch}? Removes the worktree and deletes the branch with its changes.`) && run(() => api.discard(t.id))}>
+            <Button variant="danger" busy={busy} onClick={() => void discard()}>
               Discard work
             </Button>
           ) : null}
           {!live && !hasWork ? (
-            <Button variant="ghost" busy={busy} onClick={() => confirm(`Delete "${t.title}"?`) && run(async () => { await api.deleteTask(t.id); navigate({ taskId: null }); })}>
+            <Button variant="ghost" busy={busy} onClick={() => void remove()}>
               Delete
             </Button>
           ) : null}
@@ -716,8 +771,8 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
   const workedMs = d?.runs.reduce((s, r) => s + Math.max(0, (r.ended_at ? Date.parse(r.ended_at) : Date.now()) - Date.parse(r.started_at)), 0) ?? 0;
 
   return (
-    <div className="fixed inset-0 z-40 flex justify-end bg-ink-950/50" onMouseDown={onClose}>
-      <aside className="slide-in flex h-full w-[min(780px,100vw)] flex-col border-l border-ink-700 bg-ink-900 shadow-2xl shadow-black/70" onMouseDown={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-40 flex justify-end bg-[var(--kb-scrim-soft)]" onMouseDown={onClose}>
+      <aside className="slide-in flex h-full w-[min(780px,100vw)] flex-col border-l border-ink-700 bg-ink-900 kb-raise" onMouseDown={(e) => e.stopPropagation()}>
         {!d ? (
           <div className="p-6 text-[13px] text-ink-400">{missing ? "This task no longer exists." : "Loading…"}</div>
         ) : (
@@ -746,7 +801,7 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
                   </button>
                 </div>
                 <TitleEditor d={d} />
-                {d.task.error && d.task.status === "failed" ? <div className="mt-1 font-mono text-[11.5px] text-rust">{d.task.error}</div> : null}
+                {d.task.error && d.task.status === "failed" && !d.task.blocked ? <div className="mt-1 font-mono text-[11.5px] text-rust">{d.task.error}</div> : null}
                 {/* A task that ran out says so in its own panel below, with the ways on. */}
                 {d.task.note && !(d.task.status === "paused" && d.task.pause_reason !== "cost") ? (
                   <div className="mt-1 text-[12px] italic text-ink-400">Note: {d.task.note}</div>
@@ -756,6 +811,8 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
             </div>
             {showCost ? <div className="border-b border-ink-800 px-5 py-3"><CostPanel runs={d.runs} /></div> : null}
             {d.task.plan_gate ? <PlanGate d={d} /> : null}
+            {d.task.blocked && !d.busy ? <BlockedPanel d={d} /> : null}
+            <QuestionsPanel d={d} />
             <Actions d={d} />
             <nav className="flex shrink-0 gap-0.5 overflow-x-auto overflow-y-hidden border-b border-ink-800 px-3">
               {TABS.map((t) => {

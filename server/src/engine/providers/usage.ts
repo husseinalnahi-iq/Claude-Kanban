@@ -3,7 +3,7 @@ import { safeHost } from "./limits.ts";
 
 /**
  * How much of a provider's plan is left, asked from the provider itself where it will say
- * (docs/DECISIONS.md D195). Every one of these is a read: nothing is sent to a model, so it is free.
+ * (docs/DECISIONS.md D226). Every one of these is a read: nothing is sent to a model, so it is free.
  *
  * - z.ai / Zhipu (GLM Coding Plan): the same 5-hour and weekly percentages its own usage page shows.
  * - Kimi Code: the 5-hour window and the weekly quota.

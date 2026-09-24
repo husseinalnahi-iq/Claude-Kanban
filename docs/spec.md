@@ -53,9 +53,10 @@ State: `%USERPROFILE%\.claude-kanban\kanban.db` + `logs\`. Worktrees: `<project>
 - `board_post_message(to_task_id?, body)` → `messages` row; live-broadcast if target has a supervised run, else read by that task's next stage prompt
 - `board_create_subtasks([{title, spec_md, mode?, pipeline?}])` → children in `backlog` (a Plan stage splits a big task; you queue them)
 - `board_set_summary(text)` → one-line progress on the card
+- `board_report_blocked(reason, needs, ask?)` → the pipeline stops after this stage; the card shows the reason and ask (D184)
 
 ### 6.4 API
-REST: `GET/POST/PATCH /projects`; `GET/POST/PATCH/DELETE /tasks` + `POST /tasks/:id/{queue,retry,approve,reject,discard,message}`; `GET /tasks/:id/diff`; `GET /runs?task=`; `GET /runs/:id/events?after=`; `POST /approvals/:id`; `GET/POST/PATCH /milestones`; `GET /skills?project=`; `GET/PATCH /settings`. WS `/ws` server→client: `event`, `task.updated`, `approval.requested`, `run.finished`.
+REST: `GET/POST/PATCH /projects`; `GET/POST/PATCH/DELETE /tasks` + `POST /tasks/:id/{queue,retry,approve,reject,discard,escalate,message}`; `GET /tasks/:id/diff`; `GET /runs?task=`; `GET /runs/:id/events?after=`; `POST /approvals/:id`; `GET/POST/PATCH /milestones`; `GET /skills?project=`; `GET/PATCH /settings`. WS `/ws` server→client: `event`, `task.updated`, `approval.requested`, `run.finished`.
 
 ### 6.5 UI
 - **Board**: columns = statuses; card = title, mode chip, stage dots (plan/code/review) with model labels, live summary, cost, Queue/Stop. Drag only Backlog ↔ Queued.
@@ -64,5 +65,5 @@ REST: `GET/POST/PATCH /projects`; `GET/POST/PATCH/DELETE /tasks` + `POST /tasks/
 - **Sessions**: every run across projects — state, model, cost, elapsed; click → drawer.
 - **Skills**: user / project / plugin groups from SKILL.md frontmatter; Open in editor; Attach to task.
 - **Settings**: model list (+ free-text), default pipeline, concurrency, state dir.
-- Dark theme, Tailwind, no component library.
+- Dark and light themes from one set of tokens, Tailwind, no component library.
 

@@ -17,7 +17,7 @@ export type RunStatus = "running" | "approval" | "success" | "failed";
 export type ApprovalDecision = "allow" | "deny" | "expired" | "answered";
 
 export const TASK_STATUSES: TaskStatus[] = ["backlog", "queued", "planning", "running", "approval", "paused", "review", "done", "failed"];
-/** Whether a task works in its own git worktree: every autonomous task, and a supervised one with own_branch (D203). */
+/** Whether a task works in its own git worktree: every autonomous task, and a supervised one with own_branch (D234). */
 export const usesWorktree = (t: { mode: Mode; own_branch?: boolean }): boolean => t.mode === "autonomous" || Boolean(t.own_branch);
 
 export const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
@@ -154,11 +154,11 @@ export interface Provider {
    * (ANTHROPIC_AUTH_TOKEN); Kimi Code wants it as an API key (ANTHROPIC_API_KEY).
    */
   authStyle?: "bearer" | "api-key";
-  /** When this provider runs out mid-task, carry on here instead of waiting (D194). Unset: wait, or ask. */
+  /** When this provider runs out mid-task, carry on here instead of waiting (D225). Unset: wait, or ask. */
   fallback?: TierRef | null;
 }
 
-/** A provider that ran out: a usage window, its credit, or its patience (D194). */
+/** A provider that ran out: a usage window, its credit, or its patience (D225). */
 export interface ProviderOut {
   provider_id: string;
   kind: "window" | "credit" | "busy";
@@ -187,7 +187,7 @@ export interface UsageTotals {
   cost_usd: number;
 }
 
-/** A provider's usage, for the usage panel and Settings (D195). */
+/** A provider's usage, for the usage panel and Settings (D226). */
 export interface ProviderUsage {
   provider_id: string;
   label: string;
@@ -222,7 +222,7 @@ export interface Objection {
 /** A plan waiting for you to choose: the original, the critic's objections, and the revised plan. */
 /**
  * A plan waiting for the human before any code is written. `debate`: a critic argued with it and a
- * revision exists (D131). `approval`: plan approval is on for this task, so the plan alone waits (D200).
+ * revision exists (D131). `approval`: plan approval is on for this task, so the plan alone waits (D231).
  */
 export interface PlanGate {
   kind?: "debate" | "approval";
@@ -233,6 +233,55 @@ export interface PlanGate {
   critic?: { provider: string; model: string };
   critique?: { raw: string; objections: Objection[] };
   revised?: string;
+}
+
+/**
+ * A stage that could not do the task from where it ran — the sandbox refused what it needed, or it
+ * needs a decision or information from you. The pipeline stops there instead of carrying a "success"
+ * nobody earned into review (docs/DECISIONS.md D184).
+ */
+export interface Blocked {
+  stage_index: number;
+  /** What stopped it, in one or two sentences. */
+  reason: string;
+  /** "supervised": it needs access only an approved run has (live systems, credentials, the main checkout). */
+  needs: "supervised" | "input" | "other";
+  /** The question or request for you, if there is one. */
+  ask: string | null;
+  /** "agent" when the stage reported it; "board" when the board stopped a run that kept hitting the sandbox. */
+  source: "agent" | "board";
+  /** The mode the blocked run had, so a rerun knows whether anything about its access changed. */
+  mode: Mode;
+  created_at: string;
+}
+
+/**
+ * A decision a stage wants from you but does not need to stop for: it carries on with `default` and
+ * the question waits on the card. The plan that prompted this asked two questions in its report and
+ * the pipeline ran on without anyone seeing them (docs/DECISIONS.md D203).
+ */
+export interface TaskQuestion {
+  id: string;
+  stage_index: number;
+  text: string;
+  options: string[];
+  /** What the run is doing meanwhile. */
+  default: string | null;
+  answer: string | null;
+  created_at: string;
+  answered_at: string | null;
+}
+
+/**
+ * A supervised run works in your main checkout, which other sessions may be changing too. What was
+ * already uncommitted when it started, and what this task changed, so the two are never mixed up (D204).
+ */
+export interface CheckoutState {
+  at: string;
+  /** Uncommitted files that were there before the run, not this task's. */
+  dirtyAtStart: string[];
+  /** Files this task added or changed, set when the run ends; null while it runs. */
+  touched: string[] | null;
 }
 
 export interface ProviderTestResult {
@@ -355,11 +404,11 @@ export interface Task {
   related_to: string[];
   /** Queue this task's subtasks automatically as their dependencies clear. */
   auto_queue_children: boolean;
-  /** Wait for the human after the plan stage. null follows Settings → planApproval (D200). */
+  /** Wait for the human after the plan stage. null follows Settings → planApproval (D231). */
   plan_approval: boolean | null;
-  /** Touches a live system (production data, a live business app…): plan approval is forced on and review runs on Settings → liveReviewModel (D202). */
+  /** Touches a live system (production data, a live business app…): plan approval is forced on and review runs on Settings → liveReviewModel (D233). */
   live: boolean;
-  /** A supervised task that still works in its own worktree and branch, landing only on Approve (D203). Autonomous always does. */
+  /** A supervised task that still works in its own worktree and branch, landing only on Approve (D234). Autonomous always does. */
   own_branch: boolean;
   /** Set when the board classified this task, so the UI can show it was a guess. */
   triaged_at: string | null;
@@ -395,9 +444,21 @@ export interface Task {
     pipeline?: Stage[];
     /** One sentence saying why that pipeline, shown next to the Accept button. */
     sizing_reason?: string;
+    /** Supervised, when an autonomous task needs a live system (D191). No longer proposed (D241); kept so older cards still show theirs. */
+    mode?: Mode;
+    mode_reason?: string;
+    /** Mark the task live: triage saw that it changes a live system (D191, D241). */
+    live?: boolean;
+    live_reason?: string;
   } | null;
   /** Set while a debated plan waits for your choice; the pipeline continues once you decide. */
   plan_gate: PlanGate | null;
+  /** Set when a stage stopped because it could not do the work from where it ran; cleared on the next queue. */
+  blocked: Blocked | null;
+  /** Questions stages asked with `board_ask`, answered or not. */
+  questions: TaskQuestion[];
+  /** Supervised runs: the checkout's state around the run. */
+  checkout: CheckoutState | null;
   mode: Mode;
   pipeline: Stage[];
   skills: string[];
@@ -706,7 +767,7 @@ export interface Settings {
   autoResume: boolean;
   /**
    * When Claude's usage runs out mid-task, carry the stage on here (a provider and model) instead of
-   * waiting for the window to reset. null waits (D194).
+   * waiting for the window to reset. null waits (D225).
    */
   claudeFallback: TierRef | null;
   /** Tell the OS not to sleep while anything is queued, running or scheduled. The screen may still turn off. */
@@ -729,13 +790,16 @@ export interface Settings {
   browserChecks: boolean;
   /** Also offer Claude in Chrome — your own signed-in Chrome — to supervised runs. Never autonomous ones. */
   chromeInSupervised: boolean;
-  /** Supervised runs use read-only shell commands (grep, wc, git status…) without an approval card. */
-  autoAllowReadCommands: boolean;
-  /** Every task waits for the human after its plan stage (a task can override it). D200. */
+  /**
+   * Supervised runs run shell commands that can only read (grep, ls, git log, sed -n …) without an
+   * approval card. Anything that could write, run a program or touch credentials still asks (D202).
+   */
+  autoAllowReadOnly: boolean;
+  /** Every task waits for the human after its plan stage (a task can override it). D231. */
   planApproval: boolean;
-  /** A stage that hits maxTurnsPerStage continues in the same session this many times before failing. D201. */
+  /** A stage that hits maxTurnsPerStage continues in the same session this many times before failing. D232. */
   autoContinueTurns: number;
-  /** Claude model the review stage of a live task runs on, whatever its pipeline says. D202. */
+  /** Claude model the review stage of a live task runs on, whatever its pipeline says. D233. */
   liveReviewModel: string;
   /** Stream a live picture of each task's browser into its card (only while someone is watching). */
   liveView: boolean;

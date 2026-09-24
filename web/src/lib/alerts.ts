@@ -27,7 +27,7 @@ export interface AlertKindInfo {
 export const ALERT_KINDS: AlertKindInfo[] = [
   { kind: "approval", label: "Needs you", hint: "A supervised run is waiting on a card, or Claude asked you a question", color: "var(--color-rose)", icon: "✋", defaults: { sound: true, toast: true, desktop: true } },
   { kind: "review", label: "Ready for review", hint: "Every stage finished; your turn to look", color: "var(--color-lime)", icon: "◉", defaults: { sound: true, toast: true, desktop: true } },
-  { kind: "done", label: "Landed", hint: "Approved and merged", color: "var(--color-moss)", icon: "✓", defaults: { sound: true, toast: true, desktop: false } },
+  { kind: "done", label: "Landed", hint: "Approved and landed", color: "var(--color-moss)", icon: "✓", defaults: { sound: true, toast: true, desktop: false } },
   { kind: "failed", label: "Failed", hint: "A run, a check or a review said no", color: "var(--color-rust)", icon: "✕", defaults: { sound: true, toast: true, desktop: true } },
   { kind: "paused", label: "Paused by usage limit", hint: "Waiting for your window to reset", color: "var(--color-iris)", icon: "❚❚", defaults: { sound: true, toast: true, desktop: true } },
   { kind: "resumed", label: "Resumed", hint: "The window reset and it carried on", color: "var(--color-iris)", icon: "▶", defaults: { sound: true, toast: true, desktop: false } },
@@ -148,6 +148,8 @@ const lastFinished = new Map<string, number>();
 /** Tasks in the "review" column whose review *stage* is still running. */
 const reviewing = new Set<string>();
 const usage = new Map<string, number>();
+/** Question ids already seen per task, so only a new question is announced. */
+const askedQuestions = new Map<string, Set<string>>();
 let seeded = false;
 let hadActivity = false;
 let clearTimer: ReturnType<typeof setTimeout> | null = null;
@@ -162,6 +164,7 @@ export async function seedAlerts() {
     for (const p of projects) {
       for (const t of await api.tasks(p.id)) {
         known.set(t.id, { status: t.status, title: t.title, project: t.project_id, stages: t.pipeline.length });
+        askedQuestions.set(t.id, new Set((t.questions ?? []).map((q) => q.id)));
         if (t.status === "review" && t.stage_states.includes("running")) reviewing.add(t.id);
       }
     }
@@ -180,6 +183,11 @@ function taskAlert(kind: AlertKind, t: Task, detail: string) {
 function onTask(t: Task) {
   const prev = known.get(t.id)?.status;
   known.set(t.id, { status: t.status, title: t.title, project: t.project_id, stages: t.pipeline.length });
+  // A board_ask question does not stop the run, so without a pop-up nobody sees it until the end (D203).
+  const seen = askedQuestions.get(t.id);
+  const fresh = (t.questions ?? []).filter((q) => !q.answer && !seen?.has(q.id));
+  askedQuestions.set(t.id, new Set((t.questions ?? []).map((q) => q.id)));
+  if (seeded && seen && fresh.length) taskAlert("approval", t, `Has a question for you: ${firstLine(fresh[0].text)}`);
   if (!seeded || (prev === undefined && t.status === "backlog")) return;
   const cur = t.status;
 
@@ -193,7 +201,8 @@ function onTask(t: Task) {
   } else reviewing.delete(t.id);
 
   if (prev !== cur) {
-    if (cur === "done") taskAlert("done", t, "");
+    // A supervised task has no branch: nothing was merged, and the pop-up should not say it was.
+    if (cur === "done") taskAlert("done", t, t.mode === "autonomous" ? "Approved and merged" : "Approved — its changes were already in your checkout");
     else if (cur === "failed" && t.error !== "stopped by user") taskAlert("failed", t, firstLine(t.error));
     else if (cur === "paused" && t.pause_reason === "cost") taskAlert("approval", t, "reached its cost ceiling — Continue or Stop");
     else if (cur === "paused" && t.pause_reason === "provider" && !t.resume_at) taskAlert("approval", t, `${firstLine(t.note).split(":")[0]} — switch provider, or top up and try again`);

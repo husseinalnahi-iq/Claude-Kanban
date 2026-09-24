@@ -54,7 +54,7 @@ export function LiveBrowser({ taskId, running, onShowFiles }: { taskId: string; 
   const live = !!meta?.live;
   return (
     <div className="flex h-full flex-col gap-2.5">
-      <div className="overflow-hidden rounded-xl border border-ink-700 bg-ink-950 shadow-lg shadow-black/30">
+      <div className="overflow-hidden rounded-xl border border-ink-700 bg-ink-950 kb-raise-sm">
         {/* a quiet browser frame: dots, the address, and whether this is live */}
         <div className="flex items-center gap-2 border-b border-ink-800 bg-ink-900 px-3 py-2">
           <span className="flex gap-1">

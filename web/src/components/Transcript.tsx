@@ -63,6 +63,13 @@ function EventView({ ev }: { ev: EventRow }) {
       </div>
     );
   }
+  if (ev.type === "board:auto-allowed") {
+    return (
+      <div className="font-mono text-[11px] text-ink-500" title="Supervised: a command that can only read runs without a card (Settings → Browser & tools)">
+        allowed by the board · read-only · <span className="text-ink-400">{String(p.command ?? "").slice(0, 300)}</span>
+      </div>
+    );
+  }
   if (ev.type === "board:workspace") {
     return <div className="font-mono text-[11px] text-ink-500">workspace · {p.text}</div>;
   }

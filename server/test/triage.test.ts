@@ -290,7 +290,54 @@ test("sizing reaches the task only as a suggestion, and is applied when the huma
 
     const accepted = s.runner.acceptSuggestion(task.id, { pipeline: true });
     assert.deepEqual(accepted.pipeline, [{ stage: "code", model: "claude-haiku-4-5-20251001", effort: "low" }]);
-    assert.equal(accepted.suggestion, null);
+    assert.equal(accepted.suggestion?.pipeline, undefined, "the accepted part is gone");
+    assert.equal(accepted.suggestion?.priority, "p3", "accepting the pipeline does not silently drop the priority suggestion");
+    assert.equal(s.runner.acceptSuggestion(task.id, { fields: true }).suggestion, null, "nothing left once every part is decided");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("live-system work is never sized down, and the task is offered as a live task (D241)", async () => {
+  const s = setup(fakeStructured({
+    title: "Allow an account", type: "feature", priority: "p2", labels: [], spec_md: "", questions: [], confidence: 0.9,
+    split_reason: "", subtasks: [],
+    pipeline: [{ stage: "code", tier: "balanced", effort: "medium" }],
+    pipeline_reason: "A one-line filter change.",
+    live_access: true, live_access_reason: "The filter lives in a live BizApp client script.",
+  }));
+  try {
+    const task = s.repo.createTask({ project_id: s.project.id, title: "allow 40100 on pay via journal", pipeline: THREE_STAGE, mode: "autonomous" });
+    await s.runner.triage(task.id, "classify");
+    const sug = s.repo.getTask(task.id)!.suggestion!;
+    assert.deepEqual(sug.pipeline, [{ stage: "code", model: "claude-opus-5", effort: "high" }], "strong tier, at least high effort, whatever the model said");
+    assert.equal(sug.sizing_reason, "A one-line filter change. Raised to the strong tier: it changes a live system.", "the reason admits the override");
+    assert.equal(sug.mode, undefined, "no mode switch is proposed any more");
+    assert.equal(sug.live, true);
+    assert.match(sug.live_reason!, /live BizApp client script[\s\S]*waits for your OK on its plan[\s\S]*sandboxed/);
+    const accepted = s.runner.acceptSuggestion(task.id, { live: true });
+    assert.equal(accepted.live, true, "accepting sets the one record of it");
+    assert.equal(accepted.mode, "autonomous", "the mode is left alone");
+    assert.equal(accepted.suggestion?.live, undefined, "the accepted part is gone");
+    assert.ok(accepted.suggestion?.pipeline, "the pipeline suggestion is still on offer");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("a task that already left Backlog gets no pipeline or mode suggestion", async () => {
+  const s = setup(fakeStructured({
+    title: "x", type: "chore", priority: "p2", labels: [], spec_md: "", questions: [], confidence: 0.9,
+    split_reason: "", subtasks: [], pipeline: [{ stage: "code", tier: "cheap", effort: "low" }], pipeline_reason: "",
+    live_access: true, live_access_reason: "ERP",
+  }));
+  try {
+    const task = s.repo.createTask({ project_id: s.project.id, title: "x", pipeline: THREE_STAGE, mode: "autonomous", status: "running" });
+    await s.runner.triage(task.id, "classify");
+    const sug = s.repo.getTask(task.id)!.suggestion!;
+    assert.equal(sug.pipeline, undefined);
+    assert.equal(sug.mode, undefined);
+    assert.equal(sug.live, undefined, "nor a live flag: it is already running");
   } finally {
     s.cleanup();
   }

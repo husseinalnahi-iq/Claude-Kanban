@@ -155,6 +155,16 @@ export async function diffWorkingTree(path: string): Promise<DiffFile[]> {
   });
 }
 
+/** Paths with uncommitted or untracked changes, as `git status --porcelain` names them (a rename: its new path). */
+export async function statusFiles(path: string): Promise<string[]> {
+  const out = await git(path, ["status", "--porcelain"]);
+  return out
+    .split(/\r?\n/)
+    .filter((l) => l.length > 3)
+    .map((l) => (l.slice(3).split(" -> ").pop() ?? "").replace(/^"|"$/g, ""))
+    .filter(Boolean);
+}
+
 /** Uncommitted or untracked changes present. */
 export async function isDirty(path: string): Promise<boolean> {
   return (await git(path, ["status", "--porcelain"])).trim() !== "";

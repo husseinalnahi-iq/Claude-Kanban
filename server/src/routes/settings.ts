@@ -82,7 +82,7 @@ const patchSchema = z.object({
   loadUserPlugins: z.boolean().optional(),
   browserChecks: z.boolean().optional(),
   chromeInSupervised: z.boolean().optional(),
-  autoAllowReadCommands: z.boolean().optional(),
+  autoAllowReadOnly: z.boolean().optional(),
   planApproval: z.boolean().optional(),
   autoContinueTurns: z.number().int().min(0).max(5).optional(),
   liveReviewModel: z.string().trim().min(1).max(120).optional(),

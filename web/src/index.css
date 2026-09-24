@@ -1,5 +1,11 @@
 @import "tailwindcss";
 
+/*
+ * Dark is the default theme; light is a value swap on the same variable names, applied by
+ * `data-theme="light"` on <html>. The ink ramp is deliberately inverted — ink-950 means "page ground"
+ * and ink-100 means "brightest text" — so every `bg-ink-900` / `text-ink-400` class in the app keeps
+ * its meaning in both themes and no component has to know which one is on.
+ */
 @theme {
   --font-sans: "IBM Plex Sans", ui-sans-serif, "Segoe UI", system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
@@ -28,8 +34,123 @@
   --color-iris: #a394f0;    /* paused by a usage limit */
 }
 
+/*
+ * The handful of values that cannot be expressed by inverting a token: a scrim has to darken the page
+ * in both themes, a shadow cast by near-black is wrong on white, and the diff tints are their own pair.
+ */
 :root {
   color-scheme: dark;
+
+  --kb-scrim-soft: rgb(6 7 5 / 0.5);
+  --kb-scrim: rgb(6 7 5 / 0.78);
+  --kb-scrim-strong: rgb(6 7 5 / 0.92);
+  --kb-raise: 0 18px 40px rgb(0 0 0 / 0.55), 0 2px 8px rgb(0 0 0 / 0.4);
+  --kb-raise-sm: 0 8px 20px rgb(0 0 0 / 0.5);
+  --kb-glow: radial-gradient(1200px 500px at 70% -200px, rgb(242 169 59 / 0.07), transparent 70%);
+  --kb-grain-opacity: 1;
+  --kb-amber-hover: #ffbb55;
+  --kb-lime-hover: #c6e478;
+  --kb-scrollbar: var(--color-ink-600);
+  /* a gleam sweeping a toast: a tint of the accent on dark, plain light on light */
+  --kb-shimmer: color-mix(in srgb, var(--color-cyan) 22%, transparent);
+
+  /*
+   * The favicon is drawn on a dark plate in both themes — it lives in the browser's tab strip, not in
+   * the app — so its dot must keep the vivid hues even when the page is light.
+   */
+  --kb-vivid-amber: #f2a93b;
+  --kb-vivid-cyan: #5ec8d8;
+  --kb-vivid-rose: #f0567a;
+  --kb-vivid-lime: #b5d95b;
+  --kb-vivid-moss: #6fa872;
+  --kb-vivid-rust: #e0643c;
+  --kb-vivid-slate: #8d93a8;
+  --kb-vivid-iris: #a394f0;
+  --kb-badge-plate: #1d1e1a;
+  --kb-badge-notch: #0c0d0b;
+  --kb-badge-bar-1: #f2a93b;
+  --kb-badge-bar-2: #d4d1c6;
+  --kb-badge-bar-3: #57574e;
+
+  --kb-diff-add: #b9dcb0;
+  --kb-diff-del: #f0a58c;
+
+  /*
+   * Chart palette. The dark six only just clear 3:1 on a white surface, so light carries its own,
+   * darker set. The ordinal priority ramp flips outright: it encodes urgency as distance from the
+   * ground, so it runs light-to-dark on dark and dark-to-light on light, p0 strongest either way.
+   */
+  --kb-cat-1: #3987e5;
+  --kb-cat-2: #d95926;
+  --kb-cat-3: #199e70;
+  --kb-cat-4: #c98500;
+  --kb-cat-5: #d55181;
+  --kb-cat-6: #008300;
+  --kb-prio-0: #b7d3f6;
+  --kb-prio-1: #6da7ec;
+  --kb-prio-2: #2a78d6;
+  --kb-prio-3: #184f95;
+}
+
+/*
+ * Light. Warm neutral rather than a cool slate, so it reads as the same product as the graphite dark
+ * theme. Signal hues are deepened: that keeps `text-amber` readable on the light ground, keeps the
+ * `/5`–`/25` washes soft, and — because ink-950 is the ground in both themes — keeps the near-white
+ * `text-ink-950` on a solid `bg-amber` fill contrasting too. One swap, both directions.
+ *
+ * Unlayered and after the import, so it beats Tailwind's layered `:root,:host` @theme block.
+ */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --color-ink-950: #faf8f3;
+  --color-ink-900: #ffffff;
+  --color-ink-850: #f6f4ee;
+  --color-ink-800: #e4e0d3;
+  --color-ink-700: #ddd9cc;
+  --color-ink-600: #c6c1b0;
+  --color-ink-500: #7a7669;
+  --color-ink-400: #6e6b5e;
+  --color-ink-300: #4e4b43;
+  --color-ink-200: #35332d;
+  --color-ink-100: #1b1a16;
+
+  --color-amber: #9c6200;
+  --color-cyan: #1b7383;
+  --color-rose: #bd1f57;
+  --color-lime: #57741b;
+  --color-moss: #2b7450;
+  --color-rust: #b03f1b;
+  --color-slate: #565d73;
+  --color-iris: #6450cc;
+
+  --kb-scrim-soft: rgb(40 38 32 / 0.26);
+  --kb-scrim: rgb(40 38 32 / 0.44);
+  /* a lightbox stays dark in both themes: it is there to leave nothing but the image */
+  --kb-scrim-strong: rgb(28 26 22 / 0.88);
+  --kb-raise: 0 16px 34px rgb(60 56 44 / 0.14), 0 2px 6px rgb(60 56 44 / 0.09);
+  --kb-raise-sm: 0 6px 16px rgb(60 56 44 / 0.12);
+  --kb-glow: radial-gradient(1200px 500px at 70% -200px, rgb(242 169 59 / 0.09), transparent 70%);
+  --kb-grain-opacity: 0.45;
+  --kb-amber-hover: #7d4e00;
+  --kb-lime-hover: #445c15;
+  /* ink-600 as a thumb is a ghost on white; one step darker is still quiet */
+  --kb-scrollbar: #b3ad99;
+  --kb-shimmer: color-mix(in srgb, #ffffff 85%, transparent);
+
+  --kb-diff-add: #2f6b33;
+  --kb-diff-del: #a3401f;
+
+  --kb-cat-1: #1d63c4;
+  --kb-cat-2: #b03f1b;
+  --kb-cat-3: #0f7a55;
+  --kb-cat-4: #8f5a00;
+  --kb-cat-5: #b83a68;
+  --kb-cat-6: #1f6b2e;
+  --kb-prio-0: #0f3163;
+  --kb-prio-1: #1a5590;
+  --kb-prio-2: #2e7ab9;
+  --kb-prio-3: #5e97cd;
 }
 
 html,
@@ -47,16 +168,25 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* faint grain + top glow so the ground is not a flat fill */
+/* faint top glow so the ground is not a flat fill */
 body::before {
   content: "";
   position: fixed;
   inset: 0;
   pointer-events: none;
   z-index: 0;
-  background:
-    radial-gradient(1200px 500px at 70% -200px, rgb(242 169 59 / 0.07), transparent 70%),
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.035'/%3E%3C/svg%3E");
+  background: var(--kb-glow);
+}
+
+/* grain, on its own layer so light can carry less of it */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: var(--kb-grain-opacity);
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.035'/%3E%3C/svg%3E");
 }
 
 #root {
@@ -65,12 +195,12 @@ body::before {
 }
 
 ::selection {
-  background: rgb(242 169 59 / 0.35);
+  background: color-mix(in srgb, var(--color-amber) 32%, transparent);
 }
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--color-ink-600) transparent;
+  scrollbar-color: var(--kb-scrollbar) transparent;
 }
 /* A strip that scrolls sideways only when it must (the top bar beside an open chat), with no bar. */
 .no-scrollbar { scrollbar-width: none; }
@@ -88,10 +218,14 @@ select:focus-visible {
   outline: none;
 }
 
+/* One raised-surface shadow, themed: near-black on dark, a soft warm cast on light. */
+.kb-raise { box-shadow: var(--kb-raise); }
+.kb-raise-sm { box-shadow: var(--kb-raise-sm); }
+
 @keyframes pulse-ring {
-  0% { box-shadow: 0 0 0 0 rgb(240 86 122 / 0.55); }
-  70% { box-shadow: 0 0 0 7px rgb(240 86 122 / 0); }
-  100% { box-shadow: 0 0 0 0 rgb(240 86 122 / 0); }
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-rose) 55%, transparent); }
+  70% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--color-rose) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-rose) 0%, transparent); }
 }
 .pulse-rose { animation: pulse-ring 1.6s ease-out infinite; }
 
@@ -154,7 +288,7 @@ select:focus-visible {
 
 @media (prefers-reduced-motion: reduce) {
   .rise, .slide-in, .slide-in-right, .slide-out-right, .fade-in, .fade-out, .dock-in, .settle { animation-duration: 1ms !important; }
-  .sweep { animation: none; }
+  .sweep, .pulse-rose, .breathe { animation: none; }
 }
 
 /* rendered markdown */
@@ -165,7 +299,7 @@ select:focus-visible {
 .md ul { list-style: disc; padding-left: 1.3em; } .md ol { list-style: decimal; padding-left: 1.4em; }
 .md li + li { margin-top: 0.2em; }
 .md code { font-family: var(--font-mono); font-size: 0.88em; background: var(--color-ink-800); border: 1px solid var(--color-ink-700); border-radius: 4px; padding: 0.05em 0.35em; }
-.md pre { background: var(--color-ink-900); border: 1px solid var(--color-ink-700); border-radius: 6px; padding: 0.7em 0.9em; overflow-x: auto; }
+.md pre { background: var(--color-ink-850); border: 1px solid var(--color-ink-700); border-radius: 6px; padding: 0.7em 0.9em; overflow-x: auto; }
 .md pre code { background: none; border: 0; padding: 0; }
 .md a { color: var(--color-amber); text-decoration: underline; text-underline-offset: 2px; }
 .md blockquote { border-left: 2px solid var(--color-ink-600); padding-left: 0.8em; color: var(--color-ink-300); }

@@ -95,7 +95,7 @@ export function MiniBoard({ sound = false, className = "" }: { sound?: boolean; 
             <div
               key={l.label}
               className="kb-lane-on h-[140px] rounded-lg border px-2 pt-1.5"
-              style={{ borderColor: on ? tint(l.color, 45) : "var(--color-ink-800)", background: on ? tint(l.color, 7) : tint("var(--color-ink-900)", 60) }}
+              style={{ borderColor: on ? tint(l.color, 45) : "var(--color-ink-700)", background: on ? tint(l.color, 7) : tint("var(--color-ink-850)", 70) }}
             >
               <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.1em]" style={{ color: on ? l.color : "var(--color-ink-500)" }}>
                 <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: l.color, opacity: on ? 1 : 0.45 }} />
@@ -111,7 +111,7 @@ export function MiniBoard({ sound = false, className = "" }: { sound?: boolean; 
       <Ghost lane={3} title="Fix flaky test" color="var(--color-moss)" top={102} />
 
       <div
-        className={`kb-card absolute top-[26px] rounded-md border bg-ink-900 px-2 py-1.5 shadow-lg shadow-black/40 ${step.ask ? "kb-ask" : ""}`}
+        className={`kb-card absolute top-[26px] rounded-md border bg-ink-900 px-2 py-1.5 kb-raise-sm ${step.ask ? "kb-ask" : ""}`}
         style={{ left: left(step.lane), width: WIDTH, borderColor: lane.color, borderLeftWidth: 3 }}
       >
         <div className="truncate text-[11.5px] font-semibold text-ink-100">Add a dark-mode toggle</div>

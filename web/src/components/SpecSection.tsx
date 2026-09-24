@@ -248,7 +248,7 @@ export function SpecSection({ task, busy }: { task: Task; busy: boolean }) {
                 </div>
                 {open ? (
                   <div className="fade-in max-h-72 overflow-y-auto border-t border-ink-800 bg-ink-900/60 px-3 py-2">
-                    {v.spec_md.trim() ? <Markdown text={v.spec_md} className="text-[12.5px]" /> : <span className="text-[12px] text-ink-500">(empty — the title only)</span>}
+                    {v.spec_md.trim() ? <Markdown text={v.spec_md} className="text-[12.5px]" breaks /> : <span className="text-[12px] text-ink-500">(empty — the title only)</span>}
                   </div>
                 ) : null}
               </div>
@@ -261,7 +261,7 @@ export function SpecSection({ task, busy }: { task: Task; busy: boolean }) {
         <textarea className={`${inputCls} min-h-[260px] font-mono text-[12.5px]`} value={spec} onChange={(e) => setSpec(e.target.value)} autoFocus />
       ) : task.spec_md.trim() ? (
         <div key={fresh} className={`transition-opacity ${sv.rewriting ? "opacity-50" : ""} ${fresh > 1 ? "settle" : ""}`}>
-          <Markdown text={task.spec_md} />
+          <Markdown text={task.spec_md} breaks />
         </div>
       ) : (
         <Empty>No spec yet — the title is all Claude gets. Click Edit, or ✦ Rewrite to have Claude write one from the title and the code.</Empty>

@@ -60,7 +60,7 @@ export function QuestionCard({ a, focused = false }: { a: Approval; focused?: bo
                     type="button"
                     onClick={() => toggle(i, o.label)}
                     className={`group flex items-start gap-2.5 rounded-lg border px-3 py-2 text-left transition-all duration-150 cursor-pointer active:scale-[0.99] ${
-                      on ? "border-iris bg-iris/15 shadow-[0_0_0_3px_rgb(150_130_240/0.15)]" : "border-ink-700 bg-ink-900/60 hover:border-ink-500"
+                      on ? "border-iris bg-iris/15 shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-iris)_15%,transparent)]" : "border-ink-700 bg-ink-900/60 hover:border-ink-500"
                     }`}
                   >
                     <span className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center border text-[10px] ${q.multiSelect ? "rounded" : "rounded-full"} ${on ? "border-iris bg-iris text-ink-950" : "border-ink-500 text-transparent"}`}>

@@ -133,7 +133,7 @@ test("a foreign quota error pauses the task on that provider (not Claude's windo
     s.runner.queueTask(task.id);
     await until(() => ["failed", "paused"].includes(s.repo.getTask(task.id)!.status));
     assert.equal(s.repo.getTask(task.id)!.status, "paused");
-    assert.equal(s.repo.getTask(task.id)!.pause_reason, "provider", "paused for z.ai (D194), not for Claude");
+    assert.equal(s.repo.getTask(task.id)!.pause_reason, "provider", "paused for z.ai (D225), not for Claude");
     assert.equal(s.runner.limitedUntil(), null, "Claude work is not held");
     assert.equal(s.repo.usageLimits().length, 0, "no Claude window was recorded from a foreign endpoint");
     assert.equal(s.repo.runsForTask(task.id)[0].limit_before, null);

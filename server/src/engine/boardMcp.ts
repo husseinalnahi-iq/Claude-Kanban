@@ -2,7 +2,7 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { Repo } from "../repo.ts";
 import type { Bus } from "../bus.ts";
-import type { Mode, Project, Run, Stage, Task } from "../types.ts";
+import type { Blocked, Mode, Project, Run, Stage, Task, TaskQuestion } from "../types.ts";
 import { EFFORTS } from "../types.ts";
 
 export interface BoardCtx {
@@ -107,7 +107,7 @@ export function boardHandlers(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtasks?: 
           mode: allowedMode(project, s.mode ?? parent.mode),
           pipeline: s.pipeline?.length ? s.pipeline : parent.pipeline.length ? parent.pipeline : defaultPipeline(repo, project),
           skills: parent.skills,
-          // A live parent's pieces touch the same live system (D202).
+          // A live parent's pieces touch the same live system (D233).
           live: parent.live,
           plan_approval: parent.plan_approval,
           own_branch: parent.own_branch,
@@ -148,6 +148,50 @@ export function boardHandlers(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtasks?: 
       bus.publish({ type: "task.updated", task });
       return text("Summary updated.");
     },
+
+    /** A decision for the person that does not stop the run: it goes on the card, the run carries on (D203). */
+    ask(args: { question: string; options?: string[]; default?: string }) {
+      const task = own();
+      const run = repo.getRun(ctx.runId);
+      const asked = args.question.trim().slice(0, 1000);
+      if (task.questions.some((q) => q.text === asked)) return text("That question is already on the card.");
+      const question: TaskQuestion = {
+        id: `q_${Math.random().toString(36).slice(2, 10)}`,
+        stage_index: run?.stage_index ?? 0,
+        text: asked,
+        options: (args.options ?? []).map((o) => o.trim().slice(0, 300)).filter(Boolean).slice(0, 6),
+        default: args.default?.trim().slice(0, 300) || null,
+        answer: null,
+        created_at: new Date().toISOString(),
+        answered_at: null,
+      };
+      const updated = repo.updateTask(ctx.taskId, { questions: [...task.questions, question].slice(-20) });
+      bus.publish({ type: "task.updated", task: updated });
+      return text(
+        `On the card. Carry on with ${question.default ? `your default ("${question.default}")` : "a sensible default"} and say so in your summary. ` +
+          "If the person answers while the task is still running, the answer reaches the next stage's prompt.",
+      );
+    },
+
+    /** The stage cannot do the task from here. The board stops the pipeline after this stage (D184). */
+    reportBlocked(args: { reason: string; needs: Blocked["needs"]; ask?: string }) {
+      const run = repo.getRun(ctx.runId);
+      const blocked: Blocked = {
+        mode: own().mode,
+        stage_index: run?.stage_index ?? 0,
+        reason: args.reason.trim().slice(0, 1000),
+        needs: args.needs,
+        ask: args.ask?.trim().slice(0, 1000) || null,
+        source: "agent",
+        created_at: new Date().toISOString(),
+      };
+      const task = repo.updateTask(ctx.taskId, { blocked, summary: `Blocked: ${blocked.reason}`.slice(0, 280) });
+      bus.publish({ type: "task.updated", task });
+      return text(
+        "Recorded. The board stops the pipeline after this stage and shows your reason and ask to the person. " +
+          "Stop working on the task now: end your turn with a short summary of what you found and exactly what you need.",
+      );
+    },
   };
 }
 
@@ -158,7 +202,7 @@ export function createBoardServer(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtask
     version: "1.0.0",
     alwaysLoad: true,
     instructions:
-      "Shared Claude Kanban board. Read your task, list siblings, post messages to other tasks, create subtasks, set a one-line progress summary on your card, and read or add durable project memory.",
+      "Shared Claude Kanban board. Read your task, list siblings, post messages to other tasks, create subtasks, set a one-line progress summary on your card, read or add durable project memory, and report when you are blocked.",
     tools: [
       tool("board_get_task", "Get a task's spec, status, pipeline, subtasks, inbound messages and the full result of each finished stage — the whole plan included (default: your own task).",
         { task_id: z.string().optional() }, async (a) => h.getTask(a)),
@@ -185,6 +229,22 @@ export function createBoardServer(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtask
         "Record ONE short, durable fact about this project for future tasks: a decision, a convention, or a gotcha that cost you time. Not for progress updates (use board_set_summary) and not for things already in the repo's docs.",
         { text: z.string().min(8).max(400) }, async (a) => h.remember(a)),
       tool("board_memory", "Read everything the board remembers about this project.", {}, async () => h.memory()),
+      tool("board_ask",
+        "Ask the person a question that is theirs to decide — a business rule, a trade-off, the reason behind a request — when you can carry on with a sensible default meanwhile. It is shown on the card with your default; it does not stop the run. Use it instead of leaving a question only in your report. If you cannot go on without the answer, use board_report_blocked with needs \"input\" instead.",
+        {
+          question: z.string().min(8).describe("The question, answerable without reading your transcript."),
+          options: z.array(z.string()).max(6).optional().describe("Choices, when it is one of a few."),
+          default: z.string().optional().describe("What you are doing meanwhile."),
+        },
+        async (a) => h.ask(a as Parameters<typeof h.ask>[0])),
+      tool("board_report_blocked",
+        "Report that you cannot do this task from where you run — the sandbox refuses what it needs (live systems, credentials, files outside your folder), or you need a decision or information only the person has. The board stops the pipeline after this stage instead of passing half-done work on as a success, and shows your reason and ask on the card. Call it once, then end your turn.",
+        {
+          reason: z.string().min(8).describe("What stops you, in one or two plain sentences."),
+          needs: z.enum(["supervised", "input", "other"]).describe("supervised = it needs access only an approved run has; input = a decision or information from the person; other = anything else."),
+          ask: z.string().optional().describe("The exact question or request for the person, if there is one."),
+        },
+        async (a) => h.reportBlocked(a as Parameters<typeof h.reportBlocked>[0])),
     ],
   });
 }

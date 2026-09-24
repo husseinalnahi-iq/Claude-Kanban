@@ -60,7 +60,7 @@ export function ModelCombobox({
    * panel half a screen away from a picker in a narrow column), and an unchanged measurement sets no
    * state: re-rendering on every scroll event made the list flicker and drift. The panel itself is
    * portalled to <body>: a dialog card that animates has a transform, which makes IT the reference for
-   * position:fixed, and a tall card put the list hundreds of pixels off (docs/DECISIONS.md D204).
+   * position:fixed, and a tall card put the list hundreds of pixels off (docs/DECISIONS.md D235).
    */
   const measure = (): Pos | null => {
     const r = button.current?.getBoundingClientRect();
@@ -179,7 +179,7 @@ export function ModelCombobox({
         ? createPortal(
         <div
           ref={panel}
-          className="fixed z-[100] flex flex-col overflow-hidden rounded-lg border border-ink-700 bg-ink-900 shadow-2xl shadow-black/50"
+          className="fixed z-[100] flex flex-col overflow-hidden rounded-lg border border-ink-700 bg-ink-900 kb-raise"
           style={{ left: pos.left, top: pos.top, bottom: pos.bottom, width: pos.width, maxHeight: pos.maxHeight }}
           onKeyDown={onKey}
           onBlur={(e) => {

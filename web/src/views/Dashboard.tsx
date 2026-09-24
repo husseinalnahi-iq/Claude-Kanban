@@ -116,7 +116,7 @@ export function Dashboard({ project }: { project: ProjectWithGit | null }) {
 
           {data.failuresByStage.length ? (
             <Panel title="Where runs fail" hint="failed runs by stage">
-              <BarRows data={data.failuresByStage.map((f) => ({ key: f.key, count: f.count, color: "#d03b3b" }))} />
+              <BarRows data={data.failuresByStage.map((f) => ({ key: f.key, count: f.count, color: "var(--color-rust)" }))} />
               <button className="mt-2 cursor-pointer font-mono text-[10.5px] text-ink-500 underline-offset-2 hover:text-ink-200 hover:underline" onClick={() => navigate({ view: "sessions" })}>
                 open sessions →
               </button>

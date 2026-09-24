@@ -17,7 +17,8 @@ const LIMITS = {
   /**
    * A plan is the contract the later stages work to, so it is handed over whole. At 6,000 characters
    * a real 8,600-character plan lost its middle — the execution steps, a safety guard among them —
-   * and the code stage never saw them (docs/DECISIONS.md D198).
+   * and the code stage never saw them (docs/DECISIONS.md D229). The private lineage hit the same cut
+   * (D190) and raised every stage's budget instead; one limit for the one long handover is cheaper (D243).
    */
   plan: 40_000,
   siblings: 15,
@@ -28,6 +29,7 @@ const LIMITS = {
   note: 280,
   imageDescription: 1200,
   filePreview: 2000,
+  foreignChanges: 25,
 };
 
 export interface PromptCtx {
@@ -42,7 +44,7 @@ export interface PromptCtx {
   previousResult?: string | null;
   /** Which stage produced `previousResult`: a plan is passed whole, anything else is clamped. */
   previousStage?: StageName | null;
-  /** The task changes a live system (production data, a live business app…). D202. */
+  /** The task changes a live system (production data, a live business app…). D233. */
   live?: boolean;
   /** Set when the previous stage ran on another provider: its output is labelled as such (D133). */
   previousFrom?: { provider: string; model: string } | null;
@@ -52,6 +54,10 @@ export interface PromptCtx {
   messages: { from: string; body: string }[];
   /** Why a human sent this task back to Backlog, if they did. */
   rejectNote?: string | null;
+  /** Supervised: files already uncommitted in the checkout before this run, not this task's (D204). */
+  foreignChanges?: string[];
+  /** What stopped the previous attempt, when a stage reported it could not do the work from where it ran. */
+  priorBlock?: { reason: string; needs: "supervised" | "input" | "other"; ask: string | null; mode: Mode } | null;
   /** Output of the project's verify command when it failed on the previous attempt. */
   verificationFailure?: string | null;
   /** This stage was started on another model, which ran out partway: what the new one needs to know. */
@@ -105,6 +111,27 @@ function browserSection(ctx: PromptCtx): string | null {
   return lines.join("\n");
 }
 
+/**
+ * What the person asked for is the measure, not what the previous stage says it did. The review that
+ * prompted this approved a stage that had reported itself blocked, and never noticed that "show me how
+ * I can add to the list myself" had no real answer (D189).
+ */
+const SPEC_CHECKLIST =
+  "Judge the work against the task's spec as the person wrote it — not against what the previous stage says it did. " +
+  "List every distinct thing the spec asks for, including questions and \"show me / explain how\" requests, and mark each ✅ delivered or ❌ not delivered, with the evidence (file and line, command output, or the passage of the deliverable).";
+const VERDICTS =
+  "End with a line `VERDICT: APPROVE` (every item delivered), `VERDICT: CHANGES_NEEDED` (something is missing or wrong and the code stage can fix it), or `VERDICT: BLOCKED` (it cannot be delivered from where these stages run — say what is needed), followed by your reasons.";
+
+/** Autonomous runs cannot leave their worktree. Say what to do about it before they try (D186). */
+function sandboxNote(ctx: PromptCtx): string | null {
+  if (ctx.mode !== "autonomous" || (ctx.capabilities ?? "sdk") !== "sdk") return null;
+  return (
+    "This run is sandboxed: it can only reach files inside its own folder, and no live system that needs credentials from outside it. " +
+    "If the task needs more than that — a live database, ERP or other production system, credentials, files in the main checkout, a website that needs signing in — " +
+    "call `board_report_blocked` with needs \"supervised\" as soon as you know, say exactly what access you need, and end your turn. Do not look for a way round the sandbox."
+  );
+}
+
 /** A plan the stage must work to: the one just before it, or (for review) any earlier one. */
 const hasPlan = (ctx: PromptCtx) => ctx.previousStage === "plan" || (ctx.earlierResults ?? []).some((e) => e.stage === "plan");
 
@@ -127,14 +154,18 @@ const REVIEW_PLAN =
 
 function stageInstructions(ctx: PromptCtx): string {
   const caps = ctx.capabilities ?? "sdk";
+  const sandbox = sandboxNote(ctx);
   const plan = hasPlan(ctx);
   switch (ctx.stage) {
-    case "plan":
+    case "plan": {
+      const facts =
+        "Put what you established under `## Facts established` — names, paths, values and the evidence for each — so the next stage builds on them instead of searching again; put what you could not confirm under `## Still to check`.";
       if (caps === "text") {
         return [
           "Produce an implementation plan for the task below. You cannot read files or run commands: plan from the spec, the file list and the context given here, and say explicitly what you would need to check in the code before implementing.",
           "If the task is too big for one focused session, list independent subtasks under a `## Subtasks` heading, each with a self-contained spec.",
           PLAN_STEPS,
+          facts,
           "End with the plan as markdown; it is handed to the next stage.",
         ].join("\n");
       }
@@ -143,36 +174,45 @@ function stageInstructions(ctx: PromptCtx): string {
         caps === "cli"
           ? "If the task is too big for one focused session, list independent subtasks under a `## Subtasks` heading (each with a self-contained spec) and say so in your plan."
           : "If the task is too big for one focused session, split it into independent subtasks with `board_create_subtasks` (each with a self-contained spec) and say so in your plan.",
+        ...(sandbox ? [sandbox] : []),
         PLAN_STEPS,
+        facts,
         "End with the plan as markdown; it is handed to the next stage.",
       ].join("\n");
+    }
     case "code":
       return [
         plan
           ? "Implement the task below by carrying out the previous stage's plan. Keep the change focused on the spec."
           : "Implement the task below, following the previous stage's plan when there is one. Keep the change focused on the spec.",
         ...(plan ? [FOLLOW_PLAN] : []),
+        ...(plan ? [FOLLOW_PLAN] : []),
+        "Treat the plan's established facts as done work: build on them rather than searching for them again, and re-check one only when the code contradicts it.",
+        "Every question the spec asks and every \"show me / explain how\" request is part of the task: answer each one in your final summary, in words the person can follow, with real names and steps — not a placeholder for later.",
+        ...(sandbox ? [sandbox] : []),
         ctx.verifyCommand
           ? `Before you finish, run \`${ctx.verifyCommand}\` and keep working until it passes — the board runs it too and will send the task back if it fails. Never weaken or delete a check to make it pass.`
           : "Verify your work (run the project's tests or build if it has them) and show the output rather than asserting success.",
-        "End with a concise markdown summary of what you changed; it is handed to the next stage.",
+        "End with a concise markdown summary of what you changed and the answers to the spec's questions; it is handed to the next stage and shown to the person as the result.",
         ...(plan ? [PLAN_CHECKLIST] : []),
       ].join("\n");
     case "review": {
       if (caps === "text") {
         return [
           "Review the change below against the task's spec. You cannot run anything or open files: judge the diff as given, and say what you could not verify.",
+          SPEC_CHECKLIST,
           ...(plan ? [REVIEW_PLAN] : []),
           "Point at concrete defects with file and line; do not expand scope.",
-          "End with a line `VERDICT: APPROVE` or `VERDICT: CHANGES_NEEDED`, followed by your reasons.",
+          VERDICTS,
         ].join("\n");
       }
       const how = ctx.baseSha ? `Inspect the changes with \`git diff ${ctx.baseSha}\`.` : "Inspect the files the previous stage changed.";
       return [
-        `Review the changes made for the task below against its spec. ${how}`,
+        `Review the work done for the task below against its spec. ${how}`,
+        SPEC_CHECKLIST,
         ...(plan ? [REVIEW_PLAN] : []),
-        "Fix only clear defects; do not expand scope.",
-        "End with a line `VERDICT: APPROVE` or `VERDICT: CHANGES_NEEDED`, followed by your reasons.",
+        "Fix only clear defects; do not expand scope. A previous stage that says it was blocked or only partly done has not delivered: never approve it.",
+        VERDICTS,
       ].join("\n");
     }
     case "custom":
@@ -213,6 +253,14 @@ export function buildStagePrompt(ctx: PromptCtx): string {
   }
   if (ctx.rejectNote?.trim()) {
     out.push(`\n## Why this was sent back\nA human rejected the previous attempt: ${ctx.rejectNote.trim()}\nAddress this before anything else.`);
+  }
+  if (ctx.priorBlock?.reason.trim()) {
+    const b = ctx.priorBlock;
+    const now =
+      b.mode === "autonomous" && ctx.mode === "supervised"
+        ? "It now runs supervised, in the main checkout: you can reach what the sandbox refused, and every write waits for the person's approval — so say what each one is for."
+        : "Check whether what stopped it has changed before you start.";
+    out.push(`\n## What stopped the last attempt\n${b.reason.trim()}${b.ask ? `\nIt asked: ${b.ask}` : ""}\n${now}`);
   }
   if (ctx.verificationFailure?.trim()) {
     out.push(
@@ -285,11 +333,21 @@ export function buildStagePrompt(ctx: PromptCtx): string {
   if (ctx.skills.length) {
     out.push(`\n## Skills\n${ctx.skills.map((s) => `- use the \`${s}\` skill`).join("\n")}`);
   }
-  // Any task in its own worktree: every autonomous one, and a supervised one on its own branch (D203).
+  if (ctx.foreignChanges?.length) {
+    const shown = ctx.foreignChanges.slice(0, LIMITS.foreignChanges);
+    const more = ctx.foreignChanges.length - shown.length;
+    out.push(
+      `\n## Your checkout already has other changes\nThese files had uncommitted changes before this run started. They are not this task's — another session or the person is working on them:\n` +
+        shown.map((f) => `- ${f}`).join("\n") + (more > 0 ? `\n- …and ${more} more` : "") + "\n" +
+        "Do not edit, revert, stage or commit them. If the task needs one of them, change only the lines the task needs and say so in your summary.",
+    );
+  }
+  // Any task in its own worktree: every autonomous one, and a supervised one on its own branch (D234).
   if (ctx.branch) {
     out.push(
       `\n## Working directory\nYou are in a git worktree on branch \`${ctx.branch}\`. Edit files freely inside it. ` +
-        "Do not commit, push, switch branches, or touch files outside it — the board commits your changes after this stage.",
+        "Do not commit, push, switch branches, or touch files outside it — the board commits your changes after this stage. " +
+        "If the task needs anything outside it, report that with `board_report_blocked` instead of working round it.",
     );
   }
   if (ctx.live) {
@@ -313,9 +371,15 @@ export function buildStagePrompt(ctx: PromptCtx): string {
   }
   if ((ctx.capabilities ?? "sdk") === "sdk") {
     out.push(
-      "\n## Board\nYou have board tools: `board_get_task`, `board_list_siblings`, `board_post_message`, `board_create_subtasks`, `board_set_summary`. " +
+      "\n## Board\nYou have board tools: `board_get_task`, `board_list_siblings`, `board_post_message`, `board_create_subtasks`, `board_set_summary`, `board_ask`, `board_report_blocked`. " +
         "Call `board_set_summary` with a one-line progress note when you start and when you finish. " +
-        "Use `board_post_message` to tell the parent or a sibling something they need to know.",
+        "Use `board_post_message` to tell the parent or a sibling something they need to know. " +
+        // Two ways to ask, one per mode (D239): someone is at the board for a supervised run, nobody is
+        // for an autonomous one, where a waiting question would only stall it.
+        (ctx.mode === "supervised"
+          ? "Ask the person with `AskUserQuestion` when their answer decides how you go on: it waits on a card and the answer comes back in this turn. Do not bury a question in your report — a report is read after the fact. "
+          : "Nobody is watching this run, so every question for the person goes through `board_ask` — with the default you carry on with — not only into your report: a report is read after the fact, the card is seen now. ") +
+        "Use `board_report_blocked` when you cannot do the task from where you run, or cannot go on without an answer: the board stops after this stage and shows your ask, instead of passing unfinished work on as done.",
     );
   }
   return out.join("\n");

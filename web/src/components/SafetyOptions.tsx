@@ -1,5 +1,5 @@
 /**
- * Two per-task safety switches (docs/DECISIONS.md D200, D202): wait for the human after the plan,
+ * Two per-task safety switches (docs/DECISIONS.md D231, D233): wait for the human after the plan,
  * and "touches a live system", which forces that wait and runs the review stage on the live review model.
  */
 export function SafetyOptions({ live, planApproval, settingOn, liveModel, onChange, disabled }: {

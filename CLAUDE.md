@@ -22,38 +22,30 @@ the **Welcome** pop-up, the **Setup** checklist where it applies, and the **READ
 
 ## Publishing
 
-Two remotes, on purpose:
-
-| Remote | What it holds |
-|---|---|
-| `origin` | **Public.** A fresh history: one release commit, then one commit per update. No development history, no personal paths, no private project names. |
-| `private` | **Private backup.** The working branches with their real, detailed history. |
-
-Work on a branch and commit as often as you like — those commits are yours and stay off `origin`.
-When something is ready for people to see:
+The public repo is published from the working repo with one script, which squashes the current tree
+onto the public `main` as a single commit:
 
 ```bash
-node scripts/publish.mjs --message "Plan approval, live tasks, own branch" --push --backup
+node scripts/publish.mjs --message "What changed, in a line" --remote public
 ```
 
-It takes the current branch's tree, drops the paths listed in `exclude`, refuses to publish if the diff
-contains any word in `blocklist`, then commits that tree on top of `origin/main` and pushes it. The
-working tree is never touched, and `origin/main` is only fast-forwarded, so the branch protection there
-(no force-push, no delete) is never in the way. `--backup` also pushes the branch to `private`.
+Name the remote that points at the **public** repo (`origin` in a clone of the public repo, `public`
+in the working one). The script refuses a remote whose URL is a `-private` repo, and moves local
+`main` only when publishing to `origin` (D242). Leave out `--push` to see exactly what would be
+published first; add it only when that list is right.
 
-**The words and paths it checks live in `.claude/publish.local.json`, which is gitignored and must stay
-that way** — it is the list of things that must not become public. Add to it whenever a new internal
-name shows up in your work.
+Everything private is handled by the gitignored `.claude/publish.local.json`, which must never be
+committed: `exclude` (paths left out), `replace` (real names swapped for neutral ones in the published
+copy only — the working tree keeps the real ones, D214, D247) and `blocklist` (checked after the
+swaps; any hit refuses the publish).
 
 Rules that do not change:
 
-- Never push a working branch, or anything based on the old full history, to `origin`.
-- Keep this checkout's `git config user.email` as the GitHub noreply address; don't commit here with a
-  work email.
-- Before publishing, read the file list the script prints. Docs and test fixtures are where private
-  names slip in: write examples with neutral names (`C:\work\proj`, `fix_access.py`) from the start.
-- A published commit message is public too: describe the change, not the customer, the employer or the
-  system it was found on.
+- Never push a working branch, or its history, to the public repo.
+- Docs and test fixtures are where private names slip in: prefer neutral names (`C:\work\proj`,
+  `fix_access.py`) from the start, and add a `replace` pair when a real one is needed.
+- A published commit message is public too: describe the change, not the customer or the system it
+  was found on.
 
 ## House style
 

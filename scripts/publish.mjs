@@ -8,13 +8,17 @@
 //   node scripts/publish.mjs --message "What changed, in a line"       # build the commit, don't push
 //   node scripts/publish.mjs --message "…" --push                      # …and push it to origin/main
 //   node scripts/publish.mjs --message "…" --push --backup             # …and push this branch to private
+//   node scripts/publish.mjs --message "…" --remote public             # from the private checkout (D242)
 //
-// What it does: take the tree of the current branch, drop the paths in `exclude`, refuse if the diff
+// What it does: take the tree of the current branch, drop the paths in `exclude`, swap the `replace`
+// pairs for neutral names in the published copy, refuse if the diff
 // against origin/main contains any word in `blocklist`, then commit that tree on top of origin/main.
 // Nothing in the working tree is touched, and origin/main is only ever fast-forwarded.
 //
 // The words and paths live in a file that is NOT published: .claude/publish.local.json
-//   { "blocklist": ["internal-project-name", "employer", "C:\\\\Users\\\\me"], "exclude": ["docs/private-note.md"] }
+//   { "blocklist": ["internal-project-name", "employer", "C:\\\\Users\\\\me"], "exclude": ["docs/private-note.md"],
+//     "replace": [["internal-project-name", "sample-app"]] }
+// The blocklist check runs after the swaps, so a name the list forgot is still refused.
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -44,9 +48,50 @@ const config = existsSync(configPath) ? JSON.parse(readFileSync(configPath, "utf
 const blocklist = (config.blocklist ?? []).filter(Boolean);
 const exclude = (config.exclude ?? []).filter(Boolean);
 if (!blocklist.length) console.warn(`! No blocklist in ${configPath}: publishing without a name check.`);
+// [from, to] pairs, applied to the published copy only: this tree keeps its real names (D214, D247).
+// Matched case-insensitively and written back in the match's case (INTERNAL → SAMPLE, internal → sample),
+// longest first, so a test that asserts on a name still finds the same neutral name it was given.
+const replace = (config.replace ?? []).filter((r) => Array.isArray(r) && r[0]).sort((a, b) => b[0].length - a[0].length);
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const inCase = (match, to) =>
+  match === match.toLowerCase() ? to.toLowerCase() : match === match.toUpperCase() ? to.toUpperCase() : to;
+function scrub(env) {
+  if (!replace.length) return [];
+  const pattern = new RegExp(replace.map(([from]) => escapeRe(from)).join("|"), "gi");
+  const to = new Map(replace.map(([from, dest]) => [from.toLowerCase(), dest]));
+  const changed = [];
+  for (const entry of git(["ls-files", "-s"], { env }).split("\n").filter(Boolean)) {
+    const [meta, path] = entry.split("\t");
+    const [mode, hash] = meta.split(" ");
+    const blob = execFileSync("git", ["cat-file", "blob", hash]);
+    if (blob.includes(0)) continue; // binary: images, icons
+    const text = blob.toString("utf8");
+    const out = text.replace(pattern, (m) => inCase(m, to.get(m.toLowerCase())));
+    if (out === text) continue;
+    const next = execFileSync("git", ["hash-object", "-w", "--stdin"], { input: out, encoding: "utf8" }).trim();
+    git(["update-index", "--cacheinfo", `${mode},${next},${path}`], { env });
+    changed.push(path);
+  }
+  return changed;
+}
 
-git(["fetch", "origin", "main"]);
-const base = git(["rev-parse", "origin/main"]);
+// Where the public repo is. In the public clone that is `origin`; in the private checkout `origin` is the
+// private repo, so pass `--remote public` there (docs/DECISIONS.md D242).
+const remote = arg("remote") || "origin";
+const url = (() => {
+  try {
+    return git(["remote", "get-url", remote]);
+  } catch {
+    return die(`There is no remote called "${remote}". Add the public repo: git remote add ${remote} <its URL>`);
+  }
+})();
+// Publishing squashes onto the target's main: aimed at the private repo, that would overwrite its history
+// view with a scrubbed copy. Refuse, whatever the flags say.
+if (/-private(\.git)?$/i.test(url)) die(`"${remote}" is the private repo (${url}). Publish to the public one: --remote <name of the public remote>.`);
+if (!/^https?:\/\/|^git@|^ssh:/.test(url)) die(`"${remote}" points at ${url}, not at GitHub. Point it at the public repo's URL first.`);
+
+git(["fetch", remote, "main"]);
+const base = git(["rev-parse", `${remote}/main`]);
 const source = git(["rev-parse", "HEAD"]);
 const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]);
 
@@ -57,6 +102,8 @@ let tree;
 try {
   git(["read-tree", source], { env });
   for (const path of exclude) git(["rm", "--cached", "-r", "--quiet", "--ignore-unmatch", path], { env });
+  const rewritten = scrub(env);
+  if (rewritten.length) console.log(`Neutral names swapped in ${rewritten.length} file(s): ${rewritten.join(", ")}`);
   tree = git(["write-tree"], { env });
 } finally {
   rmSync(dir, { recursive: true, force: true });
@@ -84,12 +131,18 @@ console.log(files.replace(/^/gm, "  "));
 console.log(`\n  message: ${message.split("\n")[0]}`);
 
 if (!has("push")) {
-  console.log(`\nNot pushed (no --push). To push it yourself:\n  git push origin ${commit}:refs/heads/main\n`);
+  console.log(`\nNot pushed (no --push). To push it yourself:\n  git push ${remote} ${commit}:refs/heads/main\n`);
   process.exit(0);
 }
-git(["push", "origin", `${commit}:refs/heads/main`]);
-git(["update-ref", "refs/heads/main", commit]);
-console.log(`\n✓ Pushed to origin/main and moved local main to ${commit.slice(0, 8)}.`);
+git(["push", remote, `${commit}:refs/heads/main`]);
+if (remote === "origin") {
+  // The public clone's own main is the published history, so it follows.
+  git(["update-ref", "refs/heads/main", commit]);
+  console.log(`\n✓ Pushed to ${remote}/main and moved local main to ${commit.slice(0, 8)}.`);
+} else {
+  // Anywhere else, local main is someone's real history: leave it alone.
+  console.log(`\n✓ Pushed to ${remote}/main (${commit.slice(0, 8)}). Local branches are untouched.`);
+}
 
 if (has("backup")) {
   git(["push", "-u", "private", `${branch}:${branch}`]);

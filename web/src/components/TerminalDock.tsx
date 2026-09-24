@@ -4,12 +4,24 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { api, type ProjectWithGit, type TerminalInfo } from "../lib/api.ts";
 
-/** The board's ink palette, as xterm wants it (plain hex). */
-const THEME = {
-  background: "#0c0d0b", foreground: "#d4d1c6", cursor: "#f2a93b", cursorAccent: "#0c0d0b", selectionBackground: "#f2a93b55",
-  black: "#1d1e1a", red: "#e0643c", green: "#6fa872", yellow: "#f2a93b", blue: "#8d93a8", magenta: "#a394f0", cyan: "#5ec8d8", white: "#d4d1c6",
-  brightBlack: "#57574e", brightRed: "#f0567a", brightGreen: "#b5d95b", brightYellow: "#f7c56e", brightBlue: "#aeb3c6", brightMagenta: "#c2b8f5", brightCyan: "#8fdce7", brightWhite: "#ebe8de",
-};
+/**
+ * The board's palette, as xterm wants it (plain colour strings), read from the theme tokens so the
+ * terminal follows Light / Dark like the rest of the board. xterm cannot read CSS variables itself.
+ *
+ * ANSI black and white are the one place the inverted ink ramp would be wrong: programs print "black"
+ * meaning dark and "white" meaning light, so in light mode black takes the darkest rung, not ink-800
+ * (which would be near-invisible on the light ground).
+ */
+function terminalTheme() {
+  const css = getComputedStyle(document.documentElement);
+  const v = (name: string) => css.getPropertyValue(`--color-${name}`).trim();
+  const light = document.documentElement.dataset.theme === "light";
+  return {
+    background: v("ink-950"), foreground: v("ink-200"), cursor: v("amber"), cursorAccent: v("ink-950"), selectionBackground: `${v("amber")}55`,
+    black: v(light ? "ink-100" : "ink-800"), red: v("rust"), green: v("moss"), yellow: v("amber"), blue: v("slate"), magenta: v("iris"), cyan: v("cyan"), white: v(light ? "ink-400" : "ink-200"),
+    brightBlack: v(light ? "ink-300" : "ink-500"), brightRed: v("rose"), brightGreen: v("lime"), brightYellow: v("amber"), brightBlue: v("slate"), brightMagenta: v("iris"), brightCyan: v("cyan"), brightWhite: v(light ? "ink-500" : "ink-100"),
+  };
+}
 const HEIGHT_KEY = "kanban.terminal.height";
 const readHeight = () => {
   try {
@@ -29,7 +41,7 @@ function TerminalView({ term, onExit }: { term: TerminalInfo; onExit: () => void
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const xterm = new Terminal({
-      theme: THEME, fontFamily: '"IBM Plex Mono", "Cascadia Code", Consolas, monospace', fontSize: 13, lineHeight: 1.2,
+      theme: terminalTheme(), fontFamily: '"IBM Plex Mono", "Cascadia Code", Consolas, monospace', fontSize: 13, lineHeight: 1.2,
       cursorBlink: true, scrollback: 5000, allowProposedApi: false,
     });
     const fit = new FitAddon();
@@ -57,7 +69,11 @@ function TerminalView({ term, onExit }: { term: TerminalInfo; onExit: () => void
     const ro = new ResizeObserver(() => resize());
     ro.observe(box.current!);
     xterm.focus();
+    // Repaint when the board's theme changes (the Auto/Light/Dark switch, or the OS in Auto).
+    const themed = new MutationObserver(() => (xterm.options.theme = terminalTheme()));
+    themed.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
     return () => {
+      themed.disconnect();
       ro.disconnect();
       input.dispose();
       ws.close();

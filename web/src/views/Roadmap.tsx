@@ -6,6 +6,7 @@ import { navigate } from "../lib/router.ts";
 import { STATUS_META } from "../lib/format.ts";
 import { Button, inputCls, ModeChip } from "../components/ui.tsx";
 import { NewTaskForm } from "../components/forms.tsx";
+import { useAsk } from "../components/Ask.tsx";
 import { useTaskCards } from "./Board.tsx";
 
 const UNSCHEDULED = "__none";
@@ -17,7 +18,14 @@ export function Roadmap({ project }: { project: ProjectWithGit }) {
   const [due, setDue] = useState("");
   const [over, setOver] = useState<string | null>(null);
   const [creatingIn, setCreatingIn] = useState<string | null>(null);
+  const dialog = useAsk();
   const load = useCallback(() => void api.milestones(project.id).then(setMilestones), [project.id]);
+  const removeMilestone = async (ms: Milestone) => {
+    if (await dialog.confirm({ title: `Delete milestone "${ms.title}"?`, message: "Its tasks become unscheduled; nothing else changes.", confirmLabel: "Delete", danger: true })) {
+      await api.deleteMilestone(ms.id);
+      load();
+    }
+  };
   useEffect(load, [load]);
   useWs((m) => m.type === "milestone.updated" && m.milestone.project_id === project.id && load());
 
@@ -40,6 +48,7 @@ export function Roadmap({ project }: { project: ProjectWithGit }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      {dialog.element}
       <header className="flex flex-wrap items-center gap-3 border-b border-ink-800 px-6 py-3.5">
         <h1 className="text-[17px] font-semibold tracking-tight text-ink-100">Roadmap · {project.name}</h1>
         <form
@@ -85,7 +94,7 @@ export function Roadmap({ project }: { project: ProjectWithGit }) {
                     <div className="flex text-ink-500">
                       <button className="px-0.5 hover:text-ink-100 disabled:opacity-30 cursor-pointer" disabled={i === 0} onClick={() => swap(i, -1)}>←</button>
                       <button className="px-0.5 hover:text-ink-100 disabled:opacity-30 cursor-pointer" disabled={i === milestones.length - 1} onClick={() => swap(i, 1)}>→</button>
-                      <button className="px-0.5 hover:text-rust cursor-pointer" onClick={() => confirm(`Delete milestone "${ms.title}"? Tasks become unscheduled.`) && void api.deleteMilestone(ms.id).then(load)}>×</button>
+                      <button className="px-0.5 hover:text-rust cursor-pointer" onClick={() => void removeMilestone(ms)}>×</button>
                     </div>
                   ) : null}
                 </div>

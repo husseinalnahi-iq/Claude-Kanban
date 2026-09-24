@@ -5,6 +5,7 @@ import { useAppData } from "../lib/store.tsx";
 import { navigate } from "../lib/router.ts";
 import { ago } from "../lib/format.ts";
 import { Button, Empty, ErrorLine, inputCls, useAction } from "../components/ui.tsx";
+import { CredentialWarning, riskOf } from "../components/CredentialWarning.tsx";
 import { QuestionCard } from "../components/QuestionCard.tsx";
 import { isQuestion } from "../lib/questions.ts";
 
@@ -34,6 +35,7 @@ function ToolRow({ a, focused }: { a: Approval; focused: boolean }) {
         </button>
         <span className="font-mono text-[10.5px] text-ink-500">{ago(a.created_at)}</span>
       </div>
+      <CredentialWarning a={a} />
       <pre className="max-h-40 overflow-auto rounded bg-ink-950 px-2.5 py-2 font-mono text-[11.5px] text-ink-300 whitespace-pre-wrap">
         {typeof i.command === "string" ? `$ ${i.command}` : JSON.stringify(i, null, 2).slice(0, 2000)}
       </pre>
@@ -69,7 +71,8 @@ export function Approvals() {
       const top = pending[0];
       // y / n are for approvals; a question is answered on its own card.
       if (!top || isQuestion(top)) return;
-      if (e.key === "y") void run(() => api.decide(top.id, "allow"));
+      // A card that would print credentials is never allowed by a keystroke: it needs a look and a click.
+      if (e.key === "y" && riskOf(top)?.level !== "prints") void run(() => api.decide(top.id, "allow"));
       if (e.key === "n") void run(() => api.decide(top.id, "deny"));
     };
     window.addEventListener("keydown", onKey);

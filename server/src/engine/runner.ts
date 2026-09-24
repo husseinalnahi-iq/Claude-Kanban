@@ -2,14 +2,14 @@ import {
   query, type CanUseTool, type HookCallbackMatcher, type Options, type PermissionResult, type SDKMessage, type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, extname, isAbsolute, join } from "node:path";
 import * as gitOps from "../git/worktree.ts";
 import { DEFAULT_VISION_MODEL, nowIso } from "../db.ts";
 import type { Repo } from "../repo.ts";
 import type { Bus } from "../bus.ts";
 import type {
-  Approval, ApprovalDecision, Project, Provider, ProviderOut, ProviderUsage, Run, SessionTools, Stage, StageName, Task, TaskStatus, TierRef, UsageLimit, UsageTotals,
+  Approval, ApprovalDecision, Blocked, Project, Provider, ProviderOut, ProviderUsage, Run, SessionTools, Stage, StageName, Task, TaskStatus, TierRef, UsageLimit, UsageTotals,
 } from "../types.ts";
 
 type RateLimitInfo = {
@@ -22,7 +22,8 @@ type RateLimitInfo = {
 };
 import { RunQueue } from "./queue.ts";
 import { buildStagePrompt } from "./prompts.ts";
-import { autonomousGate, blockedCommand, isSafeMcp, killsByName, READ_ONLY_TOOLS, readOnlyCommand, serverRule } from "./gate.ts";
+import { autonomousGate, blockedCommand, escalationHint, isReadOnlyShell, isSafeMcp, killsByName, READ_ONLY_TOOLS, readViolation, serverRule } from "./gate.ts";
+import { credentialRisk } from "./credentials.ts";
 import { allowedMode, createBoardServer } from "./boardMcp.ts";
 import { CONFIDENCE_TO_APPLY, serialiseFileConflicts, triageTask, type Sizing, type TriageResult, type TriageSubtask } from "./triage.ts";
 import { describeImage, describeImageVia } from "./vision.ts";
@@ -74,9 +75,6 @@ interface StartOpts {
   resume?: string;
 }
 
-/** The card note Discard leaves: not a reason for the next run. */
-const DISCARDED_NOTE = "work discarded";
-
 /** One live query() call. */
 interface Active {
   runId: string;
@@ -96,7 +94,7 @@ interface PipelineCtl {
 const STAGE_STATUS: Record<StageName, TaskStatus> = { plan: "planning", code: "running", review: "review", custom: "running" };
 const PLAN_DISALLOWED = ["Edit", "Write", "NotebookEdit", "MultiEdit"];
 
-/** What a stage that ran out of turns is told when it carries on in the same session (D201). */
+/** What a stage that ran out of turns is told when it carries on in the same session (D232). */
 const CONTINUE_PROMPT =
   "You reached this stage's turn limit before finishing. Nothing was lost: continue from exactly where you stopped. " +
   "Do not redo steps you already finished or re-read what you already know. Finish the remaining work, then end with the summary this stage asks for " +
@@ -122,6 +120,12 @@ export function questionResult(
 }
 /** Bounded so one chatty session cannot fill the disk. */
 const MAX_ARTIFACTS_PER_RUN = 20;
+/**
+ * Sandbox refusals one autonomous stage may collect before the board stops it as blocked. The run
+ * that prompted this made four attempts round the sandbox; a stage that meets the wall once or twice
+ * and adapts is normal, five is hunting for a way out (D186).
+ */
+export const AUTO_BLOCK_AFTER = 5;
 /** One image, one description: a CLI that has not answered in three minutes is not going to. */
 const VISION_TIMEOUT_MS = 3 * 60_000;
 const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
@@ -191,11 +195,51 @@ export function sizedPipeline(sizing: Sizing | null, tiers: { cheap: TierRef; ba
   });
 }
 
-/** Reads the `VERDICT: APPROVE | CHANGES_NEEDED` line a review stage is asked to end with. */
-export function verdictOf(result: string | null | undefined): "APPROVE" | "CHANGES_NEEDED" | null {
-  const m = /^\s*\**VERDICT\**\s*:\s*\**\s*(APPROVE|CHANGES_NEEDED)/im.exec(result ?? "");
-  return (m?.[1]?.toUpperCase() as "APPROVE" | "CHANGES_NEEDED") ?? null;
+export type Verdict = "APPROVE" | "CHANGES_NEEDED" | "BLOCKED";
+
+/**
+ * Reads the `VERDICT: …` line a review stage is asked to end with. When a report carries more than
+ * one (a quoted example, then the real one), the last one is the verdict.
+ */
+export function verdictOf(result: string | null | undefined): Verdict | null {
+  const all = [...(result ?? "").matchAll(/^\s*\**VERDICT\**\s*:\s*\**\s*(APPROVE|CHANGES_NEEDED|BLOCKED)/gim)];
+  return (all.at(-1)?.[1]?.toUpperCase() as Verdict | undefined) ?? null;
 }
+
+/** The text after a verdict line, or the report's first lines: what the card says about a verdict. */
+function verdictReason(result: string | null | undefined): string {
+  const m = /^\s*\**VERDICT\**\s*:\s*\**\s*(?:APPROVE|CHANGES_NEEDED|BLOCKED)\**\s*[—:-]?\s*(.*)$/im.exec(result ?? "");
+  return (m?.[1]?.trim() || firstLines(result, 3)).slice(0, 600);
+}
+
+/** Size and modification time: enough to tell whether a file changed during a run, without reading it. */
+function fileStamp(path: string): string {
+  try {
+    const s = statSync(path);
+    return `${s.size}:${s.mtimeMs}`;
+  } catch {
+    return "gone";
+  }
+}
+
+/**
+ * A suggestion minus the parts just decided, or null when nothing is left. Accepting or dismissing
+ * one part must not silently throw the others away (D191).
+ */
+function withoutParts(s: NonNullable<Task["suggestion"]>, what: SuggestionParts): Task["suggestion"] {
+  const { type, priority, labels, confidence, pipeline, sizing_reason, mode, mode_reason, live, live_reason } = s;
+  const rest: NonNullable<Task["suggestion"]> = {
+    ...(what.fields ? {} : { type, priority, labels, confidence }),
+    ...(what.pipeline ? {} : { pipeline, sizing_reason }),
+    ...(what.mode ? {} : { mode, mode_reason }),
+    ...(what.live ? {} : { live, live_reason }),
+  };
+  for (const k of Object.keys(rest) as (keyof typeof rest)[]) if (rest[k] === undefined) delete rest[k];
+  return Object.keys(rest).length ? rest : null;
+}
+
+/** The parts of a triage suggestion that are accepted or dismissed separately. */
+type SuggestionParts = { fields?: boolean; pipeline?: boolean; mode?: boolean; live?: boolean };
 
 function firstLines(text: string | null | undefined, n: number): string {
   return (text ?? "").split(/\r?\n/).filter(Boolean).slice(0, n).join(" ").slice(0, 400);
@@ -206,22 +250,21 @@ function eventType(msg: SDKMessage): string {
   return m.subtype ? `${m.type}:${m.subtype}` : m.type;
 }
 
-/** A shell command a supervised run may use without a card (Settings → Guardrails, D197). */
-function freeShellRead(name: string, input: unknown, readsFree: boolean): boolean {
-  return readsFree && (name === "Bash" || name === "PowerShell") && readOnlyCommand(String((input as { command?: unknown })?.command ?? ""));
-}
-
 /**
  * Supervised runs: force every non-read-only tool through the approval card, even when a settings
  * file pre-allows it (a PreToolUse "ask" overrides allow rules). See docs/DECISIONS.md D20.
  */
-function forceAsk(readsFree: boolean): HookCallbackMatcher[] {
+function forceAsk(readsFree: boolean, cwd: string): HookCallbackMatcher[] {
+  // A read-only command skips the forced "ask" too, or a settings file's own "ask" would still put it
+  // on a card; canUseTool then applies the same rule and records it (D202, D240).
+  const freeShellRead = (name: string, input: unknown) =>
+    readsFree && (name === "Bash" || name === "PowerShell") && isReadOnlyShell(String((input as { command?: unknown })?.command ?? ""), cwd);
   return [
     {
       hooks: [
         async (input) => {
           const { tool_name: name = "", tool_input: toolInput } = input as { tool_name?: string; tool_input?: unknown };
-          if (READ_ONLY_TOOLS.has(name) || isSafeMcp(name) || freeShellRead(name, toolInput, readsFree)) return {};
+          if (READ_ONLY_TOOLS.has(name) || isSafeMcp(name) || freeShellRead(name, toolInput)) return {};
           return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask", permissionDecisionReason: "Supervised task: every write is approved on the board." } };
         },
       ],
@@ -253,8 +296,6 @@ export class TaskRunner {
   /** Tasks inside an approve / discard / chat transition (git or session work in flight). */
   private holds = new Set<string>();
   private startOpts = new Map<string, StartOpts>();
-  /** Why a human sent the task back, for every stage of the run that follows (see queueTask). */
-  private rejectNotes = new Map<string, string>();
   private ports = new Map<string, number>();
   /** Live pictures of each task's browser, for the Browser tab. */
   readonly browserWatch: BrowserWatch;
@@ -266,6 +307,12 @@ export class TaskRunner {
   private merging = new Map<string, Promise<void>>();
   /** taskId → the tree hash the verify command last passed on, so an unchanged tree is not re-tested. */
   private verified = new Map<string, string>();
+  /** taskId → what blocked the last attempt, handed to the next run's prompt (D185). */
+  private priorBlocks = new Map<string, Blocked>();
+  /** taskId → why a human sent it back, carried past the queue (which clears the card's note). */
+  private sentBack = new Map<string, string>();
+  /** taskId → the checkout's uncommitted files when a supervised run started, with size+mtime (D204). */
+  private checkoutStamps = new Map<string, { cwd: string; own: Set<string>; stamps: Map<string, string> }>();
 
   constructor(deps: RunnerDeps) {
     this.repo = deps.repo;
@@ -354,7 +401,22 @@ export class TaskRunner {
     this.pendingNotes.delete(taskId);
     this.startOpts.delete(taskId);
     this.verified.delete(taskId);
+    this.priorBlocks.delete(taskId);
+    this.sentBack.delete(taskId);
+    this.checkoutStamps.delete(taskId);
     this.handovers.delete(taskId);
+  }
+
+  /** Your answer to a `board_ask` question: kept on the card and handed to the next stage as a message (D203). */
+  answerQuestion(taskId: string, questionId: string, answer: string): Task {
+    const { task } = this.load(taskId);
+    const question = task.questions.find((q) => q.id === questionId);
+    if (!question) throw new NotFoundError(`No question ${questionId} on this task.`);
+    const text = answer.trim();
+    if (!text) throw new ConflictError("The answer is empty.");
+    const message = this.repo.insertMessage({ task_id: taskId, from_task_id: null, from_run_id: null, body: `Answer to "${question.text}": ${text}` });
+    this.bus.publish({ type: "message.posted", message });
+    return this.setTask(taskId, { questions: task.questions.map((q) => (q.id === questionId ? { ...q, answer: text, answered_at: nowIso() } : q)) });
   }
 
   /** Runs `fn` while the task counts as busy, so no queue/chat/approve can interleave with it. */
@@ -386,7 +448,7 @@ export class TaskRunner {
         );
       }
     }
-    // A supervised task on its own branch needs a worktree too, and a repository to make one in (D203).
+    // A supervised task on its own branch needs a worktree too, and a repository to make one in (D234).
     if (task.mode === "supervised" && task.own_branch && project.policy.worktrees === "forbidden") {
       throw new PolicyError(`Project "${project.name}" forbids worktrees (policy.worktrees = "forbidden"). Turn off “Work on its own branch” for this task, or allow worktrees on the project.`);
     }
@@ -431,12 +493,12 @@ export class TaskRunner {
     }
     this.assertRunnable(task, project);
     this.startOpts.set(taskId, opts);
-    // The card's note is cleared below, so a Reject note is kept here for every stage of the new run.
-    // It used to be cleared first and read after, so "Why this was sent back" never reached a prompt.
-    const rejected = task.status === "backlog" && task.note && task.note !== DISCARDED_NOTE ? task.note : null;
-    if (rejected) this.rejectNotes.set(taskId, rejected);
-    else this.rejectNotes.delete(taskId);
-    const updated = this.setTask(taskId, { status: "queued", error: null, note: null });
+    // The block is over once the task is sent again; the next prompt still says what stopped it.
+    if (task.blocked) this.priorBlocks.set(taskId, task.blocked);
+    // Queuing clears the card's note, so a Reject's reason is carried to the prompt here — before,
+    // it was wiped before any run could read it (D196). A bare "work discarded" is not a reason.
+    if (task.status === "backlog" && task.note?.trim() && task.note !== "work discarded") this.sentBack.set(taskId, task.note.trim());
+    const updated = this.setTask(taskId, { status: "queued", error: null, note: null, blocked: null });
     this.queue.enqueue({ taskId, projectId: project.id, force });
     return updated;
   }
@@ -459,6 +521,9 @@ export class TaskRunner {
         installed ? `Autonomous mode needs a git repository; ${project.path} is not one.` : "Autonomous mode needs git, and git is not installed on this computer. Open Setup to install it.",
       );
     }
+    // A checkout of a big repository takes a minute — measured 61 s for 40k files, and 47 s outside
+    // CloudSync, so it is the size, not the sync. Say so instead of sitting silently in Queued (D192).
+    this.setTask(task.id, { summary: "Preparing its worktree — a fresh checkout of the repository, up to a minute on a big one" });
     const wt = await this.git.addWorktree(project.path, task.id);
     // baseSha is null when an existing branch was re-attached: keep the stored base so the diff stays right.
     this.setTask(task.id, { branch: wt.branch, worktree_path: wt.path, base_sha: wt.baseSha ?? task.base_sha });
@@ -511,10 +576,11 @@ export class TaskRunner {
       let { task, project } = this.load(taskId);
       this.assertRunnable(task, project);
       const cwd = await this.ensureCwd(task, project);
+      if (task.mode === "supervised") await this.snapshotCheckout(taskId, cwd);
       // Reserved before the first prompt is written, so the prompt can name it.
       await this.portFor(taskId);
       let switches = 0;
-      // Stage index → automatic continues used after hitting the turn cap (D201).
+      // Stage index → automatic continues used after hitting the turn cap (D232).
       const continued = new Map<number, number>();
       let continuing = false;
 
@@ -532,7 +598,7 @@ export class TaskRunner {
           this.pauseForCost(taskId, spent, capped, "this task reached its ceiling");
           return;
         }
-        // Its provider is known to be out: carry on where Settings say, or wait without calling it (D194).
+        // Its provider is known to be out: carry on where Settings say, or wait without calling it (D225).
         const pre = this.preflightProvider(task, i);
         if (pre === "paused") return;
         if (pre === "switched") {
@@ -550,6 +616,8 @@ export class TaskRunner {
         const gated = stage.stage === "code" || stage.stage === "custom";
         const prompt = continuing ? CONTINUE_PROMPT : await this.stagePromptFor(task, i, project, cwd);
         continuing = false;
+        // What stopped the last attempt is for the stage that picks up from it, not for every one after.
+        this.priorBlocks.delete(taskId);
         this.handovers.delete(taskId);
         const outcome = await this.runQuery({
           task, project, run, cwd, ctl,
@@ -570,11 +638,29 @@ export class TaskRunner {
           });
           return;
         }
+        // A text-only or CLI review cannot call the board tool; its verdict line says the same thing.
+        const verdict = verdictOf(this.repo.getRun(run.id)?.result_md);
+        if (outcome.ok && verdict === "BLOCKED" && !this.repo.getTask(taskId)?.blocked) {
+          this.setTask(taskId, {
+            blocked: { stage_index: i, reason: verdictReason(this.repo.getRun(run.id)?.result_md), needs: "input", ask: null, source: "agent", mode: task.mode, created_at: nowIso() },
+          });
+        }
+        const blocked = this.repo.getTask(taskId)?.blocked;
+        const isBlocked = blocked?.stage_index === i && !ctl.stopped;
         if (usesWorktree(task)) {
-          await this.commitWorktree(task, `kanban(${stage.stage})${outcome.ok ? "" : " [failed]"}: ${task.title}`);
+          await this.commitWorktree(task, `kanban(${stage.stage})${isBlocked ? " [blocked]" : outcome.ok ? "" : " [failed]"}: ${task.title}`);
+        }
+        // Before any outcome is published: whoever acts on "review" must find the list already there.
+        await this.recordTouched(taskId);
+        // "Blocked" is not a pass: the stage keeps its report, but it is not counted as done, so the
+        // next stage never runs on it and Retry starts here again (D184).
+        if (isBlocked) {
+          this.setRun(run.id, { status: "failed", error: `blocked: ${blocked.reason}` });
+          this.setTask(taskId, { status: "failed", error: `Blocked at stage #${i + 1} (${stage.stage}): ${blocked.reason}` });
+          return;
         }
         if (!outcome.ok) {
-          // Out of turns is not a fault either: the session is intact, so carry on in it (D201).
+          // Out of turns is not a fault either: the session is intact, so carry on in it (D232).
           const used = continued.get(i) ?? 0;
           const sessionId = this.repo.getRun(run.id)?.session_id;
           if (outcome.turnLimit && !ctl.stopped && sessionId && res.adapter.canResume && used < this.repo.getSettings().autoContinueTurns) {
@@ -589,13 +675,13 @@ export class TaskRunner {
             i--;
             continue;
           }
-          // Money, not a fault: wait for Continue or Stop rather than fail (D185).
+          // Money, not a fault: wait for Continue or Stop rather than fail (D216).
           if (outcome.budgetStop) {
             this.pauseForCost(taskId, this.repo.taskCost(taskId), this.taskCeiling(task), outcome.error ?? "the stage reached its ceiling");
             return;
           }
           // Ran out rather than went wrong: carry on elsewhere (the stage runs again, in this loop), or
-          // wait for it to come back, or ask. Claude's windows and a provider's are handled alike (D194).
+          // wait for it to come back, or ask. Claude's windows and a provider's are handled alike (D225).
           if (!ctl.stopped) {
             // Three moves in one go is a merry-go-round, not a plan: after that it waits or asks.
             const mayMove = switches < 3;
@@ -636,7 +722,7 @@ export class TaskRunner {
             this.setTask(taskId, { status: "failed", error: "stopped by user" });
             return;
           }
-          // Plan approval (D200): nothing is written until the human has read the plan.
+          // Plan approval (D231): nothing is written until the human has read the plan.
           const plan = this.repo.getRun(run.id)?.result_md ?? "";
           if (i + 1 < task.pipeline.length && plan.trim() && this.needsPlanApproval(this.repo.getTask(taskId)!)) {
             this.setTask(taskId, {
@@ -648,11 +734,10 @@ export class TaskRunner {
           }
         }
         // A review stage that asked for changes must not look like a pass.
-        const verdict = verdictOf(this.repo.getRun(run.id)?.result_md);
         if (stage.stage === "review" && verdict === "CHANGES_NEEDED") {
           this.setTask(taskId, {
             status: "failed",
-            error: `Review asked for changes — Retry from stage #${i} (code) after reading the review. ${firstLines(this.repo.getRun(run.id)?.result_md, 3)}`,
+            error: `Review asked for changes — Retry from stage #${i} (code) after reading the review. ${verdictReason(this.repo.getRun(run.id)?.result_md)}`,
           });
           return;
         }
@@ -660,12 +745,16 @@ export class TaskRunner {
       this.setTask(taskId, ctl.stopped ? { status: "failed", error: "stopped by user" } : { status: "review" });
     } finally {
       this.pipelines.delete(taskId);
+      this.priorBlocks.delete(taskId);
+      this.checkoutStamps.delete(taskId);
+      // Kept while the task still has stages to go (a debate gate, a limit pause): cleared once it lands in review.
+      if (this.repo.getTask(taskId)?.status === "review") this.sentBack.delete(taskId);
     }
   }
 
   /**
    * The stage as it actually runs. A live task's review runs on Settings → liveReviewModel through
-   * your Claude login, at high effort or more, whatever its pipeline says (D202): in a real run a
+   * your Claude login, at high effort or more, whatever its pipeline says (D233): in a real run a
    * Sonnet review approved twice with real defects in a live-system change.
    */
   private stageAt(task: Task, i: number): Stage {
@@ -677,7 +766,7 @@ export class TaskRunner {
     return { stage: "review", model, effort, ...(stage.prompt ? { prompt: stage.prompt } : {}) };
   }
 
-  /** Whether the task waits for the human after its plan: its own choice, else Settings; always when live (D200, D202). */
+  /** Whether the task waits for the human after its plan: its own choice, else Settings; always when live (D231, D233). */
   private needsPlanApproval(task: Task): boolean {
     if (task.live) return true;
     return task.plan_approval ?? this.repo.getSettings().planApproval;
@@ -819,7 +908,9 @@ export class TaskRunner {
       earlierResults,
       skills: task.skills,
       messages,
-      rejectNote: this.rejectNotes.get(task.id) ?? null,
+      rejectNote: this.sentBack.get(task.id) ?? null,
+      priorBlock: this.priorBlocks.get(task.id) ?? null,
+      foreignChanges: task.mode === "supervised" ? task.checkout?.dirtyAtStart ?? [] : [],
       verificationFailure: this.verifyFailures.get(task.id) ?? null,
       handover: this.handovers.get(task.id) ?? null,
       verifyCommand: project.env.verifyCommand,
@@ -851,6 +942,42 @@ export class TaskRunner {
     if (!off.size) return undefined;
     const all = scanSkills({ projectPath: project.path }).map((s) => s.name);
     return all.filter((name) => !off.has(name) || task.skills.includes(name));
+  }
+
+  /**
+   * A supervised run shares your checkout with whatever else is changing it — another session, you.
+   * Note what was already uncommitted, so the run is told to leave it alone and the card can say which
+   * files are this task's (D204). Files an earlier attempt of this same task changed are its own.
+   */
+  private async snapshotCheckout(taskId: string, cwd: string): Promise<void> {
+    try {
+      // A look on disk first: most folders that are not a repository never need a git process at all.
+      if (!existsSync(join(cwd, ".git")) || !(await this.git.isGitRepo(cwd))) return;
+      const own = new Set(this.repo.getTask(taskId)?.checkout?.touched ?? []);
+      const files = await this.git.statusFiles(cwd);
+      this.checkoutStamps.set(taskId, { cwd, own, stamps: new Map(files.slice(0, 500).map((f) => [f, fileStamp(join(cwd, f))])) });
+      this.setTask(taskId, { checkout: { at: nowIso(), dirtyAtStart: files.filter((f) => !own.has(f)).slice(0, 200), touched: null } });
+    } catch (err) {
+      // A checkout the board cannot read is no reason to stop the task.
+      this.log(taskId, `[board] could not read the checkout's status: ${String(err)}\n`);
+    }
+  }
+
+  /**
+   * Files added or changed since the snapshot: this task's, or changed by someone else while it ran.
+   * Called after every stage, each time measured from the start of the run.
+   */
+  private async recordTouched(taskId: string): Promise<void> {
+    const before = this.checkoutStamps.get(taskId);
+    const task = this.repo.getTask(taskId);
+    if (!before || !task?.checkout) return;
+    try {
+      const now = await this.git.statusFiles(before.cwd);
+      const touched = now.filter((f) => before.own.has(f) || !before.stamps.has(f) || before.stamps.get(f) !== fileStamp(join(before.cwd, f)));
+      this.setTask(taskId, { checkout: { ...task.checkout, touched: touched.slice(0, 200) } });
+    } catch (err) {
+      this.log(taskId, `[board] could not read the checkout's status: ${String(err)}\n`);
+    }
   }
 
   private async commitWorktree(task: Task, message: string) {
@@ -897,15 +1024,39 @@ export class TaskRunner {
     const autonomous = task.mode === "autonomous";
     // The board's own browser, one per session; see browser.ts for why not the Playwright plugin's.
     const browserDir = join(tmpdir(), "claude-kanban-browser", run.id);
+    // Outside its worktree an autonomous run may read only these: this task's attachments, its own
+    // screenshots, and the skills Claude loads (D187).
+    const readRoots = [join(settings.stateDir, "attachments", task.id), browserDir, join(homedir(), ".claude", "skills"), join(homedir(), ".claude", "plugins")];
+    // An autonomous run that keeps hitting the sandbox is stopped and marked blocked, not left to
+    // hunt for a way round it (D186).
+    let refusals = 0;
+    let blockedByBoard: string | null = null;
+    const refuse = (message: string): { behavior: "deny"; message: string } => {
+      refusals++;
+      this.log(run.id, `\n[board] sandbox refusal ${refusals}: ${message}\n`);
+      if (refusals >= AUTO_BLOCK_AFTER && !blockedByBoard) {
+        blockedByBoard = `The sandbox refused ${refusals} attempts to reach outside this task's folder. Last one: ${message}`;
+        this.setTask(task.id, {
+          blocked: { stage_index: run.stage_index, reason: blockedByBoard, needs: "supervised", ask: null, source: "board", mode: task.mode, created_at: nowIso() },
+          summary: "Blocked: kept trying to reach outside its folder",
+        });
+        abort.abort();
+      }
+      return { behavior: "deny", message: message + escalationHint(refusals) };
+    };
     // The live view: the browser also opens a debugging port the board watches (browserWatch.ts).
     const watchPort = settings.browserChecks && settings.liveView ? await freePort().catch(() => undefined) : undefined;
     if (watchPort) this.browserWatch.begin(task.id, run.id, watchPort);
     // Board tools are always allowed; handled here rather than via allowedTools so nothing shadows this callback.
     const canUseTool: CanUseTool = async (toolName, input, o) => {
       if (toolName.startsWith("mcp__board__")) return { behavior: "allow", updatedInput: input };
-      // A question for you, in both modes: it waits on a card like an approval (and, if Settings say
-      // so, Claude decides for itself after a while). Before the gate, which would refuse it.
-      if (toolName === QUESTION_TOOL) return this.askApproval(run, task.id, toolName, input, o);
+      // A question for you: in a supervised run it waits on a card like an approval (and, if Settings
+      // say so, Claude decides for itself after a while). Before the gate, which would refuse it.
+      // An autonomous run has nobody watching, so it asks with board_ask and carries on (D239).
+      if (toolName === QUESTION_TOOL) {
+        if (!autonomous) return this.askApproval(run, task.id, toolName, input, o);
+        return { behavior: "deny", message: "Nobody is watching this autonomous run, so a question would stall it. Put it on the card with board_ask (with the default you carry on with) and carry on." };
+      }
       // The blocklist comes first, in both modes: these are the commands where an approval card
       // would just be a chance to click the wrong button.
       const command = String((input as { command?: unknown }).command ?? "");
@@ -927,19 +1078,45 @@ export class TaskRunner {
           this.log(run.id, `\n[board] ${note}\n  ${command}\n`);
           return { behavior: "deny", message: note };
         }
-        // Reading needs no card: a supervised card is for what changes something (D197).
-        if (!autonomous && freeShellRead(toolName, input, settings.autoAllowReadCommands)) {
-          this.log(run.id, `\n[board] read-only command, run without a card:\n  ${command}\n`);
-          return { behavior: "allow", updatedInput: input };
-        }
       }
       // Browser tools have their own rules: looking at a local page is not a write (docs/DECISIONS.md D128).
       const browser = browserDecision(toolName, input, autonomous, a.cwd, browserDir);
       if (browser?.behavior === "allow") return { behavior: "allow", updatedInput: browser.input };
-      if (browser?.behavior === "deny") return browser;
+      if (browser?.behavior === "deny") return autonomous ? refuse(browser.message) : browser;
       if (browser?.behavior === "ask") return this.askApproval(run, task.id, toolName, browser.input, o);
-      return autonomous ? autonomousGate(toolName, input, a.cwd) : this.askApproval(run, task.id, toolName, input, o);
+      if (!autonomous) {
+        // A command that can only read is not a write: no card, but a line in the transcript (D202).
+        // Likewise a read of the skills Claude loads, this task's attachments or its screenshots — the
+        // same folders an autonomous run may read. Anything else outside the project still asks.
+        const readsKnownFolder = READ_ONLY_TOOLS.has(toolName) && !readViolation(toolName, input, a.cwd, readRoots) && !credentialRisk(toolName, input);
+        if (settings.autoAllowReadOnly && (readsKnownFolder || ((toolName === "Bash" || toolName === "PowerShell") && isReadOnlyShell(command, a.cwd)))) {
+          const what = command || String((input as { file_path?: unknown; path?: unknown }).file_path ?? (input as { path?: unknown }).path ?? toolName);
+          const event = this.repo.insertEvent(run.id, "board:auto-allowed", { type: "auto_allowed", tool: toolName, command: what });
+          this.bus.publish({ type: "event", runId: run.id, taskId: task.id, event });
+          return { behavior: "allow", updatedInput: input };
+        }
+        return this.askApproval(run, task.id, toolName, input, o);
+      }
+      const decision = autonomousGate(toolName, input, a.cwd, readRoots);
+      // A question nobody can answer is not the sandbox saying no: it gets its own message, uncounted.
+      if (decision.behavior === "deny" && toolName !== "AskUserQuestion") return refuse(decision.message);
+      return decision;
     };
+    // Reads can be allowed before canUseTool is ever asked, so the read rule is also a hook: hooks
+    // run for every tool call, whatever the permission mode decided (D187).
+    const readGuard: HookCallbackMatcher[] = [
+      {
+        hooks: [
+          async (hookInput) => {
+            const h = hookInput as { tool_name?: string; tool_input?: Record<string, unknown> };
+            const why = readViolation(h.tool_name ?? "", h.tool_input ?? {}, a.cwd, readRoots);
+            if (!why) return {};
+            const { message } = refuse(why);
+            return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: message } };
+          },
+        ],
+      },
+    ];
     const chrome = settings.chromeInSupervised && !autonomous;
     const steer = this.steerHooks(task.id, run.id);
 
@@ -959,8 +1136,8 @@ export class TaskRunner {
       permissionMode: autonomous ? "acceptEdits" : "default",
       canUseTool,
       hooks: {
-        ...(autonomous ? {} : { PreToolUse: forceAsk(settings.autoAllowReadCommands) }),
-        // A message typed while the stage runs is handed over at the next tool call (D184).
+        PreToolUse: autonomous ? readGuard : forceAsk(settings.autoAllowReadOnly, a.cwd),
+        // A message typed while the stage runs is handed over at the next tool call (D215).
         PostToolUse: steer.PostToolUse,
         // A waiting message holds the turn open first; then the deterministic gate: a code stage
         // can't end while the project's own check fails.
@@ -1135,7 +1312,11 @@ export class TaskRunner {
       }
     }
 
-    const error = a.ctl.stopped ? "stopped by user" : result && !result.ok ? result.error : result ? null : thrown ?? "run ended without a result";
+    const error = a.ctl.stopped
+      ? "stopped by user"
+      : blockedByBoard
+        ? `blocked: ${blockedByBoard}`
+        : result && !result.ok ? result.error : result ? null : thrown ?? "run ended without a result";
     const prev = this.repo.getRun(run.id)!;
     const add = a.accumulate ? prev : { cost_usd: 0, input_tokens: 0, output_tokens: 0 };
     const finished = this.repo.updateRun(run.id, {
@@ -1152,7 +1333,7 @@ export class TaskRunner {
   }
 
   /**
-   * Live steering (D184): a message posted while a stage runs is handed to Claude at its next tool
+   * Live steering (D215): a message posted while a stage runs is handed to Claude at its next tool
    * call as extra context, and a turn is not allowed to end while one is still waiting. The cursor
    * advances synchronously before any await, so parallel tool calls cannot deliver a message twice.
    */
@@ -1720,7 +1901,7 @@ export class TaskRunner {
   }
 
   /**
-   * Money ran out: pause for a decision rather than fail (D185). Unlike a usage limit there is no
+   * Money ran out: pause for a decision rather than fail (D216). Unlike a usage limit there is no
    * resume time — the person picks Continue (one more stage ceiling) or Stop. The session is kept,
    * so nothing done so far is redone.
    */
@@ -1754,7 +1935,7 @@ export class TaskRunner {
     return this.setTask(taskId, { status: "failed", pause_reason: null, resume_at: null, error: task.note ?? "Stopped while paused.", note: null });
   }
 
-  // ---------------------------------------------------------------- a provider that ran out (D194)
+  // ---------------------------------------------------------------- a provider that ran out (D225)
 
   private providerById(id: string | null | undefined): Provider | undefined {
     return id && id !== ANTHROPIC_PROVIDER_ID ? this.repo.getSettings().providers.find((p) => p.id === id) : undefined;
@@ -1981,7 +2162,7 @@ export class TaskRunner {
     return this.queueTask(moved.id, { fromStage: i });
   }
 
-  /** Every enabled provider's usage: what it says is left, what this board sent there, and whether it is out (D195). */
+  /** Every enabled provider's usage: what it says is left, what this board sent there, and whether it is out (D226). */
   async providerUsage(force = false): Promise<ProviderUsage[]> {
     const now = Date.now();
     const h5 = this.repo.providerTotals(new Date(now - 5 * 3_600_000).toISOString());
@@ -2070,7 +2251,7 @@ export class TaskRunner {
    * The queue's veto. While a limit window is open, Claude work waits for it; work delegated to
    * another provider carries on, which is the whole point of having delegated it. The same goes the
    * other way: work for a provider that is out until a known time waits for it. Either way, a
-   * fallback in Settings means there is somewhere to go, so it starts and moves over (D194).
+   * fallback in Settings means there is somewhere to go, so it starts and moves over (D225).
    */
   private mayStartNow(taskId: string): boolean {
     const task = this.repo.getTask(taskId);
@@ -2185,7 +2366,7 @@ export class TaskRunner {
   }
 
   /** Answer a question card: question text → the option label(s) you chose, or what you typed. */
-  answerQuestion(id: string, answers: Record<string, string>): Approval {
+  answerApproval(id: string, answers: Record<string, string>): Approval {
     const approval = this.repo.getApproval(id);
     if (!approval) throw new NotFoundError(`No question ${id}`);
     if (approval.tool_name !== QUESTION_TOOL) throw new ConflictError("That card is an approval, not a question.");
@@ -2238,7 +2419,7 @@ export class TaskRunner {
     const { task, project } = this.load(taskId);
     const live = this.active.get(taskId);
     if (live) {
-      // The stage is running: keep the message and let the hooks hand it over at the next step (D184).
+      // The stage is running: keep the message and let the hooks hand it over at the next step (D215).
       if (!live.steerable) throw new ConflictError("This stage runs on another provider, which cannot take a message mid-run. Wait for it to finish, or Stop it.");
       this.repo.insertMessage({ task_id: taskId, from_task_id: null, from_run_id: null, body: text });
       const run = this.repo.getRun(live.runId)!;
@@ -2346,7 +2527,7 @@ export class TaskRunner {
     const { task } = this.load(taskId);
     if (this.isBusy(taskId)) throw new ConflictError("Task is still running.");
     if (!["review", "failed"].includes(task.status) && !task.plan_gate) throw new ConflictError(`Cannot reject a task in status "${task.status}".`);
-    return this.setTask(taskId, { status: "backlog", note, plan_gate: null });
+    return this.setTask(taskId, { status: "backlog", note, plan_gate: null, blocked: null });
   }
 
   async discardTask(taskId: string): Promise<Task> {
@@ -2356,8 +2537,31 @@ export class TaskRunner {
         await this.git.removeWorktree(project.path, task.id, { deleteBranch: "force" });
       }
       this.ports.delete(taskId);
-      return this.setTask(taskId, { status: "backlog", branch: null, worktree_path: null, base_sha: null, note: DISCARDED_NOTE, plan_gate: null });
+      // Discarding after a Reject must not erase why it was rejected: the note is the only record of it.
+      const note = task.note?.trim() && task.note !== "work discarded" ? `${task.note.trim()} — work discarded` : "work discarded";
+      return this.setTask(taskId, { status: "backlog", branch: null, worktree_path: null, base_sha: null, note, plan_gate: null, blocked: null });
     });
+  }
+
+  /**
+   * "Switch to supervised and retry": for a task an autonomous run could not do from its worktree.
+   * The worktree only holds work done without the access the task needed, so it is discarded; the
+   * task then re-runs from the stage that was blocked, in the main checkout, every write approved.
+   * Earlier stages that finished (the plan) are kept and handed on (D185).
+   */
+  async escalateToSupervised(taskId: string): Promise<Task> {
+    await this.hold(taskId, async () => {
+      const { task, project } = this.load(taskId);
+      if (!["failed", "review", "backlog"].includes(task.status)) throw new ConflictError(`Cannot switch a task in status "${task.status}".`);
+      if (task.mode === "supervised") throw new ConflictError("This task is already supervised.");
+      if (task.branch || task.worktree_path) await this.git.removeWorktree(project.path, task.id, { deleteBranch: "force" });
+      this.ports.delete(taskId);
+      this.setTask(taskId, { mode: "supervised", branch: null, worktree_path: null, base_sha: null, plan_gate: null });
+    });
+    const task = this.repo.getTask(taskId)!;
+    const from = task.blocked?.stage_index ?? this.defaultStart(task).fromStage;
+    // A fresh session: the old one lived in a worktree that no longer exists.
+    return this.queueTask(taskId, { fromStage: Math.min(from, Math.max(0, task.pipeline.length - 1)) });
   }
 
   async diff(taskId: string) {
@@ -2398,7 +2602,12 @@ export class TaskRunner {
         const labels = result.labels.filter((l) => knownLabels.includes(l));
         // The sized pipeline is only ever a suggestion: a wrong guess here spends real money, so
         // accepting it is a decision the human makes. Rejecting keeps the project default.
-        const sized = settings.autoSizing ? sizedPipeline(result.sizing, settings.tiers) : null;
+        // Triage runs in the background: by the time it answers the task may already be running, and
+        // a pipeline suggestion shown under a finished run is noise (D191).
+        const sized = settings.autoSizing && fresh.status === "backlog" ? sizedPipeline(result.sizing, settings.tiers) : null;
+        // Live-system work is proposed as a live task — one record of it, with plan approval and a
+        // review that checks the live system itself — rather than as a mode switch (D241).
+        const toLive = result.live_access && !fresh.live && fresh.status === "backlog";
         this.setTask(taskId, {
           ...(confident ? { type: result.type, labels } : {}),
           triaged_at: nowIso(),
@@ -2408,6 +2617,14 @@ export class TaskRunner {
             labels,
             confidence: result.confidence,
             ...(sized ? { pipeline: sized, sizing_reason: result.sizing?.reason || "" } : {}),
+            ...(toLive
+              ? {
+                  live: true,
+                  live_reason:
+                    `${result.live_access!.reason || "It changes a live system."} A live task waits for your OK on its plan, and its review reads the live system back.` +
+                    (fresh.mode === "autonomous" ? " An autonomous run is sandboxed, so if it needs to reach that system it will stop and ask to run supervised." : ""),
+                }
+              : {}),
           },
         });
       }
@@ -2419,16 +2636,27 @@ export class TaskRunner {
    * Applies a suggestion the human accepted. Split out from triage on purpose: nothing the model
    * proposed about how a task runs takes effect until someone presses Accept.
    */
-  acceptSuggestion(taskId: string, what: { fields?: boolean; pipeline?: boolean }): Task {
+  acceptSuggestion(taskId: string, what: SuggestionParts): Task {
     const { task } = this.load(taskId);
     const s = task.suggestion;
     if (!s) throw new ConflictError("There is nothing suggested for this task.");
-    if (what.pipeline && this.isBusy(taskId)) throw new ConflictError("Cannot change the pipeline while the task is queued or running.");
+    if ((what.pipeline || what.mode || what.live) && this.isBusy(taskId)) throw new ConflictError("Cannot change the pipeline, mode or live flag while the task is queued or running.");
+    if (what.mode && s.mode && s.mode !== task.mode && (task.branch || task.worktree_path)) {
+      throw new ConflictError(`This task has work on ${task.branch ?? "its worktree"}; approve or discard it before changing mode.`);
+    }
     return this.setTask(taskId, {
       ...(what.fields ? { type: s.type ?? task.type, priority: s.priority ?? task.priority, labels: [...new Set([...task.labels, ...(s.labels ?? [])])] } : {}),
       ...(what.pipeline && s.pipeline?.length ? { pipeline: s.pipeline } : {}),
-      suggestion: null,
+      ...(what.mode && s.mode ? { mode: s.mode } : {}),
+      ...(what.live && s.live ? { live: true } : {}),
+      suggestion: withoutParts(s, what),
     });
+  }
+
+  /** "Keep default" for one part of a suggestion; the other parts stay on offer. */
+  dismissSuggestion(taskId: string, what: SuggestionParts): Task {
+    const { task } = this.load(taskId);
+    return this.setTask(taskId, { suggestion: task.suggestion ? withoutParts(task.suggestion, what) : null });
   }
 
   /** Look at an attached image once with the cheap vision model, so the stages never have to. */

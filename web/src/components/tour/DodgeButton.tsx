@@ -74,7 +74,7 @@ export function DodgeButton({ onClose }: { onClose: () => void }) {
       {tries > 0 ? (
         <div
           key={tries}
-          className="kb-bubble absolute right-0 top-[calc(100%+8px)] z-10 w-max max-w-[250px] rounded-lg border border-ink-600 bg-ink-950 px-3 py-2 text-[12px] leading-snug text-ink-200 shadow-xl shadow-black/60"
+          className="kb-bubble absolute right-0 top-[calc(100%+8px)] z-10 w-max max-w-[250px] rounded-lg border border-ink-600 bg-ink-950 px-3 py-2 text-[12px] leading-snug text-ink-200 kb-raise-sm"
         >
           <span className="absolute -top-[5px] right-5 h-2.5 w-2.5 rotate-45 border-t border-l border-ink-600 bg-ink-950" />
           {tired ? (
