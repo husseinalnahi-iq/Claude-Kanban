@@ -27,9 +27,9 @@ lands safely, and an honest record of what everything cost.
 | “Claude guessed at a choice only I could make.” | When a decision really needs you, Claude **asks**: the card shows *asks you* with options to pick. It waits for your answer, or decides after a time you set. |
 | “I want Claude to work while I sleep.” | **Schedule** a card for 2 AM, for when your limit resets, or every chosen day. The computer is kept awake while work is waiting, and you wake up to it in Review. |
 | “I have no idea what that cost or where the time went.” | Every task shows its **cost, tokens and time**; the **Dashboard** adds it all up. |
-| “A big job is too much for one prompt.” | **Improve** turns a rough idea into a clear spec and splits it into subtasks with dependencies; the board runs them in the right order. |
+| “A big job is too much for one prompt.” | **Improve** turns a rough idea into a clear spec and splits it into subtasks with dependencies; the board runs them in the right order. Chain any tasks yourself with **Starts after**: queue them all, and each starts when the ones before it are done, with their results. |
 | “Setting all this up is fiddly.” | The **Setup** page checks your computer and fixes what is missing, mostly in one click. |
-| “The page needs a hero image and I have none.” | A task **makes the pictures it needs** with a free image model — no account, no card — and saves them into the project. Your own Claude Code can have the same tool. |
+| “The page needs a hero image and I have none.” | Once Codex is linked, a task **makes the pictures it needs** on the ChatGPT plan you already pay for, and saves them into the project. Your own Claude Code can have the same tool. |
 
 | Nothing risky happens without you | Free AI on your own computer, set up step by step |
 |---|---|
@@ -117,10 +117,27 @@ or focus, and **Versions** lists every version to preview or reuse.
 ## Ask about your project
 
 Press **✦ Chat** in the top bar (or the **c** key). A panel slides in beside the board: ask how
-something works, what to do next, or describe a feature. Claude reads your project to answer, and
-when you want something built it writes a **task card** for it — a chip under the reply lets you
-**open** or **start** it, or ask it to schedule the card for tonight. It never changes code from the
-chat; the work still goes through the card, with your approvals and review.
+something works, what to do next, or ask for something to be done. Claude answers from your project
+when it can; for anything else it makes a **task card** and says so — it never tells you what it
+cannot do.
+
+- **"Get me the latest purchase order."** — a lookup becomes an **answer card**: one step on Sonnet
+  that reads and reports, changes nothing, runs supervised, and starts at once. Related lookups share
+  one card. When it finishes, the answer is posted into the chat by itself, and Claude's next reply
+  already knows it.
+- **"Make the header sticky."** — a change becomes a card on the board's usual stages. Claude says how
+  it will run, **supervised** (asks you before each change; needed for anything that reaches a live
+  system) or **autonomous** (on its own branch, lands when you approve), and waits for your go-ahead.
+- **"Use Sonnet, high effort, for the code."** — name a model and effort for any stage, in words
+  (opus, sonnet, haiku, "Sonnet 5.5"), when the card is made or later while it is in Backlog.
+
+Each card shows up in the chat as it is now, not as it was when the message was written: queued,
+coding 3/7, needs you, done. While it is in Backlog you can switch its mode, change a stage's model,
+take or turn down Claude's suggestions (is it a live system? which models?) and press **▶ Start**.
+A command waiting for your OK shows **Allow / Deny** right there; a failed card shows **Retry**; a plan
+waiting for you has **Read the plan**; a question it asks comes with its options as buttons. The
+cards from the chat that are still going sit above the message box, so one waiting on you is never
+scrolled out of sight.
 
 It also follows your tasks and talks to them for you:
 
@@ -131,13 +148,18 @@ It also follows your tasks and talks to them for you:
   its session up again with them.
 - **"Answer it: the second option."**, **"stop it"**, **"run the failed one again"** — it does that too.
 
-Approving, landing or discarding a task's work stays yours, on the board: the chat never does those.
+Approving, landing or discarding a task's work stays yours: Claude in the chat never does those.
 
 - **Several chats** per project: **+ New** starts one, the title at the top switches between them,
   and **archive** tucks one away (restore or delete it from *Archived*).
 - It uses **Sonnet at medium effort** by default — a good balance of quality and price for questions.
   Switch model or effort per chat at the bottom of the panel, or change the default in Settings →
   *Side chat*. Each chat shows what it has cost.
+- **Other models in the chat**: a provider that runs Claude Code on its own model (GLM, Kimi, Qwen,
+  MiniMax, OpenRouter, Ollama, LM Studio — Settings → Providers) shows in the chat's model list after
+  Claude. Switching starts a fresh conversation that is handed the last 20 messages, so nothing said is
+  lost. Codex and Gemini cannot run the chat (they are not Claude Code), but cards the chat makes can
+  use them.
 
 ## Watch a task use the browser
 
@@ -201,7 +223,9 @@ Tick **Touches a live system** on a task that changes real data — a production
 deployed site. It gets a **prod** chip, always waits for plan approval, every stage is told to dry-run
 and read back each live change, and its review runs on *Settings → Review model for live tasks* (Opus by
 default) and checks the live system itself instead of trusting the summary. When a new task reads like
-live-system work, the board offers **Mark it live** on the card; nothing changes until you click it.
+live-system work, the board offers **Mark it live** on the card; nothing changes until you click it. A task that
+only *reads* a live system — a lookup, a count, a report — is not offered as live and is not pushed to the
+strongest model: reading is not changing.
 
 The **Plan** tab of every task shows the plan the code stage worked to, next to the code stage's own
 *Plan steps* checklist — each step done, changed or skipped, and why.
@@ -527,6 +551,38 @@ Three ways to reach another model, each a different trade-off:
   run autonomously in a worktree, because the board cannot approve or block what another CLI does. Each
   CLI gets an environment allowlist plus its own key, never the board's other secrets.
 
+**Codex, on your ChatGPT plan or an API key.** Two presets in Settings → Providers:
+
+- **Codex · ChatGPT subscription** runs `codex exec` on the account Codex is signed in to (Plus, Pro,
+  Business…): no API key and no per-token bill — runs count against your plan's Codex limits, and one
+  that hits them waits for the reset. The board passes Codex **no** API key at all, even one set on the
+  computer, so it cannot quietly bill an API account instead. Sign in once in the Codex app or with
+  `codex login`; the board never sees your password.
+- **Codex · OpenAI API key (pay per use)** passes the key you store as `CODEX_API_KEY` — the variable
+  `codex exec` reads — and bills your OpenAI API account.
+
+**Linking it.** If Codex is already on the computer, the **Setup** page (and the top of Settings →
+Providers) says so: which version, and which account it is signed in to. One button does the next step:
+
+- **Sign in** opens Codex's own sign-in in a terminal (it opens your browser); the row updates by
+  itself when you are done. The board never reads Codex's sign-in files.
+- **Sign in with ChatGPT**, in amber, when Codex is signed in with an **API key** — the
+  "subscription" entry would otherwise bill your API account.
+- **Use it** puts Codex on the board: the subscription entry, the plan-debate critic on Codex at
+  **high** effort, and pictures made by Codex (the default picture maker, used only once Codex is
+  linked). It only moves settings you have not changed, and lists what it moved.
+
+The board finds Codex on PATH (`npm i -g @openai/codex`), or the Codex app's own command on Windows and
+on a Mac (`Codex.app` or `ChatGPT.app`, in Applications).
+
+**Its models, live.** The picker lists the models your account offers right now ("On your subscription
+· no per-token bill"), asked from Codex itself (free, no model call), each with the effort levels it
+takes — effort is set per stage, for the critic and for tiers. When OpenAI adds a newer model of the
+same family (GPT-6.1-Sol after GPT-6-Sol; Luna, Terra and Sol each move on their own), the board's
+Codex picks follow it, as they do for Claude (*Follow newer models*); tasks already made keep theirs. A
+model OpenAI refuses to your account is marked in the list. A read-only Codex stage that changes a file
+fails; uncommitted work you already had in a supervised checkout does not count against it.
+
 **Free AI on this computer.** Settings → Providers opens with a step-by-step guide to LM Studio or
 Ollama for people who have never run a model locally: download links, where to click, which models
 suit this computer (it reads the graphics card, memory and free disk), and a one-click *Add to the
@@ -545,6 +601,12 @@ and the context size. Type to filter, or type any id to use it as it is. Other p
 models you listed. A picked model the provider's live list does not have (a typo, or one you removed)
 gets an amber ⚠ on the picker.
 The provider dropdown's last entry, **+ Add a provider**, opens Settings → Providers in a new tab.
+
+**Model lists** (Settings → Model lists) keep the pickers short: one table of every model — Claude's,
+each provider's, the picture makers — with a search box and a tick per place it can appear: the
+**chat**, **task stages**, **debate & helpers** (critic, tiers, triage, vision, fallback) and
+**pictures**. Untick to hide; *all* / *none* work on what the search shows. New models appear by
+themselves unless hidden, and a model already picked somewhere keeps showing there.
 
 **Cost** for a non-Claude model is estimated from the prices you enter (USD per million tokens) and
 labelled *est.*; with no price of yours, a model picked from OpenRouter's list uses OpenRouter's price.
@@ -577,7 +639,8 @@ up marks it out before any stage fails on it.
 **Plan debate** (Settings → Models, or per stage) sends a finished plan to a second model, which lists
 its objections; the planner then answers each and revises. The task stops and shows you the original
 plan, the objections, and the revised plan side by side — nothing runs until you pick one (or write your
-own). One round, because an unbounded argument just spends money.
+own). One round, because an unbounded argument just spends money. Linking Codex sets the critic to
+Codex (the newest Sol, or the first model your account lists) at high effort, if you had not picked one.
 
 ## Intake: the board decides how to run a task
 
@@ -626,9 +689,17 @@ text is ever lost. Rewrite costs appear on the dashboard as *spec rewrites*. API
 
 Subtasks declare the files they touch, and **any two whose files overlap are given a dependency
 automatically** — two sessions never edit the same file at once. Everything else runs in parallel, up
-to the project's concurrency cap. A task whose dependencies are not done cannot be queued, and each
-one finishing releases whatever it was blocking; set **auto-queue** on the parent and the plan drains
-on its own.
+to the project's concurrency cap. Set **auto-queue** on the parent and the plan drains on its own.
+
+**Chains of tasks.** Any task can be set to **start after** others — in the **New task** form, under
+*Starts after* in an open task, by dragging in the graph, or by asking the chat ("find the latest
+order, then email its supplier"). Queue it whenever you like: it waits in **Queued**, its card saying
+what for ("⏳ Starts after “Find the latest order” is done"), takes no run slot meanwhile, and starts by
+itself once every task it waits for is **done** — approved, not just reviewed, because unmerged work is
+invisible to the next task. It is told what those tasks reported, so a lookup's answer reaches the task
+that uses it. When one it waits for fails or sits in review, the card says so; remove the link (× under
+*Starts after*, or click the arrow in the graph) to let it go without it, or **Stop** it to take it off
+the queue.
 
 Switch the Board to **graph** to see and change the wiring. Columns are waves — everything in one
 column can run together — and arrows point one way only. Drag the ● on a card's edge onto another card
@@ -759,22 +830,32 @@ supervised runs ask you before every call.
 
 ## Images
 
-A task that needs an illustration, an icon, a hero image or a placeholder photo makes one itself: every
-run has a `generate_image` tool that asks a **free** image model and saves the picture inside the task's
+A task that needs an illustration, an icon, a hero image or a placeholder photo makes one itself: a
+run gets a `generate_image` tool that asks an image model and saves the picture inside the task's
 folder (`generated-images/<name>.jpg`, or the path the task chooses — never above the project, never
 over a file that is already there). A copy lands in the task's **Files** tab so you see it without
 opening the folder. Autonomous tasks make images freely; a supervised task shows an approval card with
 the description first, like any new file. The tool is for illustrations and photos, not for exact text,
 real brands' logos or precise diagrams — the prompt says so.
 
-Two providers, both free without a card, in Settings → **Browser, images & plugins → Images**:
+**Only on an account you linked.** A run gets the tool — and its prompt mentions pictures — only when
+the picture maker chosen in Settings → **Browser, images & plugins → Images** is ready. Otherwise the
+task runs exactly as it would without the board's picture tool: Claude, or whichever model runs the
+stage, does its job and leaves a placeholder where a picture would go. There is no free stand-in.
 
-| | Pollinations.ai (default) | Cloudflare Workers AI |
-|---|---|---|
-| Account | none needed | a free Cloudflare account |
-| What you paste | nothing — or a free key from enter.pollinations.ai | your account id and an API token (Workers AI permission) |
-| Limits | without a key: about one image every 15 s and a small watermark; with one: neither | 10,000 free "neurons" a day, roughly 500 images at 1024×1024 |
-| Model | FLUX | FLUX.1 schnell |
+| | Codex (the default) | Cloudflare Workers AI | Pollinations.ai |
+|---|---|---|---|
+| Account | your ChatGPT plan, through Codex | a free Cloudflare account | an enter.pollinations.ai account |
+| What you set | nothing — Setup → Codex → **Use it** | your account id and an API token (Workers AI permission) | your key (`sk_…`) |
+| Limits | your plan's Codex limits; about a minute a picture | 10,000 free "neurons" a day, roughly 500 images at 1024×1024 | your key's allowance |
+| Model | Codex's image tool, run by the newest Luna (or the model you pick) | FLUX.1 schnell | FLUX |
+
+**Codex where it cannot.** Codex on Windows does not yet offer its image tool to other programs. The
+first picture finds that out and the board remembers it for that Codex version: from then on, tasks run
+without a picture tool. A newer Codex is tried again by itself; **Check again** tries now.
+
+The task's AI is told who makes its pictures, in its prompt. A stage that runs on Codex is told to use
+its own image tool and save the picture in the project.
 
 **Try it** makes one small picture with what is set, and shows it. **Off** removes the tool from runs.
 Keys are stored in the board's secrets file, never in settings, and never travel to the browser (D125).
@@ -828,7 +909,8 @@ What stops an unattended run from doing damage, in Settings → *Runs & limits*:
 - **Run ceilings** — max turns and cost per stage, and a bounded blast radius for subagents. A stage
   that uses all its turns carries on in the same session (twice by default, *Continue after the turn
   limit*) before it fails, so a long stage is not lost to the cap.
-- **Desktop notifications** when a task needs approval, is ready for review, or fails.
+- **Desktop notifications** when a task needs approval, is ready for review, or fails; a "needs you"
+  one stays until it is dealt with, and closes itself when it is.
 
 ---
 
@@ -868,8 +950,9 @@ local time; each time it comes round it creates a fresh card, titled with the da
 - One scheduler ticks every 20 seconds rather than setting exact timers. A minute's accuracy is
   plenty, and a tick survives sleep, clock changes and restarts without any bookkeeping.
 - Everything goes through the normal queue, so caps, dependencies, usage limits and approvals all
-  apply. A card that cannot start (blocked by a dependency, say) keeps a note saying why and loses its
-  schedule rather than being retried forever.
+  apply. A card whose dependencies are not done waits in Queued for them; one that cannot start for
+  another reason (a project policy, say) keeps a note saying why and loses its schedule rather than
+  being retried forever.
 - Missed runs are caught up **once**: the next run is always worked out from now, so three nights
   with the computer off make one card, not three. A card started by hand drops its scheduled start.
 - **Keep awake** holds the operating system's own sleep inhibitor while anything is queued, running
@@ -890,7 +973,15 @@ Reading stays inside the project folder and away from credential files (`.env`, 
 file it reads could otherwise talk it into fetching your keys, and no approval card would show it.
 Its own board server can list cards (with a count per status; Done is counted, not listed), read one,
 create cards (always in Backlog, under the project's mode policy, with the same intake as a card made
-on the board), edit Backlog cards, and queue or schedule them — never in another project. It can also
+on the board), edit Backlog cards, and queue or schedule them — never in another project. A card can
+be made with `stages` (each `plan` / `code` / `review` with a model named in words and an effort, or a
+single `answer` stage — a `custom` stage with a fixed read-and-report prompt, always supervised on the
+main checkout, that lands in Done), `mode`, `own_branch` and `live`; `board_update_task` changes the
+same on a Backlog or failed card, under the same rule as the board (not while busy, not away from a
+branch with work on it). What the chat settled is not offered again by triage. A card the chat made
+carries `tasks.chat_id`: when it finishes, fails, has a plan ready or asks a question, the board posts
+a `role: "update"` message into that chat (no model call, once per state, restart-safe), and the next
+message you send carries those updates in front of it as `[Board news]`. It can also
 follow and talk to a card: `board_task_progress` (each stage's status, cost and result, open questions,
 pending approvals and the latest steps as plain lines), `board_message_task` (the task's own session
 gets the message — `runner.chat`, so a running stage is steered and a finished one continues),
@@ -898,8 +989,11 @@ gets the message — `runner.chat`, so a running stage is steered and a finished
 Each message carries the local time and offset in front of it (not in the system prompt, where a
 changing clock would re-bill the cached conversation every minute), so "tonight at 3" schedules
 correctly; the prompt tells it never to queue or schedule a card you did not ask to run, and to pass
-on your words to a task rather than invent instructions. API: `/api/projects/:id/chats`, `/api/chats/:id`
-(`PATCH` title/model/effort/archived, `DELETE`), `/api/chats/:id/messages`, `/send`, `/stop`.
+on your words to a task rather than invent instructions. A chat on another provider (`chats.provider`,
+default `Settings.chatProvider`) must be Anthropic-compatible; its options start from the computer's
+environment, its cost is estimated from the provider's prices, and the $1.50 ceiling is metered per
+message (D301). API: `/api/projects/:id/chats`, `/api/chats/:id`
+(`PATCH` title/model/effort/provider/archived, `DELETE`), `/api/chats/:id/messages`, `/send`, `/stop`.
 
 ## Live browser view
 
@@ -1046,13 +1140,23 @@ the system's list.
 
 ## Notifications and sounds
 
-The **bell** in the top bar mutes and unmutes; its **▾** opens the panel. Every kind of event has its
+The **bell** in the top bar mutes and unmutes (turning sound on plays a chime, so you know it worked);
+its **▾** opens the panel, and the number beside it counts what waits on you plus what you have not
+read yet. The panel has two tabs:
+
+- **Inbox** — *Needs you now* lists every card waiting on you, every question Claude asked and every
+  task at its cost ceiling, across projects, with **Allow** and **Deny** right there. *Earlier* is the
+  last 50 things the board told you about, each with how it ended (Allowed, Denied, Answered…). It is
+  kept on this computer; **Clear** empties the history.
+- **Settings** — sounds, pop-ups and desktop notifications, below.
+
+Every kind of event has its
 own sound and its own colour — the colour the board already uses for that state, so a rose pop-up means
 what a rose card means:
 
 | Event | Colour | Sound |
 |---|---|---|
-| Needs your approval | rose | knock, knock… ping — and the pop-up stays until you deal with it |
+| Needs your approval | rose | knock, knock… ping — and the pop-up stays until it is dealt with |
 | Ready for review | lime | a rising chime |
 | Landed | moss | a sparkle, with a little confetti |
 | Failed | rust | two notes falling |
@@ -1066,10 +1170,17 @@ event a switch for its sound, its pop-up and its desktop notification (sent only
 a background tab). **▶** next to an event plays it with its pop-up; **♪ Play them all** plays the whole
 set in ten seconds. The sounds are synthesised in the browser: no audio files.
 
-Pop-ups open their task on click and merge when they come together ("×3 tasks started"). While you are
-in another tab, the tab's icon and title take the colour of the most urgent thing you missed. The
-board learns the current state when it opens, so a reload never replays old news. Browsers only
-allow sound after you have clicked somewhere on the page once.
+A **needs you** pop-up shows what the card wants to run and has **Allow** and **Deny** on it (a command
+that would print credentials only gets **Review**, which opens the card). It closes itself the moment
+the card is dealt with *anywhere* — the pop-up, the task, the Approvals tab, another browser tab — with
+a moment's "✓ Allowed" or "✕ Denied" first, and its desktop notification goes with it. More than three
+waiting fold into one pop-up that leads to Approvals.
+
+Other pop-ups open their task on click and merge when they come together ("×3 tasks started"). While
+you are in another tab, the tab's icon and title take the colour of the most urgent thing you missed.
+The board learns the current state when it opens, so a reload never replays old news — and anything
+settled while it was away (a restart expires waiting cards) leaves the inbox. Browsers only allow
+sound after you have clicked somewhere on the page once; until then the bell shows a small amber dot.
 
 ---
 

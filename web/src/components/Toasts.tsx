@@ -1,18 +1,32 @@
 import { useEffect, useRef, useState } from "react";
-import { kindInfo, onAlert, type Alert } from "../lib/alerts.ts";
+import { kindInfo, onAlert, onResolve, openTask, type Alert, type Outcome } from "../lib/alerts.ts";
+import { inputSummary } from "../lib/approvals.ts";
+import { isQuestion } from "../lib/questions.ts";
 import { navigate } from "../lib/router.ts";
+import { NeedsYouActions, OUTCOME_TEXT } from "./NeedsYouActions.tsx";
 
 interface Shown extends Alert {
   count: number;
   titles: string[];
   leaving?: boolean;
+  /** Settled while on screen: says how for a moment, then leaves. */
+  outcome?: Outcome;
 }
 
-/** How long each stays. "Needs you" stays until you deal with it: it is the one you must not miss. */
-const LIFETIME: Partial<Record<Alert["kind"], number>> = { failed: 12_000, approval: Infinity, usage: 12_000, allClear: 9_000 };
+/**
+ * How long each stays. A "needs you" pop-up stays until the thing is dealt with — anywhere: on the
+ * pop-up, the card, the Approvals tab or another tab — and then closes itself (D279).
+ */
+const LIFETIME: Partial<Record<Alert["kind"], number>> = { failed: 12_000, usage: 12_000, allClear: 9_000 };
 const DEFAULT_LIFE = 7_000;
 const MERGE_WINDOW = 6_000;
+/** Pop-ups that come and go; the "needs you" ones are never pushed out by them. */
 const MAX_SHOWN = 5;
+/** More waiting than this and they fold into one pop-up that leads to the Approvals tab. */
+const MAX_NEEDS = 3;
+const OUTCOME_HOLD = 1_600;
+
+const isSticky = (t: Pick<Alert, "key" | "preview">) => !!t.key && !t.preview;
 
 const CONFETTI = ["var(--color-moss)", "var(--color-lime)", "var(--color-amber)", "var(--color-cyan)", "var(--color-iris)", "var(--color-rose)"];
 
@@ -42,11 +56,19 @@ function Confetti() {
 
 function ToastCard({ t, onClose }: { t: Shown; onClose: () => void }) {
   const info = kindInfo(t.kind);
-  const life = LIFETIME[t.kind] ?? DEFAULT_LIFE;
-  const sticky = !Number.isFinite(life);
+  const sticky = isSticky(t) && !t.outcome;
+  const life = sticky ? Infinity : t.outcome ? OUTCOME_HOLD : (LIFETIME[t.kind] ?? DEFAULT_LIFE);
   const [hover, setHover] = useState(false);
   const left = useRef(life);
   const startedAt = useRef(Date.now());
+
+  // A merged repeat, or the thing being settled, restarts the clock. Declared before the timer so it
+  // runs first: a settled pop-up still held `Infinity` from its sticky life, and setTimeout treats a
+  // delay that large as zero — it vanished before saying "✓ Allowed".
+  useEffect(() => {
+    left.current = life;
+    startedAt.current = Date.now();
+  }, [t.count, life]);
 
   // Hovering holds the pop-up; the bar resumes from where it stopped.
   useEffect(() => {
@@ -56,20 +78,17 @@ function ToastCard({ t, onClose }: { t: Shown; onClose: () => void }) {
       return;
     }
     startedAt.current = Date.now();
-    const timer = setTimeout(onClose, Math.max(400, left.current));
+    const timer = setTimeout(onClose, Math.min(60_000, Math.max(400, left.current)));
     return () => clearTimeout(timer);
-  }, [hover, sticky, t.count]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // A merged repeat restarts the clock.
-  useEffect(() => {
-    left.current = life;
-    startedAt.current = Date.now();
-  }, [t.count, life]);
+  }, [hover, sticky, t.count, t.outcome]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const open = () => {
-    if (t.taskId) navigate({ projectId: t.projectId ?? null, taskId: t.taskId, view: "board" });
-    onClose();
+    openTask(t);
+    // Opening a "needs you" card does not settle it: the pop-up stays until the thing is dealt with.
+    if (!sticky) onClose();
   };
+  const card = t.approval && !isQuestion(t.approval) ? t.approval : null;
+  const done = t.outcome ? OUTCOME_TEXT[t.outcome] : null;
 
   return (
     <div
@@ -93,7 +112,7 @@ function ToastCard({ t, onClose }: { t: Shown; onClose: () => void }) {
         </span>
         <span className="min-w-0 flex-1">
           <span className="flex items-baseline gap-2">
-            <span className="font-mono text-[9.5px] uppercase tracking-[0.14em]" style={{ color: info.color }}>{info.label}</span>
+            <span className="font-mono text-[9.5px] uppercase tracking-[0.14em]" style={{ color: info.color }}>{t.label ?? info.label}</span>
             {t.count > 1 ? (
               <span className="rounded-full px-1.5 font-mono text-[9.5px]" style={{ background: tint(info.color, 22), color: info.color }}>×{t.count}</span>
             ) : null}
@@ -104,7 +123,19 @@ function ToastCard({ t, onClose }: { t: Shown; onClose: () => void }) {
           <span className="mt-0.5 line-clamp-2 block text-[12px] leading-snug text-ink-300">
             {t.count > 1 ? t.titles.slice(-3).join(" · ") + (t.count > 3 ? " …" : "") : t.body}
           </span>
-          {t.taskId && t.count === 1 ? <span className="mt-1 block text-[10.5px] text-ink-500">Click to open</span> : null}
+          {card && inputSummary(card) && !done ? (
+            <span className="mt-1 block truncate rounded bg-ink-950 px-2 py-1 font-mono text-[11px] text-amber" title={inputSummary(card)}>
+              {card.tool_name === "Bash" ? "$ " : ""}
+              {inputSummary(card)}
+            </span>
+          ) : null}
+          {done ? (
+            <span className="mt-1.5 block text-[12px] font-semibold" style={{ color: done.color }}>{done.text}</span>
+          ) : sticky ? (
+            <NeedsYouActions a={t} />
+          ) : t.taskId && t.count === 1 ? (
+            <span className="mt-1 block text-[10.5px] text-ink-500">Click to open</span>
+          ) : null}
         </span>
         <button
           className="-mt-0.5 cursor-pointer px-1 text-[15px] leading-none text-ink-500 hover:text-ink-100"
@@ -112,7 +143,7 @@ function ToastCard({ t, onClose }: { t: Shown; onClose: () => void }) {
             e.stopPropagation();
             onClose();
           }}
-          title="Dismiss"
+          title={sticky ? "Hide this pop-up — it stays in the bell's inbox until it is dealt with" : "Dismiss"}
         >
           ×
         </button>
@@ -136,13 +167,19 @@ export function Toasts() {
     () =>
       onAlert((a) =>
         setItems((cur) => {
-          // Ten subtasks starting at once is one pop-up that says ×10, not ten pop-ups.
-          const same = cur.find((x) => x.kind === a.kind && !x.leaving && !a.preview && !x.preview && a.at - x.at < MERGE_WINDOW && x.taskId !== a.taskId);
+          // Ten subtasks starting at once is one pop-up that says ×10, not ten pop-ups. A "needs you"
+          // pop-up is never merged: each is its own decision, with its own buttons.
+          const same = !isSticky(a)
+            ? cur.find((x) => x.kind === a.kind && !isSticky(x) && !x.leaving && !a.preview && !x.preview && a.at - x.at < MERGE_WINDOW && x.taskId !== a.taskId)
+            : undefined;
           if (same && a.taskId) {
             return cur.map((x) => (x === same ? { ...x, count: x.count + 1, titles: [...x.titles, a.title], at: a.at, taskId: undefined } : x));
           }
           const next = [...cur, { ...a, count: 1, titles: [a.title] }];
-          return next.slice(-MAX_SHOWN);
+          // Too many: the oldest passing news goes first; what needs you is never pushed out.
+          const passing = next.filter((x) => !isSticky(x));
+          const drop = new Set(passing.slice(0, Math.max(0, passing.length - MAX_SHOWN)).map((x) => x.id));
+          return next.filter((x) => !drop.has(x.id));
         }),
       ),
     [],
@@ -153,17 +190,76 @@ export function Toasts() {
     setTimeout(() => setItems((cur) => cur.filter((x) => x.id !== id)), 220);
   };
 
+  // Settled anywhere — this pop-up, the card, the Approvals tab, another tab, a restart: say how,
+  // briefly, and go. Its own timer (OUTCOME_HOLD) closes it.
+  useEffect(
+    () =>
+      onResolve((key, outcome) =>
+        setItems((cur) => cur.map((x) => (x.key === key && !x.outcome && !x.preview ? { ...x, outcome } : x))),
+      ),
+    [],
+  );
+
+  const waiting = items.filter((x) => isSticky(x) && !x.outcome && !x.leaving);
+  const folded = waiting.length > MAX_NEEDS ? new Set(waiting.map((x) => x.id)) : null;
+
   return (
     <>
       <style>{CSS}</style>
       <div className="pointer-events-none fixed right-4 bottom-4 z-[70] flex flex-col items-end gap-2">
-        {items.map((t) => (
-          <div key={t.id} className="pointer-events-auto">
-            <ToastCard t={t} onClose={() => close(t.id)} />
+        {folded ? (
+          <div className="pointer-events-auto">
+            <NeedsSummary items={waiting} onHide={() => waiting.forEach((x) => close(x.id))} />
           </div>
-        ))}
+        ) : null}
+        {items
+          .filter((t) => !folded?.has(t.id))
+          .map((t) => (
+            <div key={t.id} className="pointer-events-auto">
+              <ToastCard t={t} onClose={() => close(t.id)} />
+            </div>
+          ))}
       </div>
     </>
+  );
+}
+
+/** Several things waiting at once: one pop-up that names them and leads to where they are all dealt with. */
+function NeedsSummary({ items, onHide }: { items: Shown[]; onHide: () => void }) {
+  const info = kindInfo("approval");
+  return (
+    <div
+      className="kb-toast relative w-[360px] cursor-pointer overflow-hidden rounded-xl border bg-ink-900/95 kb-raise backdrop-blur"
+      style={{ borderColor: tint(info.color, 45), backgroundImage: `radial-gradient(120% 90% at 0% 0%, ${tint(info.color, 16)}, transparent 55%)` }}
+      onClick={() => navigate({ view: "approvals", taskId: null })}
+      role="status"
+    >
+      <span className="absolute inset-y-0 left-0 w-[3px]" style={{ background: info.color }} />
+      <div className="flex items-start gap-3 py-3 pr-3 pl-4">
+        <span
+          className="kb-ring relative mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[12px] font-semibold"
+          style={{ background: tint(info.color, 20), color: info.color, ["--ring" as string]: tint(info.color, 55) }}
+        >
+          {info.icon}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="font-mono text-[9.5px] uppercase tracking-[0.14em]" style={{ color: info.color }}>{info.label}</span>
+          <span className="mt-0.5 block text-[13px] font-semibold leading-snug text-ink-100">{items.length} things need you</span>
+          <span className="mt-0.5 line-clamp-2 block text-[12px] leading-snug text-ink-300">{[...new Set(items.map((x) => x.title))].slice(0, 3).join(" · ")}</span>
+          <span className="mt-1 block text-[10.5px] text-ink-500">Click to open Approvals</span>
+        </span>
+        <button
+          className="-mt-0.5 cursor-pointer px-1 text-[15px] leading-none text-ink-500 hover:text-ink-100"
+          onClick={(e) => {
+            e.stopPropagation();
+            onHide();
+          }}
+          title="Hide — they stay in the bell's inbox until dealt with"
+        >
+          ×
+        </button>
+      </div>
+    </div>
   );
 }
 

@@ -1,15 +1,18 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Chat, ChatMessage, Effort } from "../../../../server/src/types.ts";
 import { effortsFor, useClaudeModels } from "../../lib/claudeModels.ts";
-import { ClaudeModelPicker, EffortSelect } from "../ClaudeModelPicker.tsx";
+import { EffortSelect } from "../ClaudeModelPicker.tsx";
+import { ChatModelPicker } from "./ChatModelPicker.tsx";
+import { ANTHROPIC_PROVIDER_ID } from "../../../../server/src/types.ts";
 import { api, type ProjectWithGit } from "../../lib/api.ts";
 import { useWs, useWsReconnect, watchChat } from "../../lib/ws.ts";
-import { navigate } from "../../lib/router.ts";
 import { useAppData } from "../../lib/store.tsx";
 import { Markdown } from "../../lib/markdown.tsx";
 import { ago, cost } from "../../lib/format.ts";
 import { useAsk } from "../Ask.tsx";
 import { useEscape } from "../ui.tsx";
+import { useTaskCards } from "../../views/Board.tsx";
+import { ChatBoard, ChatCards, ChatTray, ChatUpdateRow } from "./ChatCard.tsx";
 
 const STARTERS = [
   "What does this project do, in plain words?",
@@ -17,13 +20,6 @@ const STARTERS = [
   "I want a new feature. Help me write the task.",
   "Where would I change the page title?",
 ];
-
-type CardAction = NonNullable<ChatMessage["meta"]["cards"]>[number]["action"];
-/** The chip's word for what the chat did with a card. */
-const ACTION_LABEL: Record<CardAction, string> = {
-  created: "created", updated: "edited", queued: "queued", scheduled: "scheduled",
-  messaged: "told", answered: "answered", stopped: "stopped", retried: "run again",
-};
 
 /** What you were typing, per project, so closing the panel (or Esc) never loses it. */
 const drafts = new Map<string, string>();
@@ -51,45 +47,10 @@ function useChats(projectId: string) {
   return chats;
 }
 
-function CardChips({ m }: { m: ChatMessage }) {
-  const [started, setStarted] = useState<Set<string>>(new Set());
-  const [error, setError] = useState<string | null>(null);
-  // One chip per card, naming everything the reply did to it: "created · queued" was two chips, and the
-  // first offered to start a card the chat had already started.
-  const byCard = new Map<string, { id: string; title: string; actions: CardAction[] }>();
-  for (const c of m.meta.cards!) {
-    const seen = byCard.get(c.id) ?? { id: c.id, title: c.title, actions: [] };
-    if (!seen.actions.includes(c.action)) seen.actions.push(c.action);
-    seen.title = c.title;
-    byCard.set(c.id, seen);
-  }
-  const running: CardAction[] = ["queued", "scheduled", "retried", "stopped"];
-  return (
-    <div className="rise space-y-1.5">
-      {[...byCard.values()].map((c) => (
-        <div key={c.id} className="flex items-center gap-2 rounded-lg border border-amber/40 bg-amber/5 px-2.5 py-1.5">
-          <span className="font-mono text-[10px] uppercase tracking-wide text-amber/80">{c.actions.map((a) => ACTION_LABEL[a] ?? a).join(" · ")}</span>
-          <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-100">{c.title}</span>
-          <button className="cursor-pointer rounded border border-ink-600 px-1.5 py-px font-mono text-[10.5px] text-ink-300 hover:border-ink-400 hover:text-ink-100" onClick={() => navigate({ taskId: c.id })}>
-            open
-          </button>
-          {c.actions.includes("created") && !c.actions.some((a) => running.includes(a)) && !started.has(c.id) ? (
-            <button
-              className="cursor-pointer rounded border border-amber/50 px-1.5 py-px font-mono text-[10.5px] text-amber hover:bg-amber/10"
-              title="Queue it now"
-              onClick={() => void api.queue(c.id).then(() => setStarted((s) => new Set(s).add(c.id)), (e: Error) => setError(e.message))}
-            >
-              start
-            </button>
-          ) : null}
-        </div>
-      ))}
-      {error ? <div className="text-[11.5px] text-rust">{error}</div> : null}
-    </div>
-  );
-}
-
-/** Memoised: stored messages never change, and a streaming reply re-renders the panel many times a second. */
+/**
+ * Memoised: stored messages never change, and a streaming reply re-renders the panel many times a
+ * second. The cards they name do change: those rows read the board's live cards from context.
+ */
 const MessageRow = memo(function MessageRow({ m }: { m: ChatMessage }) {
   if (m.role === "user") {
     return (
@@ -99,17 +60,19 @@ const MessageRow = memo(function MessageRow({ m }: { m: ChatMessage }) {
     );
   }
   if (m.role === "tool") {
-    if (m.meta.cards?.length) return <CardChips m={m} />;
+    if (m.meta.cards?.length) return <ChatCards m={m} />;
     return <div className="rise pl-1 font-mono text-[11px] text-ink-500">· {m.text}</div>;
   }
+  if (m.role === "update" && m.meta.update) return <ChatUpdateRow m={m} />;
   if (m.role === "error") return <div className="rise rounded-lg border border-rust/40 bg-rust/10 px-3 py-2 text-[12.5px] text-rust">{m.text}</div>;
   return <Markdown text={m.text} className="rise text-[13px]" />;
 });
 
 /**
- * Talk to Claude about the project: ask how something works, plan a feature, have it write the task
- * cards, ask how a task is going, and pass a message to a task. It reads the code but never changes
- * it. Slides in from the right; the board stays usable.
+ * Talk to Claude about the project: ask how something works, plan a feature, have it make and run
+ * task cards — a lookup, a fix — with the models you name, follow them live, and get their results
+ * back here. It reads the code itself and leaves changing anything to a card. Slides in from the
+ * right; the board stays usable.
  */
 export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClose: () => void }) {
   const { settings } = useAppData();
@@ -117,7 +80,7 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
   const chats = useChats(project.id);
   const [chatId, setChatId] = useState<string | null>(null);
   // What a new chat will run on. An empty chat has no row to patch, so the choice waits here.
-  const [pending, setPending] = useState<{ model: string; effort: Effort } | null>(null);
+  const [pending, setPending] = useState<{ model: string; effort: Effort; provider: string } | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState("");
   const [text, setText] = useState(() => drafts.get(project.id) ?? "");
@@ -130,6 +93,8 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
   const input = useRef<HTMLTextAreaElement>(null);
 
   const chat = chats?.find((c) => c.id === chatId) ?? null;
+  // The cards this chat names, live: a stored message only says what the chat did, not where the card is now.
+  const { cards } = useTaskCards(project.id);
   const open = (chats ?? []).filter((c) => !c.archived_at);
   const archived = (chats ?? []).filter((c) => c.archived_at);
 
@@ -177,6 +142,13 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
     }
   });
 
+  const board = useMemo(() => {
+    // Controls go on each card's newest mention only.
+    const latest = new Map<string, number>();
+    for (const m of messages) for (const c of m.meta.cards ?? []) latest.set(c.id, m.id);
+    return { project, cards: new Map(cards.map((c) => [c.id, c])), latest };
+  }, [project, cards, messages]);
+
   // Follow the conversation as it grows, unless you scrolled up to read.
   const pinned = useRef(true);
   useLayoutEffect(() => {
@@ -195,15 +167,18 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
   // What this chat runs on: its own row once it exists, otherwise the choice made here, else Settings.
   const model = chat?.model ?? pending?.model ?? settings?.chatModel ?? "sonnet";
   const effort = (chat?.effort ?? pending?.effort ?? settings?.chatEffort ?? "medium") as Effort;
+  // Claude, or a Claude-compatible provider running through the same Claude Code (D301).
+  const provider = chat?.provider ?? pending?.provider ?? settings?.chatProvider ?? ANTHROPIC_PROVIDER_ID;
+  const onClaude = provider === ANTHROPIC_PROVIDER_ID;
   // A button that fails says why, instead of looking like it did nothing.
   const say = (e: unknown) => setError(e instanceof Error ? e.message : String(e));
-  const setModel = (id: string) => {
-    const next = effortsFor(id, claude.result);
-    const keep = next.efforts.includes(effort) ? effort : next.efforts[0] ?? effort;
-    if (chat) void api.patchChat(chat.id, { model: id, ...(keep === effort ? {} : { effort: keep }) }).catch(say);
-    else setPending({ model: id, effort: keep });
+  const setModel = (v: { provider: string; model: string }) => {
+    const next = effortsFor(v.model, claude.result);
+    const keep = v.provider !== ANTHROPIC_PROVIDER_ID || next.efforts.includes(effort) ? effort : next.efforts[0] ?? effort;
+    if (chat) void api.patchChat(chat.id, { model: v.model, provider: v.provider, ...(keep === effort ? {} : { effort: keep }) }).catch(say);
+    else setPending({ model: v.model, provider: v.provider, effort: keep });
   };
-  const setEffort = (e: Effort) => (chat ? void api.patchChat(chat.id, { effort: e }).catch(say) : setPending({ model, effort: e }));
+  const setEffort = (e: Effort) => (chat ? void api.patchChat(chat.id, { effort: e }).catch(say) : setPending({ model, provider, effort: e }));
 
   const newChat = async () => {
     try {
@@ -257,6 +232,7 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
   };
 
   return (
+    <ChatBoard.Provider value={board}>
     <aside
       className={`fixed inset-y-0 right-0 z-30 flex w-[460px] max-w-full flex-col border-l border-ink-700 bg-ink-900 xl:w-[540px] kb-raise ${closing ? "slide-out-right" : "slide-in-right"}`}
       aria-label="Chat"
@@ -338,8 +314,8 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
               <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-amber/15 text-[18px] text-amber">✦</div>
               <div className="text-[14px] font-medium text-ink-100">Ask about {project.name}</div>
               <p className="mt-1 text-[12px] leading-relaxed text-ink-400">
-                Claude reads the project to answer, turns what you want into task cards, tells you how each task is going, and can pass your message on
-                to a task. It never changes code from here.
+                Claude answers from the project itself. For anything else, a lookup in a live system, a fix or a feature, it makes a task card with the
+                models you name, runs it when you say, and brings the result back here.
               </p>
               <div className="mt-4 space-y-1.5 text-left">
                 {STARTERS.map((s, i) => (
@@ -367,6 +343,7 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
       </div>
 
       <footer className="border-t border-ink-800 px-3 pb-3 pt-2.5">
+        <ChatTray chatId={chatId} />
         {error ? <div className="mb-2 text-[12px] text-rust">{error}</div> : null}
         <div className="rounded-xl border border-ink-700 bg-ink-850 focus-within:border-amber/50">
           <textarea
@@ -386,10 +363,11 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
           <div className="flex items-center gap-1.5 border-t border-ink-800/70 px-2 py-1.5">
             {/* The same pickers the pipeline uses, and they work before the first message: an empty
                 chat has no row to patch yet, so the choice is held here and used when it is created. */}
-            <div className="w-[196px] shrink-0" title="Model for this chat">
-              <ClaudeModelPicker value={model} onChange={setModel} models={settings?.models ?? []} />
+            <div className="w-[196px] shrink-0" title="Model for this chat: Claude, or a Claude-compatible provider (Settings → Providers)">
+              <ChatModelPicker provider={provider} model={model} onChange={setModel} models={settings?.models ?? []} />
             </div>
-            {effortsFor(model, claude.result).none ? null : (
+            {/* Effort is Claude's: Claude Code does not send it to another model. */}
+            {!onClaude || effortsFor(model, claude.result).none ? null : (
               <div className="w-[100px] shrink-0">
                 <EffortSelect model={model} value={effort} onChange={setEffort} />
               </div>
@@ -413,5 +391,6 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
       </footer>
       {dialog.element}
     </aside>
+    </ChatBoard.Provider>
   );
 }

@@ -1,5 +1,6 @@
 import type { SecretStore } from "../../../secrets.ts";
 import type { CliPreset, Provider } from "../../../types.ts";
+import { codexAuth } from "../codexLocal.ts";
 
 /** Non-secret variables every child may see: enough to run, nothing about the board. */
 const BASE_KEYS = [
@@ -32,9 +33,12 @@ export function childEnv(
     if (v !== undefined) out[k] = v;
   }
   const preset = provider.cli?.preset ?? "custom";
-  const names = [...PRESET_AUTH[preset]];
+  // Codex on a ChatGPT plan must see no API key at all: given one, it bills the API account instead
+  // of the plan the user meant to use (D293).
+  const codex = preset === "codex" ? codexAuth(provider, (n) => Boolean(secrets.get(n))) : null;
+  const names = codex === "login" ? ["CODEX_HOME"] : [...PRESET_AUTH[preset]];
   // The provider's own secret name is stored under whatever the auth var is called; feed it too.
-  if (provider.authRef) names.push(provider.authRef);
+  if (provider.authRef && codex !== "login") names.push(provider.authRef);
   // A custom/opencode provider names the variables it needs; never an ANTHROPIC or board one.
   for (const name of provider.cli?.envPassthrough ?? []) {
     if (/^[A-Z0-9_]{1,64}$/.test(name) && !/^ANTHROPIC_/.test(name) && !name.startsWith("KANBAN_STATE")) names.push(name);
@@ -42,6 +46,11 @@ export function childEnv(
   for (const name of new Set(names)) {
     const value = secrets.get(name);
     if (value) out[name] = value;
+  }
+  // `codex exec` reads its key from CODEX_API_KEY, whatever name the board keeps it under.
+  if (codex === "api-key" && provider.authRef) {
+    const key = secrets.get(provider.authRef);
+    if (key) out.CODEX_API_KEY = key;
   }
   for (const [k, v] of Object.entries(extra)) out[k] = v;
   return out;

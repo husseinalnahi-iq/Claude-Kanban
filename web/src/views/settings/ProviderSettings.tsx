@@ -6,6 +6,7 @@ import { useCatalog } from "../../lib/catalog.ts";
 import { useAppData } from "../../lib/store.tsx";
 import { isLocal } from "../../../../server/src/engine/providers/catalog.ts";
 import { LocalModelsGuide } from "./LocalModelsGuide.tsx";
+import { CodexCard } from "./CodexCard.tsx";
 import { ProviderPicker } from "../../components/ProviderPicker.tsx";
 import { OutChip, ProviderUsageCard } from "../../components/ProviderUsage.tsx";
 import { useProviderUsage } from "../../lib/providerUsage.ts";
@@ -320,6 +321,7 @@ export function ProviderSettings({ providers, onChange }: { providers: Provider[
         title="Providers"
         hint="Other places a stage can run: a cheaper model, a local one, or another agent that is better at some kind of work. Pick one per stage in any pipeline editor; Claude stays the default."
       >
+        <CodexCard />
         <LocalModelsGuide providers={providers} presets={presets} />
         <div className="flex items-center gap-2">
           <Select wide wrapClassName="max-w-[320px]" value={pick} onChange={(e) => setPick(e.target.value)}>
@@ -348,7 +350,7 @@ export function ProviderSettings({ providers, onChange }: { providers: Provider[
         <p className="mt-4 text-[11.5px] text-ink-500">
           <b className="text-ink-400">What stays the same:</b> Claude Code on another endpoint keeps the board tools, approvals, worktrees and
           blocked-command list. <b className="text-ink-400">What changes:</b> costs are estimated from the prices you enter, Claude's usage
-          windows do not apply, and effort / fast mode are Claude-only controls. A text-only provider gets the diff or the file list in its
+          windows do not apply, and fast mode is Claude-only; effort is sent to Claude and to Codex (each Codex model offers its own levels), not to other providers. A text-only provider gets the diff or the file list in its
           prompt instead of tools, so it can plan or review but not implement. <b className="text-ink-400">Usage:</b> z.ai, Kimi Code,
           OpenRouter and the Kimi API report what is left of your plan or credit, shown here and in the top bar's usage panel; for the others
           the board counts what it sent.

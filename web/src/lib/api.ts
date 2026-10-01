@@ -2,7 +2,7 @@ import type {
   ImageStatus,
   Approval, Attachment, DiffFile, EventRow, FastModeStatus, Message, MergePolicy, Milestone, Mode, Note, Policy, Project, ProjectEnv, Run, RunListItem, SessionTools, Settings, SkillInfo, Stage, Task, TaskCard, UsageLimit,
   Provider, ProviderTestResult, SetupCheckResult, ModelCatalogResult, Schedule, Chat, ChatMessage, Effort, ClaudeModelsResult, SpecVersion,
-  ProviderUsage, ProviderOut,
+  ProviderUsage, ProviderOut, WsMessage,
 } from "../../../server/src/types.ts";
 import type { ProviderPreset } from "../../../server/src/engine/providers/presets.ts";
 import type { LocalModelsStatus } from "../../../server/src/setup/local.ts";
@@ -62,6 +62,9 @@ export class ApiError extends Error {
   }
 }
 
+/** Codex on this computer, as GET /codex/status says (D296). */
+export type CodexView = Extract<WsMessage, { type: "codex.updated" }>["status"];
+
 async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${url}`, {
     method,
@@ -99,6 +102,12 @@ export const api = {
   fixSetup: (id: string, body: { kind: "run"; input?: Record<string, string> } | { kind: "claude" }) =>
     req<{ started?: boolean; task?: Task }>("POST", `/setup/${encodeURIComponent(id)}/fix`, body),
   login: () => req<CliHealth & { started: boolean }>("POST", "/auth/login", {}),
+  /** A Setup row's own action ("Use it", "Sign in"): one of the board's endpoints, posted as is. */
+  setupAction: (endpoint: string) => req<unknown>("POST", endpoint, {}),
+  codexStatus: (fresh = false) => req<CodexView>("GET", `/codex/status${fresh ? "?fresh=1" : ""}`),
+  codexLink: () => req<{ changed: string[]; status: CodexView }>("POST", "/codex/link", {}),
+  codexLogin: () => req<{ started: boolean }>("POST", "/codex/login", {}),
+  codexPicturesReset: () => req<{ ok: boolean }>("POST", "/codex/pictures/reset", {}),
   limits: () => req<UsageLimit[]>("GET", "/limits"),
   pickFolder: (start?: string) => req<{ path: string | null; cancelled: boolean; error: string | null }>("POST", "/pick-folder", { start }),
   projects: () => req<ProjectWithGit[]>("GET", "/projects"),
@@ -112,7 +121,7 @@ export const api = {
 
   tasks: (projectId: string) => req<TaskCard[]>("GET", `/tasks?project=${encodeURIComponent(projectId)}`),
   task: (id: string) => req<TaskDetail>("GET", `/tasks/${id}`),
-  createTask: (b: { project_id: string; title: string; spec_md?: string; mode?: Mode; pipeline?: Stage[]; parent_id?: string | null; milestone_id?: string | null; skills?: string[]; live?: boolean; plan_approval?: boolean | null; own_branch?: boolean }) =>
+  createTask: (b: { project_id: string; title: string; spec_md?: string; mode?: Mode; pipeline?: Stage[]; parent_id?: string | null; milestone_id?: string | null; skills?: string[]; live?: boolean; plan_approval?: boolean | null; own_branch?: boolean; depends_on?: string[] }) =>
     req<Task>("POST", "/tasks", b),
   patchTask: (
     id: string,
@@ -134,7 +143,7 @@ export const api = {
 
   chats: (projectId: string) => req<Chat[]>("GET", `/projects/${projectId}/chats`),
   createChat: (projectId: string) => req<Chat>("POST", `/projects/${projectId}/chats`, {}),
-  patchChat: (id: string, b: { title?: string; model?: string; effort?: Effort; archived?: boolean }) => req<Chat>("PATCH", `/chats/${id}`, b),
+  patchChat: (id: string, b: { title?: string; model?: string; effort?: Effort; provider?: string; archived?: boolean }) => req<Chat>("PATCH", `/chats/${id}`, b),
   deleteChat: (id: string) => req<{ ok: true }>("DELETE", `/chats/${id}`),
   chatMessages: (id: string) => req<ChatMessage[]>("GET", `/chats/${id}/messages`),
   sendChat: (id: string, text: string) => req<ChatMessage>("POST", `/chats/${id}/send`, { text }),

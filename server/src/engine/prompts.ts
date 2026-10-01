@@ -48,6 +48,8 @@ export interface PromptCtx {
   live?: boolean;
   /** Settings → Images is on: the run has `generate_image` (D262). */
   imageTool?: boolean;
+  /** Who makes the pictures and how long one takes, in a few words (D297). */
+  imageMaker?: string;
   /** Set when the previous stage ran on another provider: its output is labelled as such (D133). */
   previousFrom?: { provider: string; model: string } | null;
   /** Results of earlier stages (stage index → result), so review sees the plan, not just the code summary. */
@@ -68,6 +70,8 @@ export interface PromptCtx {
   memory?: string[];
   /** Files the human attached: images (described), spreadsheets, documents, data. */
   images?: { name: string; path: string; note: string | null; description: string | null; kind: "image" | "text" | "document" }[];
+  /** Tasks this one was set to start after, with what each reported (D290). */
+  dependencies?: { id: string; title: string; status: string; outcome: string | null }[];
   /** Finished tasks this one follows up on. */
   relatedTasks?: { id: string; title: string; status: string; summary: string | null }[];
   /** The command the board will run to verify this work, if the project defines one. */
@@ -264,6 +268,14 @@ export function buildStagePrompt(ctx: PromptCtx): string {
     if (ctx.siblings.length > shown.length) lines.push(`- …and ${ctx.siblings.length - shown.length} more (use \`board_list_siblings\`)`);
     out.push(`\n## Sibling tasks\n${lines.join("\n")}`);
   }
+  if (ctx.dependencies?.length) {
+    const indent = (s: string) => s.split(/\r?\n/).map((l) => `  ${l}`).join("\n");
+    out.push(
+      `\n## Done before this\nThis task was set to start after these. What each of them reported:\n${ctx.dependencies
+        .map((d) => `- ${d.title} (\`${d.id}\`, ${d.status})${d.outcome ? `:\n${indent(d.outcome)}` : ""}`)
+        .join("\n")}\n` + "Build on what they did; use `board_get_task` for more of any of them.",
+    );
+  }
   if (ctx.relatedTasks?.length) {
     out.push(
       `\n## Earlier tasks this follows up on\n${ctx.relatedTasks.map((r) => `- ${r.title} (\`${r.id}\`, ${r.status})${r.summary ? ` — ${r.summary.slice(0, LIMITS.summary)}` : ""}`).join("\n")}\n` +
@@ -408,11 +420,17 @@ export function buildStagePrompt(ctx: PromptCtx): string {
     );
     if (ctx.imageTool) {
       out.push(
-        "\n## Images\nYou can make pictures: `generate_image` (a free AI image model, 10–30 seconds each) saves an illustration, icon, hero image or placeholder photo inside the project and returns its path. " +
+        `\n## Images\nYou can make pictures: \`generate_image\` (${ctx.imageMaker ?? "10 seconds to a minute each"}) saves an illustration, icon, hero image or placeholder photo inside the project and returns its path. ` +
           "Use it when the task needs an image instead of leaving a grey box or asking for one; not for exact text, real brands' logos, or diagrams that must be precise" +
           (ctx.mode === "supervised" ? " (each image is approved on a card first)." : "."),
       );
     }
+  } else if (ctx.capabilities === "cli" && ctx.imageTool) {
+    // Another agent has no board tools, but may have a picture tool of its own (Codex does, D297).
+    out.push(
+      "\n## Images\nWhen the task needs a picture, make it with your own image generation tool if you have one and save it inside the project. " +
+        "If you have none, leave a clearly named placeholder file and list the pictures still needed in your final message.",
+    );
   }
   return out.join("\n");
 }

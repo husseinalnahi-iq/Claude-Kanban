@@ -197,7 +197,6 @@ test("dependencies gate queueing, and finishing one releases the next", async ()
     const a = s.repo.createTask({ project_id: s.project.id, parent_id: parent.id, title: "A", mode: "supervised", pipeline: ONE_STAGE });
     const b = s.repo.createTask({ project_id: s.project.id, parent_id: parent.id, title: "B", mode: "supervised", pipeline: ONE_STAGE, depends_on: [a.id] });
 
-    assert.throws(() => s.runner.queueTask(b.id), /Waiting on "A"/);
     assert.deepEqual(s.runner.promoteReady(s.project.id).map((t) => t.title), ["A"], "only the unblocked one starts");
 
     s.repo.updateTask(a.id, { status: "done" });
@@ -321,6 +320,44 @@ test("live-system work is never sized down, and the task is offered as a live ta
     assert.equal(accepted.mode, "autonomous", "the mode is left alone");
     assert.equal(accepted.suggestion?.live, undefined, "the accepted part is gone");
     assert.ok(accepted.suggestion?.pipeline, "the pipeline suggestion is still on offer");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("a lookup that only reads a live system is neither raised to the strong tier nor proposed as live (D287)", async () => {
+  const s = setup(fakeStructured({
+    title: "Latest PO", type: "chore", priority: "p2", labels: [], spec_md: "", questions: [], confidence: 0.9,
+    split_reason: "", subtasks: [],
+    pipeline: [{ stage: "code", tier: "balanced", effort: "low" }],
+    pipeline_reason: "One read-only query.",
+    live_access: true, live_changes: false, live_access_reason: "Reads Purchase Orders in BizApp.",
+  }));
+  try {
+    const task = s.repo.createTask({ project_id: s.project.id, title: "get me the latest PO", pipeline: THREE_STAGE });
+    await s.runner.triage(task.id, "classify");
+    const sug = s.repo.getTask(task.id)!.suggestion!;
+    assert.deepEqual(sug.pipeline, [{ stage: "code", model: "claude-sonnet-5-5", effort: "low" }], "sized by how hard it is to find, not raised");
+    assert.equal(sug.sizing_reason, "One read-only query.", "and not described as changing a live system");
+    assert.equal(sug.live, undefined, "reading is not changing: no plan approval, no live review");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("what the side chat already settled with the user is not suggested again (D286)", async () => {
+  const s = setup(fakeStructured({
+    title: "x", type: "chore", priority: "p2", labels: [], spec_md: "", questions: [], confidence: 0.9,
+    split_reason: "", subtasks: [], pipeline: [{ stage: "code", tier: "strong", effort: "high" }], pipeline_reason: "",
+    live_access: true, live_access_reason: "ERP",
+  }));
+  try {
+    const task = s.repo.createTask({ project_id: s.project.id, title: "x", pipeline: THREE_STAGE });
+    await s.runner.triage(task.id, "classify", { decided: { pipeline: true, live: true } });
+    const sug = s.repo.getTask(task.id)!.suggestion!;
+    assert.equal(sug.pipeline, undefined);
+    assert.equal(sug.live, undefined);
+    assert.equal(sug.priority, "p2", "type and priority are still classified");
   } finally {
     s.cleanup();
   }

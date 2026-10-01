@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AppDeps } from "../app.ts";
 import { mergeSchema, stageSchema } from "./projects.ts";
-import { ANTHROPIC_PROVIDER_ID, EFFORTS, HELPER_MODELS, IMAGE_PROVIDERS } from "../types.ts";
+import { ANTHROPIC_PROVIDER_ID, EFFORTS, HELPER_MODELS, IMAGE_PROVIDERS, MODEL_SURFACES, type ModelSurface } from "../types.ts";
 import { PROVIDER_PRESETS } from "../engine/providers/presets.ts";
 import { fileURLToPath } from "node:url";
 
@@ -34,6 +34,7 @@ export const providerSchema = z
         command: z.string().trim().max(2000).optional(),
         extraArgs: z.array(z.string().max(200)).max(30).optional(),
         envPassthrough: z.array(z.string().regex(/^(?!ANTHROPIC_|KANBAN_STATE)[A-Z0-9_]{1,64}$/)).max(20).optional(),
+        auth: z.enum(["login", "api-key"]).optional(),
       })
       .optional(),
     mayEditFiles: z.boolean(),
@@ -68,6 +69,8 @@ const patchSchema = z.object({
   visionProvider: z.string().trim().min(1).max(64).optional(),
   imageProvider: z.enum(IMAGE_PROVIDERS).optional(),
   cloudflareAccountId: z.string().trim().max(64).regex(/^[A-Za-z0-9]*$/, "a Cloudflare account id is letters and digits only").optional(),
+  imageModel: z.string().trim().max(120).optional(),
+  hiddenModels: z.object(Object.fromEntries(MODEL_SURFACES.map((k) => [k, z.array(z.string().max(300)).max(2000)])) as Record<ModelSurface, z.ZodArray<z.ZodString>>).partial().optional(),
   tiers: z.object({ cheap: tierRef, balanced: tierRef, strong: tierRef }).optional(),
   providers: z.array(providerSchema).max(30).optional(),
   debate: z.object({ enabled: z.boolean(), critic: tierRef.extend({ effort: z.enum(EFFORTS as [string, ...string[]]) }) }).optional(),
@@ -79,6 +82,7 @@ const patchSchema = z.object({
   questionWaitMin: z.number().int().min(0).max(24 * 60).optional(),
   chatModel: z.string().trim().min(1).max(120).optional(),
   chatEffort: z.enum(EFFORTS as [string, ...string[]]).optional(),
+  chatProvider: z.string().trim().min(1).max(64).optional(),
   specModel: z.string().trim().min(1).max(120).optional(),
   specEffort: z.enum(EFFORTS as [string, ...string[]]).optional(),
   loadUserPlugins: z.boolean().optional(),

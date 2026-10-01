@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ANTHROPIC_PROVIDER_ID, EFFORTS, type HelperModel, type ImageProvider, type ModelEntry, type Note, type Provider, type Settings as SettingsShape, type Stage, type TierRef } from "../../../server/src/types.ts";
+import { ANTHROPIC_PROVIDER_ID, EFFORTS, type HelperModel, type ImageProvider, type ModelEntry, type ModelSurface, type Note, type Provider, type Settings as SettingsShape, type Stage, type TierRef } from "../../../server/src/types.ts";
 import { api, type ProjectWithGit, type WorktreeRow } from "../lib/api.ts";
 import { ago } from "../lib/format.ts";
 import { useAppData } from "../lib/store.tsx";
@@ -7,7 +7,9 @@ import { navigate } from "../lib/router.ts";
 import { Button, ErrorLine, Field, Help, ModeHelp, Select, Switch, inputCls, useAction } from "../components/ui.tsx";
 import { PipelineEditor } from "../components/PipelineEditor.tsx";
 import { useAsk } from "../components/Ask.tsx";
-import { ProviderPicker } from "../components/ProviderPicker.tsx";
+import { ProviderEffort, ProviderPicker } from "../components/ProviderPicker.tsx";
+import { ChatModelPicker } from "../components/chat/ChatModelPicker.tsx";
+import { ModelLists } from "./settings/ModelLists.tsx";
 import { ClaudeModelPicker, EffortSelect } from "../components/ClaudeModelPicker.tsx";
 import { ClaudeModelList } from "./settings/ClaudeModelList.tsx";
 import { useClaudeModels } from "../lib/claudeModels.ts";
@@ -330,11 +332,12 @@ function VisionTry({ vision, saved }: { vision: TierRef; saved: boolean }) {
   );
 }
 
-type Tab = "appearance" | "models" | "providers" | "runs" | "tools" | "git" | "project" | "claudemd" | "memory" | "worktrees";
+type Tab = "appearance" | "models" | "providers" | "lists" | "runs" | "tools" | "git" | "project" | "claudemd" | "memory" | "worktrees";
 const TABS: { id: Tab; label: string; needsProject?: boolean }[] = [
   { id: "appearance", label: "Appearance" },
   { id: "models", label: "Models & pipeline" },
   { id: "providers", label: "Providers" },
+  { id: "lists", label: "Model lists" },
   { id: "runs", label: "Runs & limits" },
   { id: "tools", label: "Browser, images & plugins" },
   { id: "git", label: "Git & merging", needsProject: true },
@@ -344,7 +347,7 @@ const TABS: { id: Tab; label: string; needsProject?: boolean }[] = [
   { id: "worktrees", label: "Worktrees", needsProject: true },
 ];
 /** Tabs whose contents are saved by the global Save button. */
-const GLOBAL_TABS: Tab[] = ["models", "providers", "runs", "tools"];
+const GLOBAL_TABS: Tab[] = ["models", "providers", "lists", "runs", "tools"];
 
 /** Which model a helper runs on: a cheaper Claude, or the stage's own model (no helper — the stage does it itself). */
 function HelperSelect({ value, onChange, disabled }: { value: HelperModel; onChange: (v: HelperModel) => void; disabled?: boolean }) {
@@ -383,6 +386,8 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [triageModel, setTriageModel] = useState("");
   const [chatModel, setChatModel] = useState("claude-sonnet-5-5");
   const [chatEffort, setChatEffort] = useState<SettingsShape["chatEffort"]>("medium");
+  const [chatProvider, setChatProvider] = useState(ANTHROPIC_PROVIDER_ID);
+  const [hiddenModels, setHiddenModels] = useState<Record<ModelSurface, string[]>>({ chat: [], stages: [], helpers: [], pictures: [] });
   const [specModel, setSpecModel] = useState("claude-opus-5-5");
   const [specEffort, setSpecEffort] = useState<SettingsShape["specEffort"]>("high");
   const [vision, setVision] = useState<TierRef>({ provider: ANTHROPIC_PROVIDER_ID, model: "" });
@@ -407,8 +412,9 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [chrome, setChrome] = useState(false);
   const [readOnlyNoCard, setReadOnlyNoCard] = useState(true);
   const [liveView, setLiveView] = useState(true);
-  const [imageProvider, setImageProvider] = useState<ImageProvider>("pollinations");
+  const [imageProvider, setImageProvider] = useState<ImageProvider>("codex");
   const [cloudflareAccountId, setCloudflareAccountId] = useState("");
+  const [imageModel, setImageModel] = useState("");
   const [checklist, setChecklist] = useState("");
   const [notif, setNotif] = useState(notifyState());
   const claude = useClaudeModels();
@@ -446,6 +452,8 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
     take((s) => s.triageModel, setTriageModel);
     take((s) => s.chatModel, setChatModel);
     take((s) => s.chatEffort, setChatEffort);
+    take((s) => s.chatProvider ?? ANTHROPIC_PROVIDER_ID, setChatProvider);
+    take((s) => s.hiddenModels ?? { chat: [], stages: [], helpers: [], pictures: [] }, setHiddenModels);
     take((s) => s.specModel, setSpecModel);
     take((s) => s.specEffort, setSpecEffort);
     take((s) => ({ provider: s.visionProvider || ANTHROPIC_PROVIDER_ID, model: s.visionModel }), setVision);
@@ -470,6 +478,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
     take((s) => s.liveView, setLiveView);
     take((s) => s.imageProvider, setImageProvider);
     take((s) => s.cloudflareAccountId, setCloudflareAccountId);
+    take((s) => s.imageModel ?? "", setImageModel);
     take((s) => s.onboardingChecklist, setChecklist);
   }, [settings]);
 
@@ -481,7 +490,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           models, defaultPipeline: pipeline, globalCap, serial, maxForcedParallel: forced, defaultMaxConcurrent: defMax,
           maxTurnsPerStage: maxTurns, maxCostPerStageUsd: maxCost, autoContinueTurns: autoContinue, planApproval, liveReviewModel, followLatestModels: followLatest, autoUpdateEngine: autoEngine,
           maxSubagentDepth: subDepth, maxConcurrentSubagents: subMax, cacheableSystemPrompt: cacheable,
-          triageModel, chatModel, chatEffort, specModel, specEffort, visionModel: vision.model, visionProvider: vision.provider, autoSizing, tiers,
+          triageModel, chatModel, chatEffort, chatProvider, hiddenModels, imageModel, specModel, specEffort, visionModel: vision.model, visionProvider: vision.provider, autoSizing, tiers,
           providers: providers.map((p) => ({ ...p, models: p.models.filter((m) => m.id.trim()).map((m) => ({ ...m, label: m.label.trim() || m.id })) })),
           delegateTimeoutMin: delegateTimeout,
           debate,
@@ -654,11 +663,13 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           </label>
           <Field label="Critic" hint="The model that argues against the plan. A different family from the planner tends to catch more.">
             <div className="flex items-center gap-2">
-              <ProviderPicker compact value={{ provider: debate.critic.provider, model: debate.critic.model }} models={models} providers={providers} onChange={(v) => setDebate({ ...debate, critic: { ...debate.critic, ...v } })} />
-              <EffortSelect
+              <ProviderPicker compact surface="helpers" value={{ provider: debate.critic.provider, model: debate.critic.model }} models={models} providers={providers} onChange={(v) => setDebate({ ...debate, critic: { ...debate.critic, ...v } })} />
+              {/* Codex takes an effort too: a Codex critic at high effort is the default once Codex is linked (D299). */}
+              <ProviderEffort
                 className="w-auto!"
+                provider={debate.critic.provider}
                 model={debate.critic.model}
-                disabled={Boolean(debate.critic.provider) && debate.critic.provider !== ANTHROPIC_PROVIDER_ID}
+                providers={providers}
                 value={debate.critic.effort}
                 onChange={(effort) => setDebate({ ...debate, critic: { ...debate.critic, effort } })}
               />
@@ -668,6 +679,12 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
         </>) : null}
 
         {tab === "providers" ? <ProviderSettings providers={providers} onChange={setProviders} /> : null}
+
+        {tab === "lists" ? (
+          <Section title="Model lists" hint="Which models each picker offers, so the lists stay short. Saved with Save settings.">
+            <ModelLists hidden={hiddenModels} setHidden={setHiddenModels} models={models} providers={providers} />
+          </Section>
+        ) : null}
 
         {tab === "runs" ? (<>
         <Section title="Concurrency" hint="Per-project FIFO queues, capped per project and globally.">
@@ -705,10 +722,10 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
         >
           <div className="grid gap-3 md:grid-cols-2">
             <Field group label="Triage model" hint="Classifies a new task and writes the improved spec.">
-              <ClaudeModelPicker value={triageModel} onChange={setTriageModel} models={models} />
+              <ClaudeModelPicker surface="helpers" value={triageModel} onChange={setTriageModel} models={models} />
             </Field>
             <Field label="Vision model" hint="Looks at each attached image once and writes down what is in it, so the stages that follow read words instead of pixels.">
-              <ProviderPicker compact value={vision} models={models} providers={providers} onChange={setVision} />
+              <ProviderPicker compact surface="helpers" value={vision} models={models} providers={providers} onChange={setVision} />
             </Field>
           </div>
           <VisionTry vision={vision} saved={settings.visionProvider === vision.provider && settings.visionModel === vision.model} />
@@ -725,7 +742,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
         >
           <div className="grid gap-3 md:grid-cols-2">
             <Field group label="Model" hint="Opus by default: it is one call per rewrite, and a spec that names the right files saves a whole run going the wrong way.">
-              <ClaudeModelPicker value={specModel} onChange={setSpecModel} models={models} />
+              <ClaudeModelPicker surface="helpers" value={specModel} onChange={setSpecModel} models={models} />
             </Field>
             <Field label="Effort" hint="High is Claude's default. Lower is quicker and cheaper for short requests.">
               <EffortSelect model={specModel} value={specEffort} onChange={setSpecEffort} />
@@ -740,10 +757,10 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
         >
           <div className="grid gap-3 md:grid-cols-2">
             <Field group label="Model for new chats" hint="Sonnet is the balance: sharp enough to explain code and plan work, a fraction of Opus's price.">
-              <ClaudeModelPicker value={chatModel} onChange={setChatModel} models={models} />
+              <ChatModelPicker provider={chatProvider} model={chatModel} models={models} onChange={(v) => { setChatProvider(v.provider); setChatModel(v.model); }} />
             </Field>
             <Field label="Effort" hint="How hard it thinks before answering. Medium suits questions; high for hard design talks.">
-              <EffortSelect model={chatModel} value={chatEffort} onChange={setChatEffort} />
+              <EffortSelect model={chatModel} value={chatEffort} onChange={setChatEffort} disabled={chatProvider !== ANTHROPIC_PROVIDER_ID} />
             </Field>
           </div>
           <p className="mt-2 text-[11.5px] text-ink-500">Each chat can switch model and effort from its own panel; this is only where new chats start.</p>
@@ -767,7 +784,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
               ["strong", "Strong", "Only where getting it right is genuinely hard."],
             ] as const).map(([key, label, hint]) => (
               <Field key={key} label={label} hint={hint}>
-                <ProviderPicker stacked value={tiers[key]} models={models} providers={providers} onChange={(v) => setTiers({ ...tiers, [key]: v })} />
+                <ProviderPicker stacked surface="helpers" value={tiers[key]} models={models} providers={providers} onChange={(v) => setTiers({ ...tiers, [key]: v })} />
               </Field>
             ))}
           </div>
@@ -790,7 +807,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           </label>
           <div className="mt-3" />
           <Field label="Review model for live tasks" hint="A task marked “touches a live system” always waits for plan approval, and its review stage runs on this model at high effort, whatever its pipeline says.">
-            <ClaudeModelPicker value={liveReviewModel} onChange={setLiveReviewModel} models={models} />
+            <ClaudeModelPicker surface="helpers" value={liveReviewModel} onChange={setLiveReviewModel} models={models} />
           </Field>
         </Section>
 
@@ -856,7 +873,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
               </Select>
               {claudeFallback ? (
                 <div className="min-w-[300px] flex-1">
-                  <ProviderPicker value={claudeFallback} onChange={setClaudeFallback} models={models} providers={providers} compact />
+                  <ProviderPicker surface="helpers" value={claudeFallback} onChange={setClaudeFallback} models={models} providers={providers} compact />
                 </div>
               ) : null}
             </div>
@@ -1020,14 +1037,16 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
         </Section>
         <Section
           title="Images"
-          hint="A task that needs an illustration, an icon or a placeholder photo makes one with a free image model, instead of leaving a grey box or stopping to ask."
+          hint="A task that needs an illustration, an icon or a placeholder photo makes one — with Codex on your ChatGPT plan, or Cloudflare or Pollinations with your own key. With none ready, tasks run without a picture tool, as they would anyway."
         >
           <ImageSettings
             provider={imageProvider}
             setProvider={setImageProvider}
             accountId={cloudflareAccountId}
             setAccountId={setCloudflareAccountId}
-            saved={settings.imageProvider === imageProvider && settings.cloudflareAccountId === cloudflareAccountId}
+            imageModel={imageModel}
+            setImageModel={setImageModel}
+            saved={settings.imageProvider === imageProvider && settings.cloudflareAccountId === cloudflareAccountId && (settings.imageModel ?? "") === imageModel}
           />
         </Section>
         <SessionToolsPanel />

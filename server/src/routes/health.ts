@@ -38,14 +38,21 @@ export async function cliHealth(maxAgeMs = 10_000): Promise<CliHealth> {
 
 /** Opens a real terminal running Claude's login (it needs a TTY). The binary is the SDK's own when there is one. */
 function openLoginTerminal(): void {
-  const bin = realProbe.claudeBin;
+  openTerminal("Claude login", realProbe.claudeBin, "auth login");
+}
+
+/**
+ * A visible terminal running `"<bin>" <args>`: a sign-in that opens a browser and waits for it (Claude's,
+ * Codex's, D296). `args` is fixed text from the board, never anything typed.
+ */
+export function openTerminal(title: string, bin: string, args: string): void {
   if (process.platform === "win32") {
     // cmd's own quoting: the outer quotes wrap the /k command, the inner ones the path (which may have
     // spaces). Verbatim, because Node's escaping of embedded quotes is not what cmd expects.
-    execFile("cmd.exe", ["/c", `start "Claude login" cmd /k ""${bin}" auth login"`], { windowsHide: false, windowsVerbatimArguments: true }, () => {});
+    execFile("cmd.exe", ["/c", `start "${title}" cmd /k ""${bin}" ${args}"`], { windowsHide: false, windowsVerbatimArguments: true }, () => {});
     return;
   }
-  const cmd = `'${bin.replace(/'/g, `'\\''`)}' auth login`;
+  const cmd = `'${bin.replace(/'/g, `'\\''`)}' ${args}`;
   const term = process.platform === "darwin"
     ? ["osascript", ["-e", `tell app "Terminal" to do script "${cmd.replace(/["\\]/g, "\\$&")}"`]]
     : ["x-terminal-emulator", ["-e", cmd]];

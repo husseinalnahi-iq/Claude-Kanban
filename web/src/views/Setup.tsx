@@ -12,8 +12,8 @@ const GROUPS = [
   { level: "info", title: "Good to know", hint: "" },
 ] as const;
 
-function Shell({ ok, level, title, detail, why, actions, children }: { ok: boolean; level: string; title: string; detail: string; why: string; actions?: ReactNode; children?: ReactNode }) {
-  const dot = ok ? "bg-moss" : level === "required" ? "bg-rust" : level === "recommended" ? "bg-amber" : "bg-ink-500";
+function Shell({ ok, warn, level, title, detail, why, actions, children }: { ok: boolean; warn?: boolean; level: string; title: string; detail: string; why: string; actions?: ReactNode; children?: ReactNode }) {
+  const dot = warn ? "bg-amber" : ok ? "bg-moss" : level === "required" ? "bg-rust" : level === "recommended" ? "bg-amber" : "bg-ink-500";
   return (
     <div className="rounded-lg border border-ink-800 bg-ink-900/60 p-3">
       <div className="flex items-start gap-3">
@@ -21,7 +21,7 @@ function Shell({ ok, level, title, detail, why, actions, children }: { ok: boole
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-baseline gap-x-2">
             <span className="text-[13px] font-medium text-ink-100">{title}</span>
-            <span className={`break-words font-mono text-[11px] ${ok ? "text-moss" : "text-ink-400"}`}>{detail}</span>
+            <span className={`break-words font-mono text-[11px] ${warn ? "text-amber" : ok ? "text-moss" : "text-ink-400"}`}>{detail}</span>
           </div>
           <p className="mt-0.5 text-[12px] text-ink-500">{why}</p>
         </div>
@@ -41,6 +41,14 @@ function Row({ c, output, onChange }: { c: SetupCheckResult; output?: string; on
   const filled = (c.form ?? []).every((f) => form[f.name]?.trim());
   const actions = (
     <>
+      {c.action ? (
+        <Button size="sm" variant="primary" busy={busy} onClick={() => run(async () => {
+          await api.setupAction(c.action!.endpoint);
+          onChange(await api.recheckSetup(c.id));
+        })}>
+          {c.action.label}
+        </Button>
+      ) : null}
       {c.fixes.includes("login") ? (
         <Button size="sm" variant="primary" busy={loggingIn && !c.ok} onClick={() => run(async () => { setLoggingIn(true); await api.login(); })}>
           {loggingIn ? "Waiting for login…" : "Log in to Claude"}
@@ -68,7 +76,7 @@ function Row({ c, output, onChange }: { c: SetupCheckResult; output?: string; on
     </>
   );
   return (
-    <Shell ok={c.ok} level={c.level} title={c.title} detail={c.detail} why={c.why} actions={actions}>
+    <Shell ok={c.ok} warn={c.warn} level={c.level} title={c.title} detail={c.detail} why={c.why} actions={actions}>
       {!c.ok && c.form && c.fixes.includes("run") ? (
         <div className="grid gap-2 md:grid-cols-2">
           {c.form.map((f) => (

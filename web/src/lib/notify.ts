@@ -36,24 +36,31 @@ export function disableNotifications() {
 export const notifyState = (): "on" | "off" | "unsupported" =>
   !("Notification" in window) ? "unsupported" : notifyEnabled() ? "on" : "off";
 
-let lastAt = 0;
+/** When each tag last notified: a repeat of the same thing is held back, a different thing is not. */
+const lastAt = new Map<string, number>();
 
 /**
  * A desktop notification — only while the board is in a background tab (in front of you, the
  * in-board pop-up is enough). Which events get one is chosen per kind in the bell panel.
+ *
+ * Throttled per tag, not across the board: one global throttle let a "ready for review" swallow
+ * the approval that arrived a second later (D282). `sticky` keeps it on screen until dealt with;
+ * the caller closes it when the thing is handled on the board.
  */
-export function desktopNotify(title: string, body: string, tag: string) {
-  if (!notifyEnabled() || document.visibilityState === "visible") return;
-  // Two runs finishing in the same second should not produce two pop-ups.
-  if (Date.now() - lastAt < 1500) return;
-  lastAt = Date.now();
+export function desktopNotify(title: string, body: string, tag: string, opts: { sticky?: boolean; onClick?: () => void } = {}): Notification | null {
+  if (!notifyEnabled() || document.visibilityState === "visible") return null;
+  if (Date.now() - (lastAt.get(tag) ?? 0) < 1500) return null;
+  lastAt.set(tag, Date.now());
   try {
-    const n = new Notification(title, { body, tag });
+    const n = new Notification(title, { body, tag, requireInteraction: !!opts.sticky });
     n.onclick = () => {
       window.focus();
+      opts.onClick?.();
       n.close();
     };
+    return n;
   } catch {
     // Notification can throw on some platforms; never let it break the board.
+    return null;
   }
 }

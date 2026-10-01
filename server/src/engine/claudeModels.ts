@@ -68,6 +68,37 @@ export function findClaudeModel(id: string, r: ClaudeModelsResult | null | undef
 }
 
 /**
+ * A model named in words — "opus", "Sonnet 5.5", "haiku", an alias or a full id — as the full id a stage
+ * stores (D258: the cost table needs to know exactly what ran). A family name is the newest of that
+ * family, from your list first, then your login's. null when nothing matches, so the caller can say so
+ * with the list instead of storing a name a run would fail on.
+ */
+export function resolveClaudeModel(name: string, models: ModelEntry[], r: ClaudeModelsResult | null | undefined): string | null {
+  const want = plain(name ?? "").toLowerCase().replace(/\s+/g, " ");
+  if (!want) return null;
+  const listed = models.find((m) => m.id.toLowerCase() === want || m.label.toLowerCase() === want);
+  if (listed) return listed.id;
+  const live = r?.source === "live" ? r.models : [];
+  const byLogin = findClaudeModel(want, r) ?? live.find((m) => m.label.toLowerCase() === want);
+  // An alias such as "opus" is Claude Code's current pick of that family; a family name below gets the
+  // newest one you list, which is what "use opus" means on a board whose list was chosen on purpose.
+  const fam = /^(?:claude[ -])?(opus|sonnet|haiku|fable)(?:[ -]?(\d{1,2})(?:[.-](\d{1,2}))?)?$/.exec(want);
+  if (fam) {
+    const version = fam[2] ? Number(fam[2]) + Number(fam[3] ?? 0) / 100 : null;
+    const pick = (ids: string[]) =>
+      ids
+        .map((id) => ({ id, f: modelFamily(id) }))
+        .filter((x) => x.f && x.f.family === fam[1] && (version === null || Math.abs(x.f.version - version) < 0.001))
+        .sort((a, b) => b.f!.version - a.f!.version)[0]?.id;
+    const found = pick(models.map((m) => m.id)) ?? pick(live.map((m) => m.id));
+    if (found) return found;
+  }
+  if (byLogin) return byLogin.id;
+  // With no list to check against, a full Claude id is taken on its shape.
+  return r?.source !== "live" && /^claude-[a-z0-9][a-z0-9.-]*$/.test(want) ? want : null;
+}
+
+/**
  * ok: your login has it. unlisted: shaped like a Claude id but not on the list (a typo, or an older
  * model that may still work). invalid: not a Claude id at all — a run on it fails. unchecked: the list
  * could not be read, so only the shape was checked.
@@ -78,7 +109,7 @@ export function claudeModelStatus(id: string, r: ClaudeModelsResult | null | und
   return findClaudeModel(id, r) ? "ok" : "unlisted";
 }
 
-type PickSettings = Pick<Settings, "models" | "defaultPipeline" | "tiers" | "debate" | "triageModel" | "chatModel" | "visionModel" | "visionProvider"> & Partial<Pick<Settings, "specModel">>;
+type PickSettings = Pick<Settings, "models" | "defaultPipeline" | "tiers" | "debate" | "triageModel" | "chatModel" | "visionModel" | "visionProvider"> & Partial<Pick<Settings, "specModel" | "chatProvider">>;
 const onClaude = (provider: string | null | undefined) => !provider || provider === ANTHROPIC_PROVIDER_ID;
 
 /** Every Claude model id your settings name, and where — for Setup and the warning by Save. */
@@ -89,7 +120,8 @@ export function claudePicks(s: PickSettings): { where: string; id: string }[] {
     ...(["cheap", "balanced", "strong"] as const).filter((k) => onClaude(s.tiers[k].provider)).map((k) => ({ where: `right-sizing, ${k}`, id: s.tiers[k].model })),
     ...(onClaude(s.debate.critic.provider) ? [{ where: "plan debate critic", id: s.debate.critic.model }] : []),
     { where: "triage model", id: s.triageModel },
-    { where: "side chat model", id: s.chatModel },
+    // A chat on a Claude-compatible provider names that provider's model, not a Claude one (D301).
+    ...(onClaude(s.chatProvider) ? [{ where: "side chat model", id: s.chatModel }] : []),
     ...(s.specModel ? [{ where: "spec rewrite model", id: s.specModel }] : []),
     ...(onClaude(s.visionProvider) ? [{ where: "vision model", id: s.visionModel }] : []),
   ];
@@ -186,7 +218,7 @@ export function claudeUpgrades(s: FollowSettings, r: ClaudeModelsResult | null |
     if (to) patch[key] = to;
   };
   single("triageModel", "triage model");
-  single("chatModel", "side chat model");
+  if (onClaude(s.chatProvider)) single("chatModel", "side chat model");
   single("specModel", "spec rewrite model");
   single("liveReviewModel", "live review model");
   const vision = onClaude(s.visionProvider) ? up("vision model", s.visionModel) : undefined;

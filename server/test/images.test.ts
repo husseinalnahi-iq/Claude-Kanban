@@ -20,6 +20,10 @@ import {
 import { handle } from "../src/imageMcp.ts";
 import type { Mode, Stage } from "../src/types.ts";
 import { until } from "./helpers.ts";
+import { setCodexRunner } from "../src/engine/providers/codexLocal.ts";
+
+// Settings → Images asks after Codex; these tests answer for it instead of the Codex on this computer.
+setCodexRunner(async () => ({ code: 1, out: "" }));
 
 /** A tiny valid JPEG header is enough: the code never decodes the picture. */
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0xff, 0xd9]);
@@ -86,8 +90,15 @@ test("a rate-limited Pollinations call is retried once, then explained in plain 
   assert.equal(f.calls.length, 2, "one retry");
 
   const busy = fakeFetch([() => new Response("slow down", { status: 429 })]);
-  await assert.rejects(gen({ prompt: "x" }, cfg(), busy.fn), /one image every 15 seconds.*free key/s);
+  await assert.rejects(gen({ prompt: "x" }, cfg(), busy.fn), /one image every 15 seconds/);
   assert.equal(busy.calls.length, 2, "never more than one retry");
+});
+
+test("a Pollinations 402 is explained: it needs a key, or the key's allowance is used up (D303)", async () => {
+  const turned = fakeFetch([() => Response.json({}, { status: 402 })]);
+  await assert.rejects(gen({ prompt: "x" }, cfg(), turned.fn), /needs your key from enter\.pollinations\.ai/);
+  await assert.rejects(gen({ prompt: "x" }, cfg({ pollinationsKey: "sk" }), turned.fn), /allowance may be used up/);
+  assert.equal(turned.calls.length, 2, "a 402 is not retried");
 });
 
 test("a Pollinations answer that is not an image is refused rather than saved", async () => {
@@ -122,10 +133,11 @@ test("Cloudflare's errors name the fix: a bad token, a used-up allowance, or mis
   await assert.rejects(gen({ prompt: "   " }, cfg(), fakeFetch([]).fn), /what the image should show/);
 });
 
-test("readiness says in plain words what would happen, before a task depends on it", () => {
-  assert.equal(imageReadiness(cfg()).ready, true);
-  assert.match(imageReadiness(cfg()).detail, /watermark/);
-  assert.match(imageReadiness(cfg({ pollinationsKey: "sk" })).detail, /no watermark/);
+test("readiness says in plain words what would happen, and only a maker on your own account is ready (D303)", () => {
+  assert.equal(imageReadiness(cfg()).ready, false, "Pollinations without a key turns requests away");
+  assert.match(imageReadiness(cfg()).detail, /needs your key/);
+  assert.equal(imageReadiness(cfg({ pollinationsKey: "sk" })).ready, true);
+  assert.equal(imageReadiness(cfg({ provider: "codex", codex: null })).ready, false, "Codex not linked");
   assert.equal(imageReadiness(cfg({ provider: "cloudflare" })).ready, false);
   assert.equal(imageReadiness(cfg({ provider: "cloudflare", cloudflareAccountId: "a", cloudflareToken: "t" })).ready, true);
   assert.equal(imageReadiness(cfg({ provider: "off" })).ready, false);
@@ -158,7 +170,7 @@ test("the tool writes the file, reports its path relative to the project, and te
   try {
     const f = fakeFetch([() => image()]);
     const kept: { path: string; prompt: string; provider: string; bytes: number }[] = [];
-    const h = imageHandlers({ cwd, config: () => cfg(), fetchFn: f.fn, onImage: (i) => kept.push(i) });
+    const h = imageHandlers({ cwd, config: () => cfg({ pollinationsKey: "sk" }), fetchFn: f.fn, onImage: (i) => kept.push(i) });
     const res = await h.generate({ prompt: "a lighthouse at dusk", file: "assets/hero.jpg" });
     assert.equal((res as { isError?: boolean }).isError, undefined);
     assert.match(res.content[0].text, /^Saved assets\/hero\.jpg \(0 KB, jpeg, made by Pollinations\.ai\)/);
@@ -175,6 +187,11 @@ test("the tool writes the file, reports its path relative to the project, and te
     const off = await h.generate({ prompt: "x" });
     assert.equal(f.calls.length, 2);
     assert.equal((off as { isError?: boolean }).isError, undefined, "a second call for the same prompt is a new file");
+
+    const none = await imageHandlers({ cwd, config: () => cfg(), fetchFn: f.fn }).generate({ prompt: "x" });
+    assert.equal((none as { isError?: boolean }).isError, true);
+    assert.match(none.content[0].text, /needs your key[\s\S]*Carry on without it/, "no maker ready: says so, asks nobody");
+    assert.equal(f.calls.length, 2);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -198,7 +215,7 @@ function gitRepo(): string {
 }
 
 /** Runs one stage with a fake session and returns what it was started with. */
-async function stageFor(mode: Mode, settings: Record<string, unknown>, probe?: (o: Options, repo: Repo, taskId: string) => Promise<void>) {
+async function stageFor(mode: Mode, settings: Record<string, unknown>, probe?: (o: Options, repo: Repo, taskId: string) => Promise<void>, keyed = true) {
   const dir = gitRepo();
   const seen: { prompt: string; options: Options }[] = [];
   const q: QueryFn = (params) =>
@@ -213,7 +230,10 @@ async function stageFor(mode: Mode, settings: Record<string, unknown>, probe?: (
   const repo = new Repo(openDb(":memory:"));
   repo.setStateDir(mkdtempSync(join(tmpdir(), "kimgstate-")));
   repo.updateSettings(settings as never);
-  const runner = new TaskRunner({ repo, bus: new Bus(), queryFn: q });
+  // A maker on your own account: Pollinations with a key, unless a test says otherwise.
+  const secrets = new SecretStore(":memory:");
+  if (keyed) secrets.set(POLLINATIONS_KEY_REF, "sk_test");
+  const runner = new TaskRunner({ repo, bus: new Bus(), queryFn: q, secrets });
   const project = repo.createProject({ name: "demo", path: dir, policy: { worktrees: "allowed", autonomous: "allowed", maxConcurrent: 3 } });
   const task = repo.createTask({ project_id: project.id, title: "hero image", mode, pipeline: ONE_STAGE });
   try {
@@ -226,7 +246,7 @@ async function stageFor(mode: Mode, settings: Record<string, unknown>, probe?: (
   }
 }
 
-test("a run gets the images server and is told about it, unless Settings switch images off", async () => {
+test("a run gets the images server and is told about it only when a picture maker is ready (D303)", async () => {
   const on = await stageFor("autonomous", { imageProvider: "pollinations" });
   assert.ok(on.options.mcpServers?.images, "the tool is there");
   assert.match(on.prompt, /## Images[\s\S]*`generate_image`/);
@@ -238,6 +258,25 @@ test("a run gets the images server and is told about it, unless Settings switch 
 
   const supervised = await stageFor("supervised", { imageProvider: "pollinations" });
   assert.match(supervised.prompt, /approved on a card/);
+
+  const keyless = await stageFor("autonomous", { imageProvider: "pollinations" }, undefined, false);
+  assert.equal(keyless.options.mcpServers?.images, undefined, "Pollinations without a key: no tool");
+  assert.doesNotMatch(keyless.prompt, /## Images|generate_image/, "and nothing about pictures in the prompt");
+
+  const unlinked = await stageFor("autonomous", { imageProvider: "codex" });
+  assert.equal(unlinked.options.mcpServers?.images, undefined, "Codex not on the board: no tool");
+  assert.doesNotMatch(unlinked.prompt, /## Images/);
+});
+
+test("a board still on keyless Pollinations moves to Codex-when-linked at start; one with a key keeps it (D303)", () => {
+  for (const keyed of [false, true]) {
+    const repo = new Repo(openDb(":memory:"));
+    repo.updateSettings({ imageProvider: "pollinations" });
+    const secrets = new SecretStore(":memory:");
+    if (keyed) secrets.set(POLLINATIONS_KEY_REF, "sk");
+    new TaskRunner({ repo, bus: new Bus(), queryFn: (() => (async function* () {})()) as QueryFn, secrets }).recover();
+    assert.equal(repo.getSettings().imageProvider, keyed ? "pollinations" : "codex");
+  }
 });
 
 test("an autonomous run may make an image without asking; a supervised one gets a card", async () => {
@@ -259,6 +298,18 @@ test("an autonomous run may make an image without asking; a supervised one gets 
   assert.match(serverRule(IMAGE_PREFIX), /image generation/i);
 });
 
+test("an autonomous run may make a picture through the board's guard too, not only canUseTool (D297)", async () => {
+  let decision: unknown = "not asked";
+  await stageFor("autonomous", { imageProvider: "pollinations" }, async (o) => {
+    const matchers = (o.hooks?.PreToolUse ?? []) as { hooks: ((input: unknown, id: string, x: { signal: AbortSignal }) => Promise<unknown>)[] }[];
+    const answers = [];
+    for (const m of matchers) for (const h of m.hooks) answers.push(await h({ hook_event_name: "PreToolUse", tool_name: IMAGE_TOOL, tool_input: { prompt: "a hero image" } }, "t1", { signal: new AbortController().signal }));
+    assert.ok(answers.length, "the guard hooks were asked");
+    decision = answers.find((a) => (a as { hookSpecificOutput?: { permissionDecision?: string } })?.hookSpecificOutput?.permissionDecision === "deny") ?? "allowed";
+  });
+  assert.equal(decision, "allowed", "the gate used to refuse it as an outside tool");
+});
+
 test("Settings → Images: keys are written and removed without ever being read back, and Try it makes a picture", async () => {
   const repo = new Repo(openDb(":memory:"));
   const bus = new Bus();
@@ -269,9 +320,12 @@ test("Settings → Images: keys are written and removed without ever being read 
   try {
     const status = async () => (await app.inject({ method: "GET", url: "/api/settings/images" })).json();
     let s = await status();
-    assert.equal(s.provider, "pollinations");
-    assert.equal(s.ready, true);
+    assert.equal(s.provider, "codex");
+    assert.equal(s.ready, false, "Codex is not on the board");
+    assert.match(s.detail, /Setup → Codex/);
     assert.equal(s.hasPollinationsKey, false);
+    const early = (await app.inject({ method: "POST", url: "/api/settings/images/test", payload: {} })).json();
+    assert.deepEqual([early.ok, f.calls.length], [false, 0], "Try it with no maker ready asks nobody");
     assert.equal(s.hasCloudflareToken, false);
 
     const put = await app.inject({ method: "PUT", url: "/api/settings/images/secret", payload: { name: POLLINATIONS_KEY_REF, value: " sk_abc " } });

@@ -116,7 +116,7 @@ export class SetupService {
 
   private result(c: SetupCheck, d: Detected, open?: Task[]): SetupCheckResult {
     const fixes: SetupCheckResult["fixes"] = [];
-    if (!d.ok && !d.blockedBy) {
+    if (!d.ok && !d.blockedBy && d.offerFixes !== false) {
       if (c.login) fixes.push("login");
       if (c.run) fixes.push("run");
       if (this.claudeCan(c)) fixes.push("claude");
@@ -128,6 +128,8 @@ export class SetupService {
       why: c.why,
       ok: d.ok,
       detail: d.detail,
+      warn: Boolean(d.warn),
+      action: d.action ?? null,
       fixes,
       runLabel: c.runLabel ?? null,
       form: c.form ? c.form.map(({ name, label, placeholder }) => ({ name, label, placeholder })) : null,

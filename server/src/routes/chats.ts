@@ -23,6 +23,7 @@ export async function chatRoutes(app: FastifyInstance, { repo, runner, chat }: A
         title: z.string().trim().min(1).max(120).optional(),
         model: z.string().trim().min(1).max(120).optional(),
         effort: z.enum(EFFORTS as [string, ...string[]]).optional(),
+        provider: z.string().trim().min(1).max(64).optional(),
         archived: z.boolean().optional(),
       })
       .parse(req.body);

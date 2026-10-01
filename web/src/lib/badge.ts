@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { kindInfo, useUnseen } from "./alerts.ts";
+import { kindInfo, unseenWord, useUnseen } from "./alerts.ts";
 
 const ORIGINAL = "/favicon.ico";
 
@@ -74,7 +74,7 @@ export function useTabBadge(pendingApprovals: number) {
       setIcon(drawIcon(resolve("var(--color-rose)")));
     } else if (unseen) {
       const info = kindInfo(unseen);
-      document.title = `● ${info.label} — Claude Kanban`;
+      document.title = `● ${unseenWord() ?? info.label} — Claude Kanban`;
       setIcon(drawIcon(resolve(info.color)));
     } else {
       document.title = "Claude Kanban";

@@ -1,8 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { ALERT_KINDS, kindInfo, raise, setAlertPrefs, setKindChannel, useAlertPrefs, useUnseen, type AlertKind } from "../lib/alerts.ts";
+import {
+  ALERT_KINDS, clearInbox, kindInfo, markAllRead, openTask, raise, setAlertPrefs, setKindChannel,
+  useAlertPrefs, useInbox, useNeedsYou, useUnseen, type Alert, type AlertKind, type InboxEntry,
+} from "../lib/alerts.ts";
+import { ago } from "../lib/format.ts";
 import { disableNotifications, enableNotifications, notifyState } from "../lib/notify.ts";
-import { THEMES, playSound, type SoundTheme } from "../lib/sounds.ts";
-import { useEscape } from "./ui.tsx";
+import { THEMES, onSoundState, playSound, soundsUnlocked, type SoundTheme } from "../lib/sounds.ts";
+import { useAppData } from "../lib/store.tsx";
+import { NeedsYouActions, OUTCOME_TEXT } from "./NeedsYouActions.tsx";
+import { AnchoredPanel } from "./ui.tsx";
 
 /** What a preview says, so trying a sound also shows what its pop-up looks like. */
 const SAMPLE: Record<AlertKind, [string, string]> = {
@@ -41,26 +47,104 @@ function Chip({ on, onClick, children, title }: { on: boolean; onClick: () => vo
 
 const preview = (kind: AlertKind) => raise({ kind, title: SAMPLE[kind][0], body: SAMPLE[kind][1], preview: true });
 
+/** Most urgent first, the same order the tab badge uses. */
+const URGENT: AlertKind[] = ["approval", "failed", "paused", "usage", "review", "done", "allClear", "resumed", "started"];
+
+/** Whether the browser is letting the board make sound right now. */
+function useSoundUnlocked() {
+  const [on, setOn] = useState(soundsUnlocked());
+  useEffect(() => onSoundState(setOn), []);
+  return on;
+}
+
+function KindDot({ kind, size = 20 }: { kind: AlertKind; size?: number }) {
+  const k = kindInfo(kind);
+  return (
+    <span
+      className="flex shrink-0 items-center justify-center rounded-full text-[9.5px]"
+      style={{ width: size, height: size, background: `color-mix(in srgb, ${k.color} 20%, transparent)`, color: k.color }}
+    >
+      {k.icon}
+    </span>
+  );
+}
+
+function NeedsRow({ a, project }: { a: Alert; project?: string }) {
+  return (
+    <div className="cursor-pointer rounded-lg border border-rose/40 bg-rose/5 px-2.5 py-2 hover:border-rose/70" onClick={() => openTask(a)}>
+      <div className="flex items-start gap-2">
+        <KindDot kind={a.kind} />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[12.5px] font-semibold text-ink-100">{a.title}</span>
+          <span className="block truncate text-[11.5px] text-ink-300">{a.body}</span>
+          <span className="block font-mono text-[10px] text-ink-500">
+            {project ? `${project} · ` : ""}
+            {ago(new Date(a.at).toISOString())}
+          </span>
+        </span>
+      </div>
+      <div className="pl-7">
+        <NeedsYouActions a={a} />
+      </div>
+    </div>
+  );
+}
+
+function HistoryRow({ e, waiting }: { e: InboxEntry; waiting: boolean }) {
+  const done = e.outcome ? OUTCOME_TEXT[e.outcome] : null;
+  return (
+    <button
+      className={`flex w-full items-start gap-2 rounded-md px-1.5 py-1.5 text-left hover:bg-ink-850 ${e.taskId ? "cursor-pointer" : "cursor-default"}`}
+      onClick={() => openTask(e)}
+    >
+      <KindDot kind={e.kind} />
+      <span className="min-w-0 flex-1">
+        <span className={`block truncate text-[12px] ${e.read ? "text-ink-300" : "font-semibold text-ink-100"}`}>{e.title}</span>
+        <span className="block truncate text-[11px] text-ink-500">{e.body}</span>
+      </span>
+      <span className="shrink-0 text-right">
+        <span className="block font-mono text-[10px] text-ink-500">{ago(new Date(e.at).toISOString())}</span>
+        {waiting ? (
+          <span className="block text-[10px] text-rose">waiting</span>
+        ) : done ? (
+          <span className="block text-[10px]" style={{ color: done.color }}>{done.text.replace(/ —.*/, "")}</span>
+        ) : null}
+      </span>
+      {!e.read ? <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-amber" /> : null}
+    </button>
+  );
+}
+
 /**
- * The bell in the top bar. Click it to mute or unmute; the arrow opens the panel: sound theme,
- * volume, and for every kind of event whether it plays a sound, shows a pop-up, or sends a desktop
- * notification. Settings live on this computer — they describe your desk, not the board.
+ * The bell in the top bar. Click it to mute or unmute; the arrow opens the panel. Its Inbox shows
+ * what needs you right now — with Allow and Deny — and the last 50 things the board told you about;
+ * its Settings hold the sound theme, volume, and for every kind of event whether it plays a sound,
+ * shows a pop-up, or sends a desktop notification. All of it lives on this computer — it describes
+ * your desk, not the board.
  */
 export function BellControl() {
   const prefs = useAlertPrefs();
   const unseen = useUnseen();
+  const needs = useNeedsYou();
+  const inbox = useInbox();
+  const unlocked = useSoundUnlocked();
+  const { projects } = useAppData();
   const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState<"inbox" | "settings">("inbox");
   const [desk, setDesk] = useState(notifyState());
   const [touring, setTouring] = useState(false);
   const box = useRef<HTMLDivElement>(null);
 
+  // Looking at the inbox is reading it — including what arrives while it is open.
   useEffect(() => {
-    if (!open) return;
-    const close = (e: MouseEvent) => !box.current?.contains(e.target as Node) && setOpen(false);
-    window.addEventListener("mousedown", close);
-    return () => window.removeEventListener("mousedown", close);
-  }, [open]);
-  useEscape(() => setOpen(false), open);
+    if (open && tab === "inbox") markAllRead();
+  }, [open, tab, inbox]);
+
+  const unread = inbox.filter((e) => !e.read);
+  const waitingKeys = new Set(needs.map((a) => a.key));
+  const badgeKind = URGENT.find((k) => needs.some((a) => a.kind === k) || unread.some((e) => e.kind === k)) ?? null;
+  const count = needs.length + unread.filter((e) => !e.key || !waitingKeys.has(e.key)).length;
+  const projectName = (id?: string) => projects.find((p) => p.id === id)?.name;
 
   const sample = (theme: SoundTheme = prefs.theme, volume = prefs.volume) => playSound("review", theme, volume);
 
@@ -79,40 +163,123 @@ export function BellControl() {
   };
 
   const dot = unseen ? kindInfo(unseen).color : null;
+  const badgeColor = badgeKind ? kindInfo(badgeKind).color : null;
+  // Sound on, but the browser has not let the page play any yet: say so, or silence is a mystery.
+  const blocked = !prefs.muted && !unlocked;
+
+  const toggleMute = () => {
+    setAlertPrefs({ muted: !prefs.muted });
+    // Unmuting answers with a sound, so you know it worked (the click itself unlocks audio).
+    if (prefs.muted) playSound("review", prefs.theme, prefs.volume);
+  };
 
   return (
     <div ref={box} className="relative flex items-center">
       <div className={`flex items-center overflow-hidden rounded-md border ${open ? "border-ink-500" : "border-ink-700"}`}>
         <button
-          onClick={() => setAlertPrefs({ muted: !prefs.muted })}
+          onClick={toggleMute}
           className={`relative px-2 py-1 transition-colors cursor-pointer ${prefs.muted ? "text-ink-500 hover:text-ink-300" : "text-ink-200 hover:text-amber"}`}
-          title={prefs.muted ? "Sounds off — click to turn them on" : "Sounds on — click to mute"}
+          title={
+            prefs.muted
+              ? "Sounds are off — click to turn them on"
+              : blocked
+                ? "Sounds are on, but the browser is holding them until you click on the page — click here to allow them"
+                : "Sounds are on — click to mute"
+          }
+          aria-label={prefs.muted ? "Turn sounds on" : "Mute sounds"}
         >
           <BellIcon muted={prefs.muted} />
-          {dot ? <span className="absolute top-0.5 right-1 h-2 w-2 rounded-full ring-2 ring-ink-950" style={{ background: dot }} /> : null}
+          {blocked ? <span className="absolute bottom-0.5 left-1 h-1.5 w-1.5 rounded-full bg-amber ring-2 ring-ink-950" /> : null}
+          {!count && dot ? <span className="absolute top-0.5 right-1 h-2 w-2 rounded-full ring-2 ring-ink-950" style={{ background: dot }} /> : null}
         </button>
         <button
-          onClick={() => setOpen((v) => !v)}
-          className="border-l border-ink-700 px-1.5 py-1 text-[10px] text-ink-400 hover:text-ink-100 cursor-pointer"
-          title="Notification settings"
+          onClick={() => {
+            // A count on the bell is a reason to open it: land on the Inbox.
+            if (!open && count) setTab("inbox");
+            setOpen((v) => !v);
+          }}
+          className="relative flex items-center gap-1 border-l border-ink-700 px-1.5 py-1 text-[10px] text-ink-400 hover:text-ink-100 cursor-pointer"
+          title="Inbox and notification settings"
+          aria-expanded={open}
         >
+          {count ? (
+            <span
+              className={`rounded-full px-1.5 font-mono text-[10px] font-semibold text-ink-950 ${needs.length ? "pulse-rose" : ""}`}
+              style={{ background: badgeColor ?? "var(--color-amber)" }}
+            >
+              {count > 99 ? "99+" : count}
+            </span>
+          ) : null}
           ▾
         </button>
       </div>
 
-      {open ? (
-        <div className="rise absolute right-0 top-[calc(100%+6px)] z-50 w-[420px] rounded-xl border border-ink-700 bg-ink-900 p-4 kb-raise">
-          <div className="mb-3 flex items-center justify-between">
+      <AnchoredPanel anchor={box} open={open} onClose={() => setOpen(false)} width={440} className="p-4">
+          <div className="mb-3 flex items-center gap-2">
             <span className="text-[13px] font-semibold text-ink-100">Notifications</span>
-            <button
-              onClick={tour}
-              disabled={touring}
-              className="rounded-md border border-ink-600 px-2 py-0.5 text-[11.5px] text-ink-200 hover:border-amber hover:text-amber disabled:opacity-50 cursor-pointer"
-              title="Plays every sound once, with its pop-up"
-            >
-              {touring ? "Playing…" : "♪ Play them all"}
-            </button>
+            <div className="ml-2 flex overflow-hidden rounded-md border border-ink-700">
+              {(["inbox", "settings"] as const).map((t) => (
+                <button
+                  key={t}
+                  onClick={() => setTab(t)}
+                  className={`px-2.5 py-0.5 text-[11.5px] transition-colors cursor-pointer ${tab === t ? "bg-amber/15 text-amber" : "text-ink-300 hover:text-ink-100"}`}
+                >
+                  {t === "inbox" ? `Inbox${needs.length ? ` · ${needs.length}` : ""}` : "Settings"}
+                </button>
+              ))}
+            </div>
+            {tab === "settings" ? (
+              <button
+                onClick={tour}
+                disabled={touring}
+                className="ml-auto rounded-md border border-ink-600 px-2 py-0.5 text-[11.5px] text-ink-200 hover:border-amber hover:text-amber disabled:opacity-50 cursor-pointer"
+                title="Plays every sound once, with its pop-up"
+              >
+                {touring ? "Playing…" : "♪ Play them all"}
+              </button>
+            ) : inbox.length ? (
+              <button
+                onClick={clearInbox}
+                className="ml-auto rounded-md px-2 py-0.5 text-[11px] text-ink-400 hover:text-ink-100 cursor-pointer"
+                title="Empties the history. Anything still waiting on you stays."
+              >
+                Clear
+              </button>
+            ) : null}
           </div>
+
+          {tab === "inbox" ? (
+            <div>
+              {needs.length ? (
+                <>
+                  <div className="mb-1.5 text-[10.5px] uppercase tracking-wider text-rose">Needs you now</div>
+                  <div className="mb-3 space-y-1.5">
+                    {needs.map((a) => (
+                      <NeedsRow key={a.key} a={a} project={projectName(a.projectId)} />
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="mb-3 rounded-lg border border-ink-800 px-3 py-2 text-[12px] text-ink-400">Nothing is waiting on you.</div>
+              )}
+              <div className="mb-1 text-[10.5px] uppercase tracking-wider text-ink-500">Earlier</div>
+              {inbox.length ? (
+                <div className="space-y-0.5">
+                  {inbox.map((e) => (
+                    <HistoryRow key={e.id} e={e} waiting={!!e.key && waitingKeys.has(e.key)} />
+                  ))}
+                </div>
+              ) : (
+                <div className="px-1.5 py-2 text-[11.5px] text-ink-500">What the board tells you about shows up here, newest first.</div>
+              )}
+            </div>
+          ) : (
+          <div>
+          {blocked ? (
+            <div className="mb-3 rounded-md border border-amber/40 bg-amber/10 px-2.5 py-1.5 text-[11.5px] text-amber">
+              Sound is waiting for a click on the page — browsers block it until then. Any click on the board turns it on.
+            </div>
+          ) : null}
 
           <div className="mb-1.5 text-[10.5px] uppercase tracking-wider text-ink-500">Sound</div>
           <div className="mb-3 flex items-center gap-2">
@@ -188,7 +355,7 @@ export function BellControl() {
             <span className="flex-1 text-ink-400">
               Desktop notifications:{" "}
               <b className={desk === "on" ? "text-moss" : "text-ink-300"}>{desk === "on" ? "on" : desk === "unsupported" ? "not supported here" : "off"}</b>
-              <span className="block text-[10.5px] text-ink-500">Only while the board is in a background tab.</span>
+              <span className="block text-[10.5px] text-ink-500">Only while the board is in a background tab. "Needs you" ones stay until dealt with.</span>
             </span>
             {desk !== "unsupported" ? (
               <button
@@ -204,8 +371,9 @@ export function BellControl() {
               </button>
             ) : null}
           </div>
-        </div>
-      ) : null}
+          </div>
+          )}
+      </AnchoredPanel>
     </div>
   );
 }

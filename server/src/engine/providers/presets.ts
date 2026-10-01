@@ -96,11 +96,19 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     help: "LM Studio → Developer → start the server (port 1234), and load models with 32k+ context. The token is a placeholder unless you turn on “Require authentication”.",
   },
   {
-    id: "codex", label: "Codex CLI (OpenAI)", kind: "cli", authRef: "OPENAI_API_KEY",
-    models: [{ id: "gpt-5.6-sol", label: "GPT-5.6 Sol" }, { id: "gpt-5.6-terra", label: "GPT-5.6 Terra" }, { id: "gpt-5.6-luna", label: "GPT-5.6 Luna" }],
-    cli: { preset: "codex" }, mayEditFiles: false,
-    blurb: "Your ChatGPT subscription via `codex exec`. Read-only unless you allow edits.",
-    help: "Install: npm i -g @openai/codex, then `codex login`. Leave the key empty to use the login.",
+    id: "codex", label: "Codex · ChatGPT subscription", kind: "cli", authRef: "",
+    // The picker lists what your plan offers, read from Codex's own folder; these are the fallback.
+    models: [{ id: "gpt-5.6-terra", label: "GPT-5.6 Terra" }, { id: "gpt-5.6-luna", label: "GPT-5.6 Luna" }, { id: "gpt-5.5", label: "GPT-5.5" }],
+    cli: { preset: "codex", auth: "login" }, mayEditFiles: false,
+    blurb: "OpenAI's Codex on your ChatGPT plan (Plus, Pro, Business…) through `codex exec`: no API key and no per-token bill — it uses your plan's Codex limits, and a run that hits them waits for the reset. Read-only unless you allow edits.",
+    help: "Sign in once with your ChatGPT account: in the Codex app, or `codex login`. The board uses that sign-in and never sees your password; it finds the Codex app's own command if the CLI (npm i -g @openai/codex) is not installed.",
+  },
+  {
+    id: "codex-api", label: "Codex · OpenAI API key (pay per use)", kind: "cli", authRef: "CODEX_API_KEY",
+    models: [{ id: "gpt-5.6-terra", label: "GPT-5.6 Terra" }, { id: "gpt-5.6-luna", label: "GPT-5.6 Luna" }, { id: "gpt-5.5", label: "GPT-5.5" }],
+    cli: { preset: "codex", auth: "api-key" }, mayEditFiles: false,
+    blurb: "OpenAI's Codex billed per token to your OpenAI API account, separately from any ChatGPT plan. Read-only unless you allow edits.",
+    help: "Key from platform.openai.com/api-keys. Needs the Codex command: the Codex app's, or npm i -g @openai/codex.",
   },
   {
     id: "gemini", label: "Gemini CLI (Google)", kind: "cli", authRef: "GEMINI_API_KEY",

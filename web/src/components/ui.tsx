@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode, type SelectHTMLAttributes } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode, type RefObject, type SelectHTMLAttributes } from "react";
+import { createPortal } from "react-dom";
+import { pageZoom } from "../lib/view.ts";
 
 type Variant = "primary" | "ghost" | "danger" | "outline" | "go";
 
@@ -281,4 +283,82 @@ export function useAction() {
 
 export function Empty({ children }: { children: ReactNode }) {
   return <div className="rounded-lg border border-dashed border-ink-700 px-4 py-8 text-center text-[12.5px] text-ink-400">{children}</div>;
+}
+
+/**
+ * A panel that drops down from a button in the top bar. Portalled to <body> and fixed to the
+ * viewport, because the top bar scrolls sideways — and a box that scrolls one way clips both, so an
+ * `absolute` panel inside it opened invisibly (D281). Right-aligned to its button, kept on screen,
+ * re-measured on resize and scroll; a click outside both the button and the panel closes it.
+ */
+export function AnchoredPanel({
+  anchor, open, onClose, width, children, className = "",
+}: {
+  anchor: RefObject<HTMLElement | null>;
+  open: boolean;
+  onClose: () => void;
+  width: number;
+  children: ReactNode;
+  className?: string;
+}) {
+  const panel = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+
+  const place = () => {
+    const r = anchor.current?.getBoundingClientRect();
+    if (!r) return;
+    // Measured in screen pixels, placed in zoomed ones (see pageZoom).
+    const z = pageZoom();
+    const w = Math.min(width * z, window.innerWidth - 16);
+    const left = Math.min(Math.max(8, r.right - w), window.innerWidth - w - 8);
+    const top = r.bottom + 6;
+    const next = { left: left / z, top: top / z, width: w / z, maxHeight: (window.innerHeight - top - 12) / z };
+    setPos((prev) => (prev && prev.left === next.left && prev.top === next.top && prev.width === next.width && prev.maxHeight === next.maxHeight ? prev : next));
+  };
+
+  useLayoutEffect(() => {
+    if (open) place();
+    else setPos(null);
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (!panel.current?.contains(t) && !anchor.current?.contains(t)) closeRef.current();
+    };
+    let frame = 0;
+    const soon = (e?: Event) => {
+      if (e && panel.current?.contains(e.target as Node)) return;
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        place();
+      });
+    };
+    document.addEventListener("mousedown", away);
+    window.addEventListener("resize", soon);
+    window.addEventListener("scroll", soon, true);
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      document.removeEventListener("mousedown", away);
+      window.removeEventListener("resize", soon);
+      window.removeEventListener("scroll", soon, true);
+    };
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEscape(() => onClose(), open);
+
+  if (!open || !pos) return null;
+  return createPortal(
+    <div
+      ref={panel}
+      className={`rise fixed z-[90] overflow-y-auto rounded-xl border border-ink-700 bg-ink-900 kb-raise ${className}`}
+      style={{ left: pos.left, top: pos.top, width: pos.width, maxHeight: pos.maxHeight }}
+    >
+      {children}
+    </div>,
+    document.body,
+  );
 }

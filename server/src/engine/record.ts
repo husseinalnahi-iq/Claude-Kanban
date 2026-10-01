@@ -77,6 +77,17 @@ export function outcomeLine(runs: Pick<Run, "stage" | "role" | "status" | "resul
   return first(work.at(-1)?.result_md) ?? first(ok.at(-1)?.result_md) ?? (summary?.trim() || null);
 }
 
+/**
+ * What a finished task has to say, whole: the last successful work stage's report (an answer card's
+ * answer), else the last successful stage's, clipped. What the side chat shows when its card finishes (D285).
+ */
+export function resultText(runs: Pick<Run, "stage" | "role" | "status" | "result_md">[], summary: string | null | undefined, max = 4000): string | null {
+  const ok = runs.filter((x) => x.role === "stage" && x.status === "success" && x.result_md?.trim());
+  const work = ok.filter((x) => x.stage !== "plan" && x.stage !== "review");
+  const text = (work.at(-1) ?? ok.at(-1))?.result_md?.trim() || summary?.trim() || null;
+  return text && text.length > max ? `${text.slice(0, max).trimEnd()} …` : text;
+}
+
 export function taskRecord(r: RecordInput): string {
   const { task, project, runs } = r;
   const total = runs.reduce((sum, x) => sum + x.cost_usd, 0);

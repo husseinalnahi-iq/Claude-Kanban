@@ -188,13 +188,7 @@ export async function taskRoutes(app: FastifyInstance, { repo, bus, runner }: Ap
     const id = idOf(req);
     const current = mustGet(id);
     const body = patchSchema.parse(req.body);
-    if ((body.mode || body.pipeline || body.own_branch !== undefined) && runner.isBusy(id)) throw new ConflictError("Cannot change mode, branch or pipeline while the task is queued or running.");
-    if (body.own_branch !== undefined && body.own_branch !== current.own_branch && (current.branch || current.worktree_path)) {
-      throw new ConflictError(`This task has work on ${current.branch ?? "its worktree"}; approve or discard it before changing where it works.`);
-    }
-    if (body.mode && body.mode !== current.mode && (current.branch || current.worktree_path)) {
-      throw new ConflictError(`This task has work on ${current.branch ?? "its worktree"}; approve or discard it before changing mode.`);
-    }
+    runner.assertReconfigurable(current, body as never);
     if (body.depends_on) checkDeps(id, current.project_id, body.depends_on);
     // Only a link that is being changed: a form that sends back what the task already has must still save.
     checkLinks(id, current.project_id, {

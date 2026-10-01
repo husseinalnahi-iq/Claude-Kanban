@@ -131,6 +131,8 @@ const LATER_COLUMNS: { table: string; column: string; ddl: string }[] = [
   { table: "tasks", column: "own_branch", ddl: "own_branch INTEGER NOT NULL DEFAULT 0" },
   { table: "tasks", column: "checklist_json", ddl: "checklist_json TEXT NOT NULL DEFAULT '[]'" },
   { table: "tasks", column: "done_at", ddl: "done_at TEXT" },
+  { table: "tasks", column: "chat_id", ddl: "chat_id TEXT" },
+  { table: "chats", column: "provider", ddl: "provider TEXT NOT NULL DEFAULT 'anthropic'" },
 ];
 
 /**
@@ -182,7 +184,8 @@ export function openDb(file: string): DatabaseSync {
   seed.run("serial", fresh ? "true" : "false");
   seed.run("maxForcedParallel", "3");
   seed.run("visionModel", DEFAULT_VISION_MODEL);
-  seed.run("imageProvider", "pollinations");
+  // Codex when it is linked, and no picture tool until then (D303).
+  seed.run("imageProvider", "codex");
   seed.run("cloudflareAccountId", "");
   seed.run("tiers", JSON.stringify(SEED_TIERS));
   seed.run("providers", "[]");

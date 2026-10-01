@@ -2,6 +2,13 @@ import { useEffect, useState } from "react";
 import type { ImageProvider, ImageStatus } from "../../../../server/src/types.ts";
 import { api, type ImageTry } from "../../lib/api.ts";
 import { Button, ErrorLine, Field, inputCls, useAction } from "../../components/ui.tsx";
+import { ModelCombobox } from "../../components/ModelCombobox.tsx";
+import { useAppData } from "../../lib/store.tsx";
+import { useCatalog } from "../../lib/catalog.ts";
+import { visibleIn } from "../../lib/modelLists.ts";
+import { useWs } from "../../lib/ws.ts";
+
+const MAKER: Record<string, string> = { codex: "Codex on your ChatGPT plan", cloudflare: "Cloudflare Workers AI", pollinations: "Pollinations.ai" };
 
 const POLLINATIONS_KEY = "POLLINATIONS_API_KEY";
 const CLOUDFLARE_TOKEN = "CLOUDFLARE_API_TOKEN";
@@ -40,7 +47,7 @@ function KeyField({ name, isSet, placeholder, onChanged }: { name: string; isSet
 }
 
 /** Try it: one small image from exactly what is set now, shown here, so a wrong key shows up before a task depends on it. */
-function ImageTryButton({ saved }: { saved: boolean }) {
+function ImageTryButton({ saved, ready }: { saved: boolean; ready: boolean }) {
   const [r, setR] = useState<ImageTry | null>(null);
   const { busy, run } = useAction();
   return (
@@ -49,8 +56,8 @@ function ImageTryButton({ saved }: { saved: boolean }) {
         <Button
           size="sm"
           busy={busy}
-          disabled={!saved}
-          title={saved ? "Makes one small image with the provider and key set here" : "Save settings first: the test uses the saved settings"}
+          disabled={!saved || !ready}
+          title={!saved ? "Save settings first: the test uses the saved settings" : ready ? "Makes one small image with the provider and key set here" : "No picture maker is ready yet"}
           onClick={() =>
             run(async () => {
               setR(null);
@@ -64,14 +71,14 @@ function ImageTryButton({ saved }: { saved: boolean }) {
         >
           Try it
         </Button>
-        <span className="text-[11px] text-ink-500">{saved ? "makes one small picture (10–30 seconds)" : "save first, then try it"}</span>
+        <span className="text-[11px] text-ink-500">{!saved ? "save first, then try it" : ready ? "makes one small picture (10 seconds to a minute)" : "once a picture maker is ready"}</span>
       </div>
       {r ? (
         <div className={`mt-2 rounded-md border px-3 py-2 text-[12px] ${r.ok ? "border-moss/40 text-ink-300" : "border-rust/50 text-rust"}`}>
           {r.ok && r.dataUrl ? (
             <>
               <div className="mb-1.5 text-moss">
-                It works · {(r.latencyMs / 1000).toFixed(1)} s · {r.provider === "cloudflare" ? "Cloudflare Workers AI" : "Pollinations.ai"}
+                It works · {(r.latencyMs / 1000).toFixed(1)} s · {MAKER[r.provider] ?? r.provider}
               </div>
               <img src={r.dataUrl} alt="A test image made just now" className="max-h-64 rounded-md border border-ink-800" />
             </>
@@ -89,23 +96,48 @@ function ImageTryButton({ saved }: { saved: boolean }) {
  * (they travel with settings); the keys save on their own buttons and never come back to the browser.
  */
 export function ImageSettings({
-  provider, setProvider, accountId, setAccountId, saved,
-}: { provider: ImageProvider; setProvider: (p: ImageProvider) => void; accountId: string; setAccountId: (v: string) => void; saved: boolean }) {
+  provider, setProvider, accountId, setAccountId, imageModel, setImageModel, saved,
+}: {
+  provider: ImageProvider;
+  setProvider: (p: ImageProvider) => void;
+  accountId: string;
+  setAccountId: (v: string) => void;
+  imageModel: string;
+  setImageModel: (v: string) => void;
+  saved: boolean;
+}) {
   const [status, setStatus] = useState<ImageStatus | null>(null);
   const [copied, setCopied] = useState(false);
   const { error, run } = useAction();
-  useEffect(() => void run(async () => setStatus(await api.imageStatus())), [saved]);
+  const { settings } = useAppData();
+  const refresh = () => void run(async () => setStatus(await api.imageStatus()));
+  useEffect(refresh, [saved, settings?.codexPictures?.works, settings?.codexPictures?.version]);
+  // Signing Codex in from Setup or Providers changes what this says.
+  useWs((m) => {
+    if (m.type === "codex.updated") refresh();
+  });
+  const codexEntry = settings?.providers.find((p) => p.enabled && p.kind === "cli" && p.cli?.preset === "codex" && p.cli.auth !== "api-key");
+  const codexList = useCatalog(provider === "codex" ? codexEntry : undefined);
+  const codex = status?.codex;
+  const codexWhy = !codex ? "" : !codex.found ? "Codex is not on this computer yet (Setup → Codex)." : codex.signedIn !== "chatgpt" ? "Codex is not signed in with ChatGPT yet (Setup → Codex → Sign in)." : "";
 
   const options: { id: ImageProvider; label: string; blurb: string }[] = [
-    { id: "pollinations", label: "Pollinations.ai — works now, nothing to set up", blurb: "Free, no account. Without a key: a small watermark and about one image every 15 seconds. A free key (enter.pollinations.ai) removes both." },
+    {
+      id: "codex",
+      label: "Codex · your ChatGPT plan — no extra cost",
+      blurb:
+        "Codex's own image model, on the ChatGPT plan you are signed in to. Until Codex is on the board and can make pictures on this computer, tasks simply run without a picture tool." +
+        (codexWhy ? ` ${codexWhy}` : ""),
+    },
     { id: "cloudflare", label: "Cloudflare Workers AI — no watermark, free daily allowance", blurb: "FLUX.1 schnell on a free Cloudflare account (no card): roughly 500 images a day, 1024×1024. Needs your account id and an API token with the Workers AI permission." },
-    { id: "off", label: "Off", blurb: "Runs get no image tool. A task that needs a picture leaves a placeholder or asks you." },
+    { id: "pollinations", label: "Pollinations.ai — with your key", blurb: "Needs your key from enter.pollinations.ai: without one its free tier turns requests away, so it is never used without." },
+    { id: "off", label: "Off", blurb: "Runs get no image tool and are told nothing about pictures. A task that needs one leaves a placeholder." },
   ];
 
   return (
     <div className="space-y-4">
       <div className="space-y-2">
-        {options.map((o) => (
+        {options.filter((o) => o.id === "off" || visibleIn(settings, "pictures", "pictures", o.id, provider)).map((o) => (
           <label key={o.id} className="flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
             <input type="radio" name="image-provider" className="mt-1 accent-amber" checked={provider === o.id} onChange={() => setProvider(o.id)} />
             <span>
@@ -116,8 +148,37 @@ export function ImageSettings({
         ))}
       </div>
 
+      {provider === "codex" ? (
+        <>
+          <Field label="Codex model for pictures" hint="Any of your plan's models can call Codex's image tool; the newest Luna is the cheapest. Leave it on automatic to follow newer Lunas.">
+            <ModelCombobox
+              value={imageModel}
+              onChange={setImageModel}
+              loading={codexList.loading}
+              placeholder="Automatic (the newest Luna)"
+              options={[
+                { id: "", label: "Automatic — the newest Luna", group: "Codex" },
+                ...(codexList.result?.models ?? [])
+                  .filter((m) => visibleIn(settings, "pictures", codexEntry?.id, m.id, imageModel))
+                  .map((m) => ({ id: m.id, label: m.label, group: "Your ChatGPT plan's models", tag: m.warning })),
+              ]}
+              note={codexEntry ? null : "Codex is not on the board yet: Setup → Codex → Use it adds it."}
+            />
+          </Field>
+          {codex?.pictures.works === false ? (
+            <div className="flex items-start gap-2 rounded-md border border-amber/40 bg-amber/5 px-3 py-2 text-[12px] text-amber">
+              <span className="flex-1">
+                {codex.pictures.detail || "Codex could not make a picture on this computer."} Until it can, tasks run without a picture tool.
+                <span className="block text-[11px] text-ink-400">Checked with {codex.pictures.version ?? "this Codex"}; a newer Codex is tried again by itself.</span>
+              </span>
+              <Button size="sm" onClick={() => run(async () => { await api.codexPicturesReset(); setStatus(await api.imageStatus()); })}>Check again</Button>
+            </div>
+          ) : null}
+        </>
+      ) : null}
+
       {provider === "pollinations" ? (
-        <Field label="Pollinations key (optional)" hint="Removes the watermark and the 15-second wait. Free: sign in at enter.pollinations.ai and create a secret key (sk_…).">
+        <Field label="Pollinations key" hint="Needed: sign in at enter.pollinations.ai and create a secret key (sk_…).">
           <KeyField name={POLLINATIONS_KEY} isSet={status?.hasPollinationsKey ?? false} placeholder="sk_…" onChanged={setStatus} />
         </Field>
       ) : null}
@@ -137,11 +198,16 @@ export function ImageSettings({
         <>
           <div className="text-[12px]">
             {status ? (
-              status.ready ? <span className="text-moss">Ready · {status.detail}</span> : <span className="text-amber">{status.detail}</span>
+              status.ready ? (
+                <span className="text-moss">Ready · {status.detail}</span>
+              ) : codex?.pictures.works === false && provider === "codex" ? null : (
+                // The amber box above already says why Codex cannot.
+                <span className="text-amber">{status.detail}</span>
+              )
             ) : null}
             {!saved ? <span className="ml-2 text-ink-500">(unsaved changes)</span> : null}
           </div>
-          <ImageTryButton saved={saved && Boolean(status?.ready)} />
+          <ImageTryButton saved={saved} ready={Boolean(status?.ready)} />
           <div className="mt-3 overflow-x-auto">
             <table className="w-full text-left text-[11.5px]">
               <thead className="text-ink-500">

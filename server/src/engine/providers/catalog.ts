@@ -149,7 +149,15 @@ const saved = (m: ProviderModel, extra: Partial<CatalogModel> = {}): CatalogMode
 export class ModelCatalog {
   private cache = new Map<string, { at: number; ttl: number; value: ModelCatalogResult }>();
 
-  constructor(private fetchJson: FetchJson = realFetchJson, private now: () => number = Date.now) {}
+  /**
+   * `local` answers for providers whose list lives on this computer (Codex's own model cache); it is
+   * passed in so this module stays free of Node imports — the web imports it.
+   */
+  constructor(
+    private fetchJson: FetchJson = realFetchJson,
+    private now: () => number = Date.now,
+    private local: (provider: Provider) => Promise<CatalogModel[] | null> | CatalogModel[] | null = () => null,
+  ) {}
 
   /** `secret` is sent only to a local LM Studio, which asks for one when "Require authentication" is on. */
   async list(provider: Provider, secret?: string | null): Promise<ModelCatalogResult> {
@@ -173,6 +181,8 @@ export class ModelCatalog {
   }
 
   private async ask(provider: Provider, secret?: string | null): Promise<CatalogModel[] | null> {
+    const here = await this.local(provider);
+    if (here) return here;
     const origin = (fallback: string) => new URL(provider.baseUrl || fallback).origin;
     if (isOllama(provider)) {
       const at = origin("http://localhost:11434");

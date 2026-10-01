@@ -8,12 +8,7 @@ import { Button, Empty, ErrorLine, inputCls, useAction } from "../components/ui.
 import { CredentialWarning, riskOf } from "../components/CredentialWarning.tsx";
 import { QuestionCard } from "../components/QuestionCard.tsx";
 import { isQuestion } from "../lib/questions.ts";
-
-function inputSummary(a: Approval): string {
-  const i = (a.input ?? {}) as Record<string, unknown>;
-  const first = (i.command ?? i.file_path ?? i.pattern ?? i.path ?? i.prompt ?? "") as string;
-  return typeof first === "string" ? first : "";
-}
+import { inputSummary } from "../lib/approvals.ts";
 
 function Row({ a, focused }: { a: Approval; focused: boolean }) {
   if (isQuestion(a)) return <QuestionCard a={a} focused={focused} />;

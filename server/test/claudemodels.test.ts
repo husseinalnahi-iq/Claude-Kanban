@@ -248,3 +248,22 @@ test("when your login gets a newer model, the settings move to it and say so; sw
   assert.deepEqual(after.lastModelMove?.moves.map((m) => m.to).sort(), ["claude-opus-5-5", "claude-sonnet-5-5"]);
   assert.ok(seen.includes("settings.updated"), "open pages get the new settings");
 });
+
+test("family names, labels and aliases resolve to the newest full id on the list, and an unknown name to nothing", async () => {
+  const { resolveClaudeModel } = await import("../src/engine/claudeModels.ts");
+  const mine = [
+    { id: "claude-opus-5", label: "Opus 5" },
+    { id: "claude-opus-5-5", label: "Opus 5.5" },
+    { id: "claude-sonnet-5-5", label: "Sonnet 5.5" },
+    { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
+  ];
+  assert.equal(resolveClaudeModel("opus", mine, live()), "claude-opus-5-5", "the newest Opus you list, not the first");
+  assert.equal(resolveClaudeModel("Opus 5", mine, live()), "claude-opus-5", "a label names exactly that model");
+  assert.equal(resolveClaudeModel("sonnet 5.5", mine, live()), "claude-sonnet-5-5");
+  assert.equal(resolveClaudeModel("haiku", mine, null), "claude-haiku-4-5-20251001", "the dated id is still Haiku 4.5");
+  assert.equal(resolveClaudeModel("Fable 5.1", mine, live()), "claude-fable-5-1", "a model only your login has is found there");
+  assert.equal(resolveClaudeModel("claude-opus-5-5", mine, live()), "claude-opus-5-5");
+  assert.equal(resolveClaudeModel("gpt-9", mine, live()), null);
+  assert.equal(resolveClaudeModel("claude-opus-9", mine, live()), null, "a full id your login does not list is probably a typo");
+  assert.equal(resolveClaudeModel("claude-opus-9", mine, null), "claude-opus-9", "with no list to check, a Claude-shaped id is taken on its shape");
+});

@@ -49,7 +49,7 @@ export interface TriageResult {
   /** null when the model gave nothing usable; the caller then keeps the project default. */
   sizing: Sizing | null;
   /** Set when the task needs a live system outside the repository: a sandboxed run cannot do it. */
-  live_access: { reason: string } | null;
+  live_access: { reason: string; /** False when it only reads the live system: a lookup is not raised to the strong tier or proposed as live (D287). */ changes: boolean } | null;
   /** How sure the model is about type/labels, 0–1. Low confidence applies nothing. */
   confidence: number;
   cost_usd: number;
@@ -64,7 +64,7 @@ function schemaFor(labelVocabulary: string[]) {
   return {
   type: "object",
   additionalProperties: false,
-  required: ["title", "type", "priority", "labels", "spec_md", "questions", "split_reason", "subtasks", "confidence", "pipeline", "pipeline_reason", "live_access", "live_access_reason"],
+  required: ["title", "type", "priority", "labels", "spec_md", "questions", "split_reason", "subtasks", "confidence", "pipeline", "pipeline_reason", "live_access", "live_changes", "live_access_reason"],
   properties: {
     title: { type: "string", description: "A short imperative title, max 70 characters." },
     live_access: {
@@ -73,6 +73,12 @@ function schemaFor(labelVocabulary: string[]) {
         "true when doing the task means reading or changing a LIVE system outside the repository — a production database, an ERP or accounting system, a payment or SaaS API, a deployed site — or money, or anything hard to reverse. " +
         "A request that talks about the screens, buttons, records or accounts of a business application (\"on the invoice, the Create button…\") is about that live system, even when the project is named after it. " +
         "false only for work that clearly lives in the repository's own files. When unsure, true: a wrong true costs one suggestion, a wrong false sends a sandboxed run at something it cannot reach.",
+    },
+    live_changes: {
+      type: "boolean",
+      description:
+        "Only when live_access is true: true when the task would CHANGE that system (create, edit, delete, post, send, pay, run a script that writes); " +
+        "false when it only reads it (look up a record, count, report, check a value). When unsure, true. false when live_access is false.",
     },
     live_access_reason: { type: "string", description: "One sentence naming the live system, or empty when live_access is false." },
     type: { type: "string", enum: TASK_TYPES },
@@ -175,7 +181,7 @@ Rules:
 - If the whole change could be described in one sentence, or it lives in a single file, do not split it: return no subtasks.
 - Split only into parts that can be built and verified separately, and give each the files it will touch. Two subtasks that edit the same file must depend on each other — parallel sessions editing one file overwrite each other.
 - Choose the pipeline honestly. The strong tier and high effort cost several times what the cheap tier costs, and most tasks do not need them; a rename, a copy change, a config tweak or a small bug fix is one \`code\` stage on \`cheap\` or \`balanced\` at \`low\` effort. Spending more than the work needs is a defect, not caution.
-- Size is not the only measure: a change that touches a live or production system, accounting or money, or is hard to reverse gets \`strong\` on its code stage however small it looks. A wrong ledger costs more than the tokens.
+- Size is not the only measure: a change that touches a live or production system, accounting or money, or is hard to reverse gets \`strong\` on its code stage however small it looks. A wrong ledger costs more than the tokens. Only reading one to report a value is not that: size a lookup by how hard it is to find.
 - Priority is a suggestion for the human: p0 only for "production is broken or everything is blocked". Most things are p2.
 - Be honest in \`confidence\`. A vague one-line request rarely deserves more than 0.5.`;
 
@@ -275,6 +281,8 @@ export async function triageTask(input: TriageInput, queryFn: QueryFn = query as
   };
 
   const liveAccess = s.live_access === true;
+  // Missing means unsure, and unsure counts as a change: a wrong "reads only" sends a cheap run at a live write.
+  const liveChanges = liveAccess && s.live_changes !== false;
   const rawStages = Array.isArray(s.pipeline) ? (s.pipeline as Record<string, unknown>[]) : [];
   const stages: SizedStage[] = rawStages
     .filter((x) => ["plan", "code", "review"].includes(String(x?.stage)))
@@ -285,11 +293,11 @@ export async function triageTask(input: TriageInput, queryFn: QueryFn = query as
       effort: EFFORTS.includes(x.effort as Effort) ? (x.effort as Effort) : "medium",
     }))
     // Whatever the model said: live-system work is never sized down on its code stage (D191).
-    .map((x) => (liveAccess && x.stage === "code" ? { ...x, tier: "strong" as Tier, effort: atLeast(x.effort, "high") } : x));
+    .map((x) => (liveChanges && x.stage === "code" ? { ...x, tier: "strong" as Tier, effort: atLeast(x.effort, "high") } : x));
   // A pipeline with no code stage would never change anything, whatever the model said.
   // The model's reason was written for the tier it picked; say when the board overrode it, so the
   // card does not read "balanced tier" next to a strong model.
-  const raised = liveAccess && rawStages.some((x) => String(x?.stage) === "code" && x?.tier !== "strong");
+  const raised = liveChanges && rawStages.some((x) => String(x?.stage) === "code" && x?.tier !== "strong");
   const sizingReason = typeof s.pipeline_reason === "string" ? s.pipeline_reason.trim().slice(0, 300) : "";
   const sizing: Sizing | null = stages.some((x) => x.stage === "code")
     ? { stages, reason: raised ? `${sizingReason} Raised to the strong tier: it changes a live system.`.trim() : sizingReason }
@@ -306,7 +314,7 @@ export async function triageTask(input: TriageInput, queryFn: QueryFn = query as
     subtasks,
     split,
     sizing,
-    live_access: liveAccess ? { reason: typeof s.live_access_reason === "string" ? s.live_access_reason.trim().slice(0, 300) : "" } : null,
+    live_access: liveAccess ? { reason: typeof s.live_access_reason === "string" ? s.live_access_reason.trim().slice(0, 300) : "", changes: liveChanges } : null,
     cost_usd: cost,
     model: input.model,
   };

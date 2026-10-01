@@ -79,7 +79,9 @@ export async function describeImage(
     outputFormat: { type: "json_schema", schema: SCHEMA as unknown as Record<string, unknown> },
   };
   // Claude Code on another endpoint (Kimi, GLM, Ollama, LM Studio…): the same job, pointed elsewhere.
-  const options = input.apply ? input.apply(base) : base;
+  // A provider's address and key go in the environment, which replaces the whole of it: the computer's
+  // own comes first, or Claude Code would start without PATH (D301 found the same in the chat).
+  const options = input.apply ? input.apply({ ...base, env: { ...(process.env as Record<string, string>) } }) : base;
   const prompt = inline
     ? [{ type: "image", source: { type: "base64", media_type: mime, data: inline } }, { type: "text", text: "Describe this image." }]
     : `Read the image file \`${basename(input.path)}\` in this folder and describe it.`;

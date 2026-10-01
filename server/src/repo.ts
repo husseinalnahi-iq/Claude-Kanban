@@ -93,6 +93,7 @@ const toTask = (r: Row): Task => ({
   plan_approval: r.plan_approval === null || r.plan_approval === undefined ? null : Number(r.plan_approval) === 1,
   live: Number(r.live ?? 0) === 1,
   own_branch: Number(r.own_branch ?? 0) === 1,
+  chat_id: (r.chat_id as string) ?? null,
   triaged_at: (r.triaged_at as string) ?? null,
   archived_at: (r.archived_at as string) ?? null,
   done_at: (r.done_at as string) ?? null,
@@ -147,6 +148,7 @@ const toChat = (r: Row): Chat => ({
   session_id: (r.session_id as string) ?? null,
   model: r.model as string,
   effort: r.effort as Effort,
+  provider: (r.provider as string) || ANTHROPIC_PROVIDER_ID,
   cost_usd: Number(r.cost_usd ?? 0),
   archived_at: (r.archived_at as string) ?? null,
   created_at: r.created_at as string,
@@ -232,6 +234,11 @@ const toApproval = (r: Row): Approval => ({
   answers: json<Record<string, string> | null>(r.answer_json, null),
   created_at: r.created_at as string,
 });
+const withTask = (r: Row): Approval => ({
+  ...toApproval(r),
+  ...(r.task_title != null ? { task_title: r.task_title as string } : {}),
+  ...(r.project_id != null ? { project_id: r.project_id as string } : {}),
+});
 
 const toMessage = (r: Row): Message => ({
   id: r.id as string,
@@ -309,6 +316,7 @@ const TASK_COLUMNS: Record<string, (v: unknown) => SQLInputValue> = {
   plan_approval: (v) => (v === null || v === undefined ? null : v ? 1 : 0),
   live: (v) => (v ? 1 : 0),
   own_branch: (v) => (v ? 1 : 0),
+  chat_id: str,
 };
 
 export type NewTask = {
@@ -331,6 +339,7 @@ export type NewTask = {
   plan_approval?: boolean | null;
   live?: boolean;
   own_branch?: boolean;
+  chat_id?: string | null;
 };
 
 /** Tiers used to be bare model ids; older rows are read as Claude models and rewritten on the next save. */
@@ -424,8 +433,11 @@ export class Repo {
       triageModel: m.get("triageModel") ?? "claude-haiku-4-5-20251001",
       visionModel: m.get("visionModel") ?? DEFAULT_VISION_MODEL,
       visionProvider: m.get("visionProvider") ?? ANTHROPIC_PROVIDER_ID,
-      imageProvider: isImageProvider(m.get("imageProvider")) ? (m.get("imageProvider") as ImageProvider) : "pollinations",
+      imageProvider: isImageProvider(m.get("imageProvider")) ? (m.get("imageProvider") as ImageProvider) : "codex",
       cloudflareAccountId: m.get("cloudflareAccountId") ?? "",
+      imageModel: m.get("imageModel") ?? "",
+      codexPictures: { works: null, version: null, detail: "", checked_at: null, ...json<Partial<Settings["codexPictures"]>>(m.get("codexPictures"), {}) },
+      hiddenModels: { chat: [], stages: [], helpers: [], pictures: [], ...json<Partial<Settings["hiddenModels"]>>(m.get("hiddenModels"), {}) },
       tiers: normaliseTiers(json<Record<string, unknown>>(m.get("tiers"), {})),
       providers: json<Provider[]>(m.get("providers"), []).map(normaliseProvider),
       debate: { ...SEED_DEBATE, ...json<Partial<Settings["debate"]>>(m.get("debate"), {}) },
@@ -437,6 +449,7 @@ export class Repo {
       questionWaitMin: Number(m.get("questionWaitMin") ?? 0),
       chatModel: m.get("chatModel") || "claude-sonnet-5-5",
       chatEffort: (m.get("chatEffort") as Effort) || "medium",
+      chatProvider: m.get("chatProvider") || ANTHROPIC_PROVIDER_ID,
       specModel: m.get("specModel") || "claude-opus-5-5",
       specEffort: (m.get("specEffort") as Effort) || "high",
       loadUserPlugins: (m.get("loadUserPlugins") ?? "true") !== "false",
@@ -544,15 +557,15 @@ export class Repo {
     this.stmt(
       `INSERT INTO tasks(id, project_id, parent_id, milestone_id, title, spec_md, status, mode, pipeline_json, skills_json,
                          type, priority, labels_json, depends_on_json, related_to_json, auto_queue_children, onboarding, position, created_at, updated_at,
-                         plan_approval, live, own_branch, done_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                         plan_approval, live, own_branch, done_at, chat_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       id, t.project_id, t.parent_id ?? null, t.milestone_id ?? null, t.title, t.spec_md ?? "", t.status ?? "backlog",
       t.mode ?? "supervised", JSON.stringify(t.pipeline ?? []), JSON.stringify(t.skills ?? []),
       t.type ?? "feature", t.priority ?? "p2", JSON.stringify(t.labels ?? []), JSON.stringify(t.depends_on ?? []),
       JSON.stringify(t.related_to ?? []), t.auto_queue_children ? 1 : 0, t.onboarding ?? null, pos, now, now,
       t.plan_approval === undefined || t.plan_approval === null ? null : t.plan_approval ? 1 : 0, t.live ? 1 : 0, t.own_branch ? 1 : 0,
-      t.status === "done" ? now : null,
+      t.status === "done" ? now : null, t.chat_id ?? null,
     );
     return this.getTask(id)!;
   }
@@ -701,16 +714,16 @@ export class Repo {
     return r && toChat(r);
   }
 
-  createChat(c: { project_id: string; title: string; model: string; effort: Effort }): Chat {
+  createChat(c: { project_id: string; title: string; model: string; effort: Effort; provider?: string }): Chat {
     const id = newId("c");
     const now = nowIso();
-    this.stmt("INSERT INTO chats(id, project_id, title, model, effort, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .run(id, c.project_id, c.title, c.model, c.effort, now, now);
+    this.stmt("INSERT INTO chats(id, project_id, title, model, effort, provider, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(id, c.project_id, c.title, c.model, c.effort, c.provider || ANTHROPIC_PROVIDER_ID, now, now);
     return this.getChat(id)!;
   }
 
-  updateChat(id: string, patch: Partial<Pick<Chat, "title" | "session_id" | "model" | "effort" | "cost_usd" | "archived_at">>): Chat {
-    const { sets, vals } = setClause(patch as Record<string, unknown>, { title: str, session_id: str, model: str, effort: str, cost_usd: num, archived_at: str });
+  updateChat(id: string, patch: Partial<Pick<Chat, "title" | "session_id" | "model" | "effort" | "provider" | "cost_usd" | "archived_at">>): Chat {
+    const { sets, vals } = setClause(patch as Record<string, unknown>, { title: str, session_id: str, model: str, effort: str, provider: str, cost_usd: num, archived_at: str });
     if (sets.length) this.stmt(`UPDATE chats SET ${sets.join(", ")}, updated_at = ? WHERE id = ?`).run(...vals, nowIso(), id);
     return this.getChat(id)!;
   }
@@ -723,6 +736,23 @@ export class Repo {
     const rows = this.stmt("SELECT * FROM (SELECT * FROM chat_messages WHERE chat_id = ? ORDER BY id DESC LIMIT ?) ORDER BY id")
       .all(chatId, limit) as Row[];
     return rows.map(toChatMessage);
+  }
+
+  /** The board's updates in a chat after a message: what its cards did while you were away. */
+  chatUpdatesSince(chatId: string, afterId: number): ChatMessage[] {
+    return (this.stmt("SELECT * FROM chat_messages WHERE chat_id = ? AND id > ? AND role = 'update' ORDER BY id").all(chatId, afterId) as Row[]).map(toChatMessage);
+  }
+
+  /** The newest message in a chat of a role, or undefined. */
+  lastChatMessage(chatId: string, role: ChatMessage["role"]): ChatMessage | undefined {
+    const r = this.stmt("SELECT * FROM chat_messages WHERE chat_id = ? AND role = ? ORDER BY id DESC LIMIT 1").get(chatId, role) as Row | undefined;
+    return r && toChatMessage(r);
+  }
+
+  /** Every update a chat has had about one card, oldest first: what was already said, so a restart does not say it again. */
+  chatUpdatesFor(chatId: string, taskId: string): ChatMessage[] {
+    return (this.stmt("SELECT * FROM chat_messages WHERE chat_id = ? AND role = 'update' AND json_extract(meta_json, '$.update.id') = ? ORDER BY id")
+      .all(chatId, taskId) as Row[]).map(toChatMessage);
   }
 
   addChatMessage(m: { chat_id: string; role: ChatMessage["role"]; text: string; meta?: ChatMessage["meta"] }): ChatMessage {
@@ -1047,7 +1077,7 @@ export class Repo {
     const id = newId("a");
     this.stmt("INSERT INTO approvals(id, run_id, task_id, tool_name, input_json, title, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
       .run(id, a.run_id, a.task_id, a.tool_name, JSON.stringify(a.input ?? null), a.title ?? null, nowIso());
-    return this.getApproval(id)!;
+    return this.getApprovalWithTask(id)!;
   }
 
   getApproval(id: string): Approval | undefined {
@@ -1055,10 +1085,22 @@ export class Repo {
     return r && toApproval(r);
   }
 
+  /**
+   * An approval with its task's title and project, as the events carry it: a pop-up built from the
+   * bare row could only say "A task wants to…", and the inbox could not say which project.
+   */
+  getApprovalWithTask(id: string): Approval | undefined {
+    const r = this.stmt(
+      `SELECT approvals.*, tasks.title AS task_title, tasks.project_id AS project_id
+       FROM approvals LEFT JOIN tasks ON tasks.id = approvals.task_id WHERE approvals.id = ?`,
+    ).get(id) as Row | undefined;
+    return r && withTask(r);
+  }
+
   decideApproval(id: string, decision: ApprovalDecision, note: string | null, answers: Record<string, string> | null = null): Approval {
     this.stmt("UPDATE approvals SET decision = ?, decided_at = ?, note = ?, answer_json = ? WHERE id = ? AND decision IS NULL")
       .run(decision, nowIso(), note, answers ? JSON.stringify(answers) : null, id);
-    return this.getApproval(id)!;
+    return this.getApprovalWithTask(id)!;
   }
 
   approvalsForTask(taskId: string): Approval[] {
@@ -1072,7 +1114,7 @@ export class Repo {
        FROM approvals JOIN tasks ON tasks.id = approvals.task_id
        WHERE approvals.decision IS NULL ORDER BY approvals.created_at`,
     ).all() as Row[];
-    return rows.map((r) => ({ ...toApproval(r), task_title: r.task_title as string, project_id: r.project_id as string }));
+    return rows.map(withTask);
   }
 
   pendingApprovals(taskId?: string): Approval[] {
@@ -1082,8 +1124,11 @@ export class Repo {
     return (rows as Row[]).map(toApproval);
   }
 
-  expirePendingApprovals(): number {
-    return Number(this.stmt("UPDATE approvals SET decision = 'expired', decided_at = ? WHERE decision IS NULL").run(nowIso()).changes);
+  /** Closes every waiting card and returns them, so each can be announced as decided. */
+  expirePendingApprovals(note: string | null = null): Approval[] {
+    const ids = (this.stmt("SELECT id FROM approvals WHERE decision IS NULL").all() as Row[]).map((r) => r.id as string);
+    this.stmt("UPDATE approvals SET decision = 'expired', decided_at = ?, note = ? WHERE decision IS NULL").run(nowIso(), note);
+    return ids.map((id) => this.getApprovalWithTask(id)!);
   }
 
   // ---------- project memory ----------

@@ -57,6 +57,7 @@ function audio(): AudioContext | null {
   const AC = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
   if (!AC) return null;
   ctx = new AC();
+  ctx.onstatechange = () => emitState();
   // A gentle limiter so overlapping sounds never clip.
   const comp = ctx.createDynamicsCompressor();
   comp.threshold.value = -14;
@@ -73,7 +74,8 @@ function audio(): AudioContext | null {
 export function armSounds() {
   const unlock = () => {
     const c = audio();
-    if (c && c.state === "suspended") void c.resume();
+    if (c && c.state === "suspended") void c.resume().then(emitState, () => {});
+    emitState();
   };
   window.addEventListener("pointerdown", unlock, { passive: true });
   window.addEventListener("keydown", unlock);
@@ -123,14 +125,39 @@ function voice(c: AudioContext, out: AudioNode, n: Note, t0: number, theme: Soun
   }
 }
 
+/** Whether the page has had a click or key press, after which the browser lets it make sound. */
+const activated = () => (navigator as Navigator & { userActivation?: { hasBeenActive: boolean } }).userActivation?.hasBeenActive ?? true;
+
+/**
+ * A context the browser suspended (an audio device change, a long background spell) is woken
+ * before playing, which is allowed once the page has been clicked. The sound is dropped if waking
+ * takes long: a "needs you" knock arriving a minute late, on the next click, is worse than none.
+ */
+function withRunning(play: (c: AudioContext, out: GainNode) => void) {
+  if (!activated()) return;
+  const c = audio();
+  if (!c || !master) return;
+  const out = master;
+  if (c.state === "running") return play(c, out);
+  const asked = Date.now();
+  void c.resume().then(
+    () => {
+      emitState();
+      if (Date.now() - asked < 1500 && c.state === "running") play(c, out);
+    },
+    () => {},
+  );
+}
+
 /** Plays one event's motif in the chosen voice. `volume` is 0–1. Never throws. */
 export function playSound(id: SoundId, theme: SoundTheme, volume: number) {
+  if (volume <= 0) return;
   try {
-    const c = audio();
-    if (!c || !master || c.state !== "running" || volume <= 0) return;
-    master.gain.setValueAtTime(Math.min(1, volume), c.currentTime);
-    const t0 = c.currentTime + 0.02;
-    for (const n of MOTIFS[id]) voice(c, master, n, t0, theme);
+    withRunning((c, out) => {
+      out.gain.setValueAtTime(Math.min(1, volume), c.currentTime);
+      const t0 = c.currentTime + 0.02;
+      for (const n of MOTIFS[id]) voice(c, out, n, t0, theme);
+    });
   } catch {
     // A sound is a nicety; it must never break the board.
   }
@@ -148,11 +175,12 @@ const FUN: Record<"dodge" | "giggle", Note[]> = {
 };
 
 export function playFun(id: keyof typeof FUN, theme: SoundTheme, volume: number) {
+  if (volume <= 0) return;
   try {
-    const c = audio();
-    if (!c || !master || c.state !== "running" || volume <= 0) return;
-    master.gain.setValueAtTime(Math.min(1, volume), c.currentTime);
-    for (const n of FUN[id]) voice(c, master, n, c.currentTime + 0.01, theme);
+    withRunning((c, out) => {
+      out.gain.setValueAtTime(Math.min(1, volume), c.currentTime);
+      for (const n of FUN[id]) voice(c, out, n, c.currentTime + 0.01, theme);
+    });
   } catch {
     // a nicety, never an error
   }
@@ -160,3 +188,13 @@ export function playFun(id: keyof typeof FUN, theme: SoundTheme, volume: number)
 
 /** For the settings page: whether the browser has let the board make sound yet. */
 export const soundsUnlocked = () => ctx?.state === "running";
+
+const stateListeners = new Set<(unlocked: boolean) => void>();
+function emitState() {
+  for (const l of stateListeners) l(soundsUnlocked());
+}
+/** Told whenever sound becomes allowed or blocked, so the bell can say why it is silent. */
+export function onSoundState(fn: (unlocked: boolean) => void) {
+  stateListeners.add(fn);
+  return () => void stateListeners.delete(fn);
+}

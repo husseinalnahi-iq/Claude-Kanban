@@ -4,8 +4,8 @@
  *
  * A stdio MCP server, written by hand: the protocol is small (initialize, tools/list, tools/call), and
  * the board's runs already get the same tool in-process from the Agent SDK. It reads the board's own
- * settings and secrets, so the provider and key you chose there apply here too, and works without the
- * board running — with Pollinations and no key when the board has never been started.
+ * settings and secrets, so the picture maker and key you chose there apply here too, and works without
+ * the board running. With no maker ready it answers each call with what is missing (D303).
  *
  * stdout is the wire; anything to say goes to stderr.
  */
@@ -17,29 +17,36 @@ import { DB_PATH, SECRETS_PATH } from "./config.ts";
 import { SecretStore } from "./secrets.ts";
 import { z } from "zod";
 import { CLOUDFLARE_TOKEN_REF, POLLINATIONS_KEY_REF, TOOL_DESCRIPTION, TOOL_INPUT, TOOL_NAME, imageHandlers, type ImageConfig, type ToolInput } from "./engine/images.ts";
-import { IMAGE_SERVER, type ImageProvider } from "./types.ts";
+import { IMAGE_SERVER, type ImageProvider, type Settings } from "./types.ts";
+import { codexImagePart } from "./engine/codexImages.ts";
 
 const cwd = process.env.KANBAN_IMAGE_DIR || process.cwd();
 
 /** Settings → Images as the board stores them; the defaults when there is no board database yet. */
 async function config(): Promise<ImageConfig> {
   const secrets = new SecretStore(SECRETS_PATH);
-  let provider: ImageProvider = "pollinations";
+  let provider: ImageProvider = "codex";
   let cloudflareAccountId = "";
+  let settings: Settings | null = null;
   if (existsSync(DB_PATH)) {
     try {
       const { openDb } = await import("./db.ts");
       const { Repo } = await import("./repo.ts");
       const s = new Repo(openDb(DB_PATH)).getSettings();
+      settings = s;
       provider = s.imageProvider;
       cloudflareAccountId = s.cloudflareAccountId;
     } catch (e) {
-      process.stderr.write(`images: could not read the board's settings (${(e as Error).message}); using Pollinations\n`);
+      process.stderr.write(`images: could not read the board's settings (${(e as Error).message}))\n`);
     }
   }
   // "Off" switches the tool off for the board's runs; here you asked for it by adding the server.
-  if (provider === "off") provider = "pollinations";
-  return { provider, pollinationsKey: secrets.get(POLLINATIONS_KEY_REF), cloudflareAccountId, cloudflareToken: secrets.get(CLOUDFLARE_TOKEN_REF) };
+  if (provider === "off") provider = "codex";
+  // Codex makes them when the board says so (D297); what this process learns is kept for it alone.
+  const codex = settings ? await codexImagePart(settings, secrets, (works, detail, version) => {
+    settings!.codexPictures = { works, version, detail, checked_at: new Date().toISOString() };
+  }) : null;
+  return { provider, pollinationsKey: secrets.get(POLLINATIONS_KEY_REF), cloudflareAccountId, cloudflareToken: secrets.get(CLOUDFLARE_TOKEN_REF), codex };
 }
 
 const handlers = imageHandlers({ cwd, config: () => cachedConfig!, onImage: (i) => process.stderr.write(`images: ${i.path} (${i.provider})\n`) });

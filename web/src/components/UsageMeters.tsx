@@ -6,7 +6,7 @@ import { ago, clock, until } from "../lib/format.ts";
 import { navigate } from "../lib/router.ts";
 import { useProviderUsage } from "../lib/providerUsage.ts";
 import { ProviderUsageCard } from "./ProviderUsage.tsx";
-import { useEscape } from "./ui.tsx";
+import { AnchoredPanel } from "./ui.tsx";
 
 const LABELS: Record<string, string> = {
   five_hour: "5-hour window",
@@ -68,13 +68,6 @@ export function UsageMeters() {
     if (m.type === "limits.updated") setLimits(m.limits);
     if (m.type === "task.updated" && (m.task.status === "paused" || paused.some((p) => p.id === m.task.id))) loadPaused();
   });
-  useEffect(() => {
-    if (!open) return;
-    const close = (e: MouseEvent) => !box.current?.contains(e.target as Node) && setOpen(false);
-    window.addEventListener("mousedown", close);
-    return () => window.removeEventListener("mousedown", close);
-  }, [open]);
-  useEscape(() => setOpen(false), open);
 
   const shown = limits.filter((l) => label(l.type)).sort((a, b) => rank(a.type) - rank(b.type));
   const blocked = shown.some((l) => l.status === "rejected");
@@ -135,8 +128,7 @@ export function UsageMeters() {
         {paused.length ? <span className="rounded bg-iris/20 px-1 font-mono text-[10px] text-iris">{paused.length} paused</span> : null}
       </button>
 
-      {open ? (
-        <div className="rise absolute right-0 top-[calc(100%+6px)] z-50 w-[340px] rounded-xl border border-ink-700 bg-ink-900 p-4 kb-raise">
+      <AnchoredPanel anchor={box} open={open} onClose={() => setOpen(false)} width={340} className="p-4">
           <div className="mb-3 flex items-baseline justify-between">
             <span className="text-[13px] font-semibold text-ink-100">Claude usage</span>
             <span className="font-mono text-[10.5px] text-ink-500">{newest ? `as of ${ago(newest)}` : "not measured yet"}</span>
@@ -234,8 +226,7 @@ export function UsageMeters() {
             <span className="text-[10.5px] text-ink-500">free · also updates every 5 minutes by itself</span>
           </div>
           {error ? <div className="mt-2 text-[11.5px] text-rust">{error}</div> : null}
-        </div>
-      ) : null}
+      </AnchoredPanel>
     </div>
   );
 }

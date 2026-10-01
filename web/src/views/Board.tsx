@@ -15,6 +15,8 @@ import { liveTasks } from "../components/LiveBrowser.tsx";
 import { openTaskOn } from "./TaskDrawer.tsx";
 import { COLUMN_SIZES, setViewPrefs, useViewPrefs } from "../lib/view.ts";
 import { ChecklistLine } from "../components/Checklist.tsx";
+import { phase, stoppedProvider, waitingOn, waitLine } from "../lib/phase.ts";
+import { isAnswerStage, stageLabel } from "../../../server/src/engine/answer.ts";
 
 const DOT: Record<StageState, string> = {
   idle: "border border-ink-500 bg-transparent",
@@ -37,32 +39,6 @@ const COLUMNS: { id: string; statuses: TaskStatus[]; label: string; color: strin
   { id: "in-progress", statuses: IN_PROGRESS, label: "In progress", color: "border-amber", text: "text-amber", dot: "bg-amber" },
   ...(["review", "done", "failed"] as const).map((s) => ({ id: s, statuses: [s], ...STATUS_META[s] })),
 ];
-
-/** The provider of the stage a paused task stopped on: the first one that has not succeeded. */
-function stoppedProvider(card: TaskCard): string | null {
-  const i = card.stage_states.findIndex((s) => s !== "success");
-  return card.pipeline[i < 0 ? card.pipeline.length - 1 : i]?.provider ?? null;
-}
-
-/** The in-progress badge: which stage is running, or why it is waiting. */
-function phase(card: TaskCard, asking?: boolean): { text: string; tone: string; title: string } {
-  if (card.status === "approval" && asking) return { text: "asks you", tone: "border-iris/60 text-iris", title: "Claude has a question for you — open the task to answer" };
-  if (card.status === "approval" && card.plan_gate) return { text: "approve plan", tone: "border-iris/60 text-iris", title: "The plan is waiting for you — open the task to approve, edit or send it back" };
-  if (card.status === "approval") return { text: "needs you", tone: "border-rose/60 text-rose", title: "Waiting for you to allow or deny something — open the task" };
-  if (card.status === "paused" && card.pause_reason === "cost") return { text: "needs you · cost", tone: "border-rose/60 text-rose", title: "It reached its cost ceiling — open the task and press Continue or Stop" };
-  if (card.status === "paused" && card.pause_reason === "provider") {
-    const who = stoppedProvider(card) ?? "provider";
-    return card.resume_at
-      ? { text: `paused · ${who}`, tone: "border-iris/50 text-iris", title: `${who} ran out of usage; it carries on by itself, or open it to switch provider` }
-      : { text: `needs you · ${who}`, tone: "border-rose/60 text-rose", title: `${who} ran out of credit — open the task to switch provider, or top it up and try again` };
-  }
-  if (card.status === "paused") return { text: "paused · limit", tone: "border-iris/50 text-iris", title: "Paused by your Claude usage limit; it carries on by itself" };
-  if (card.status === "planning") return { text: "planning", tone: "border-cyan/50 text-cyan", title: "The plan stage is running" };
-  const i = card.stage_states.indexOf("running");
-  const stage = i >= 0 ? card.pipeline[i]?.stage : undefined;
-  const word = stage === "code" ? "coding" : stage === "review" ? "reviewing" : stage === "plan" ? "planning" : "running";
-  return { text: word, tone: "border-amber/50 text-amber", title: stage ? `The ${stage} stage is running` : "A stage is running" };
-}
 
 /** Keeps a project's task cards live: initial fetch, then WS upserts; refetch on run end for costs. */
 export function useTaskCards(projectId: string | null) {
@@ -108,7 +84,7 @@ export function useTaskCards(projectId: string | null) {
 const Card = memo(function Card({
   card,
   parentTitle,
-  blocked,
+  waiting,
   progress,
   serial,
   asking,
@@ -116,7 +92,8 @@ const Card = memo(function Card({
 }: {
   card: TaskCard;
   parentTitle?: string;
-  blocked?: boolean;
+  /** What it still waits for: the tasks it depends on that are not done. */
+  waiting?: { id: string; title: string; status: TaskStatus }[];
   progress?: { done: number; total: number };
   /** The board runs one task at a time, so queueing means waiting — offer the way past it. */
   serial?: boolean;
@@ -170,7 +147,11 @@ const Card = memo(function Card({
         {card.labels.slice(0, 2).map((l) => (
           <Chip key={l} className="border-ink-700 text-ink-400 normal-case">{l}</Chip>
         ))}
-        {blocked ? <Chip className="border-slate/50 text-slate" title="Waiting on another task">blocked</Chip> : null}
+        {waiting?.length ? (
+          <Chip className="border-slate/50 text-slate" title={`Waits for ${waiting.map((w) => `“${w.title}” (${w.status})`).join(", ")}`}>
+            waits for {waiting.length}
+          </Chip>
+        ) : null}
         {card.questions?.some((q) => !q.answer) ? (
           <Chip className="border-cyan/60 font-semibold text-cyan" title={card.questions.filter((q) => !q.answer).map((q) => q.text).join("\n")}>
             {card.questions.filter((q) => !q.answer).length} question{card.questions.filter((q) => !q.answer).length === 1 ? "" : "s"} for you
@@ -214,6 +195,12 @@ const Card = memo(function Card({
       </div>
       <div className="text-[13px] font-medium leading-snug text-ink-100">{card.title}</div>
       {card.summary ? <div className="mt-1.5 line-clamp-2 text-[12px] leading-snug text-ink-300">{card.summary}</div> : null}
+      {/* Queued before what it needs was done: it starts by itself once that is (D289). */}
+      {waiting?.length && (card.status === "queued" || card.status === "backlog") ? (
+        <div className={`mt-1.5 line-clamp-2 text-[11.5px] ${waiting.some((w) => w.status === "failed") ? "text-rust" : card.status === "queued" ? "text-slate" : "text-ink-400"}`}>
+          ⏳ {waitLine(waiting)}
+        </div>
+      ) : null}
       {IN_PROGRESS.includes(card.status) || card.status === "failed" ? <ChecklistLine list={card.checklist} live={live} /> : null}
       {card.blocked && card.status === "failed" ? (
         <div className="mt-1.5 line-clamp-2 text-[11.5px] text-rose">{card.blocked.reason}</div>
@@ -289,9 +276,9 @@ const Card = memo(function Card({
             while hidden: laid out beside the chips, the invisible buttons squeezed them to one letter. */}
         <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
           {card.pipeline.map((s, i) => (
-            <span key={i} className={`flex items-center gap-1 font-mono text-[10px] ${s.provider ? "text-iris" : "text-ink-400"}`} title={`${s.stage} · ${s.model}${s.provider ? ` via ${s.provider}` : ""} · ${s.effort} · ${card.stage_states[i]}`}>
+            <span key={i} className={`flex items-center gap-1 font-mono text-[10px] ${s.provider ? "text-iris" : "text-ink-400"}`} title={`${stageLabel(s)} · ${s.model}${s.provider ? ` via ${s.provider}` : ""} · ${s.effort} · ${card.stage_states[i]}`}>
               <span className={`inline-block h-2 w-2 rounded-full ${DOT[card.stage_states[i] ?? "idle"]}`} />
-              <span className="text-ink-500">{STAGE_LETTER[s.stage]}</span>
+              <span className="text-ink-500">{isAnswerStage(s) ? "A" : STAGE_LETTER[s.stage]}</span>
               {shortModel(s.model).split("-")[0]}
               {s.fast ? <span className="text-amber" title="Fast mode">↯</span> : null}
             </span>
@@ -370,6 +357,7 @@ export function Board({ project }: { project: ProjectWithGit }) {
   const [showArchived, setShowArchived] = useState(false);
   const titles = useMemo(() => new Map(cards.map((c) => [c.id, c.title])), [cards]);
   const done = useMemo(() => new Set(cards.filter((c) => c.status === "done").map((c) => c.id)), [cards]);
+  const byId = useMemo(() => new Map(cards.map((c) => [c.id, c])), [cards]);
   /** Progress of a parent's children, so a parent card says 2/5 without opening it. */
   const progress = useMemo(() => {
     const m = new Map<string, { done: number; total: number }>();
@@ -574,7 +562,7 @@ export function Board({ project }: { project: ProjectWithGit }) {
                   <Card
                     key={c.id}
                     card={c}
-                    blocked={c.depends_on.some((d) => !done.has(d))}
+                    waiting={c.depends_on.length ? waitingOn(c, byId) : undefined}
                     progress={progress.get(c.id)}
                     parentTitle={c.parent_id ? titles.get(c.parent_id) : undefined}
                     serial={settings?.serial}

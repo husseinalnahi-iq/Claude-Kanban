@@ -88,6 +88,26 @@ test("a question in a supervised run becomes a card, and your answer goes back i
   }
 });
 
+test("an approval event names its task and project, so the pop-up can say which task wants it", async () => {
+  const q = asking();
+  const s = setup(q.fn);
+  try {
+    const task = s.repo.createTask({ project_id: s.project.id, title: "Name me", pipeline: ONE });
+    s.runner.queueTask(task.id);
+    await until(() => s.repo.pendingApprovals(task.id).length === 1);
+    const asked = s.seen.find((m: WsMessage) => m.type === "approval.requested") as Extract<WsMessage, { type: "approval.requested" }>;
+    assert.equal(asked.approval.task_title, "Name me");
+    assert.equal(asked.approval.project_id, s.project.id);
+    s.runner.answerApproval(asked.approval.id, { "Which colour should the button be?": "Blue" });
+    await until(() => s.seen.some((m: WsMessage) => m.type === "approval.decided"));
+    const decided = s.seen.find((m: WsMessage) => m.type === "approval.decided") as Extract<WsMessage, { type: "approval.decided" }>;
+    assert.equal(decided.approval.task_title, "Name me", "the decided event is named too");
+    assert.equal(decided.approval.decision, "answered");
+  } finally {
+    s.cleanup();
+  }
+});
+
 test("by default a question waits for you: no timer, still pending", async () => {
   const q = asking();
   const s = setup(q.fn);

@@ -22,8 +22,8 @@ export const usesWorktree = (t: { mode: Mode; own_branch?: boolean }): boolean =
 
 export const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
 
-/** Where `generate_image` makes pictures: free Pollinations.ai, Cloudflare Workers AI with your token, or nowhere (D262). */
-export const IMAGE_PROVIDERS = ["pollinations", "cloudflare", "off"] as const;
+/** Where `generate_image` makes pictures: Codex on your ChatGPT plan (D297), free Pollinations.ai, Cloudflare Workers AI with your token, or nowhere (D262). */
+export const IMAGE_PROVIDERS = ["codex", "pollinations", "cloudflare", "off"] as const;
 export type ImageProvider = (typeof IMAGE_PROVIDERS)[number];
 /** The image tool's MCP names, here so the web can label its cards without importing the engine. */
 export const IMAGE_SERVER = "images";
@@ -40,7 +40,25 @@ export interface ImageStatus {
   detail: string;
   /** The one line that adds the tool to your own Claude Code (`claude mcp add …`). */
   claudeCodeCommand: string;
+  /** Codex as a picture maker: whether it is there, its account, and whether it can make pictures here (D297). */
+  codex: { found: boolean; signedIn: "chatgpt" | "api-key" | null; version: string | null; pictures: CodexPictures; model: string };
 }
+
+/** Whether Codex can make pictures on this computer, learned the first time it is asked to (D297). */
+export interface CodexPictures {
+  /** null: not tried with this Codex yet. */
+  works: boolean | null;
+  /** The Codex version it was tried with: a newer one is tried again. */
+  version: string | null;
+  detail: string;
+  checked_at: string | null;
+}
+
+/** The pickers whose model lists Settings → Model lists controls (D300). */
+export const MODEL_SURFACES = ["chat", "stages", "helpers", "pictures"] as const;
+export type ModelSurface = (typeof MODEL_SURFACES)[number];
+/** A model as the lists name it: "anthropic:claude-opus-5-5", "codex:gpt-6-luna", "pictures:pollinations". */
+export const modelKey = (provider: string | null | undefined, model: string) => `${provider || "anthropic"}:${model}`;
 
 export interface Stage {
   stage: StageName;
@@ -93,7 +111,8 @@ export interface ProviderModel {
 export interface CatalogModel {
   id: string;
   label: string;
-  group: "local" | "cloud" | "loaded" | "downloaded" | "free" | "paid" | "saved";
+  /** `plan`: included in a subscription you are signed in to (Codex on ChatGPT), no per-token bill. */
+  group: "local" | "cloud" | "loaded" | "downloaded" | "free" | "paid" | "plan" | "saved";
   inputPer1M?: number;
   outputPer1M?: number;
   contextWindow?: number;
@@ -101,6 +120,8 @@ export interface CatalogModel {
   installed?: boolean;
   /** Why this model may fail as a stage, e.g. loaded with too little context. */
   warning?: string;
+  /** The effort levels it takes, when the provider says (Codex does, D298). */
+  efforts?: Effort[];
 }
 
 /** One Claude model your login can use, as Claude Code reports it (GET /claude/models). */
@@ -176,7 +197,11 @@ export interface Provider {
   /** NAME of the secret holding the key (e.g. "ZAI_API_KEY"), never the key itself. */
   authRef: string;
   models: ProviderModel[];
-  cli?: { preset: CliPreset; command?: string; extraArgs?: string[]; envPassthrough?: string[] };
+  /**
+   * `auth` (Codex): `login` runs on the account the CLI is signed in to — a ChatGPT plan — and never
+   * sees an API key; `api-key` passes this provider's key. Unset: the key if one is set, else the login (D293).
+   */
+  cli?: { preset: CliPreset; command?: string; extraArgs?: string[]; envPassthrough?: string[]; auth?: "login" | "api-key" };
   /** cli only: may it run on code stages and change files? Off by default — see D129. */
   mayEditFiles: boolean;
   /**
@@ -455,6 +480,8 @@ export interface Task {
   live: boolean;
   /** A supervised task that still works in its own worktree and branch, landing only on Approve (D234). Autonomous always does. */
   own_branch: boolean;
+  /** The side chat that made this card: its result, failure, plan or question is posted back there (D285). */
+  chat_id: string | null;
   /** Set when the board classified this task, so the UI can show it was a guess. */
   triaged_at: string | null;
   /** Hidden from the board when set. Purely visual — the task, its runs and its history stay. */
@@ -555,6 +582,8 @@ export interface Chat {
   session_id: string | null;
   model: string;
   effort: Effort;
+  /** Where the model runs: "anthropic" (Claude) or a Claude-compatible provider's id (D301). */
+  provider: string;
   cost_usd: number;
   archived_at: string | null;
   created_at: string;
@@ -563,16 +592,30 @@ export interface Chat {
   busy?: boolean;
 }
 
+/** What a card the chat made did by itself, posted into that chat by the board — no model call (D285). */
+export interface ChatUpdate {
+  id: string;
+  title: string;
+  kind: "finished" | "failed" | "plan" | "question";
+  status: TaskStatus;
+  /** The answer or outcome, why it failed, the plan's first lines, or the question. */
+  text: string;
+  question_id?: string;
+  options?: string[];
+  cost_usd?: number;
+}
+
 /**
  * One line of a side chat. `tool` rows are the quiet "read server/src/db.ts" lines; `meta.cards` are
- * task cards the chat created, queued, scheduled or talked to, shown as chips you can open.
+ * task cards the chat created, queued, scheduled or talked to, shown as cards you can act on. `update`
+ * rows are written by the board, not the model, when one of the chat's cards moves on.
  */
 export interface ChatMessage {
   id: number;
   chat_id: string;
-  role: "user" | "assistant" | "tool" | "error";
+  role: "user" | "assistant" | "tool" | "error" | "update";
   text: string;
-  meta: { cards?: { id: string; title: string; action: "created" | "updated" | "queued" | "scheduled" | "messaged" | "answered" | "stopped" | "retried" }[]; cost_usd?: number };
+  meta: { cards?: { id: string; title: string; action: "created" | "updated" | "queued" | "scheduled" | "messaged" | "answered" | "stopped" | "retried" }[]; cost_usd?: number; update?: ChatUpdate };
   ts: string;
 }
 
@@ -804,8 +847,14 @@ export interface Settings {
   visionModel: string;
   /** Where the vision model runs: "anthropic" (Claude, the default) or a provider id from Settings → Providers. */
   visionProvider: string;
-  /** Which free image model runs make pictures with (`generate_image`), or "off". D262. */
+  /** Who makes pictures for runs (`generate_image`), or "off". D262; Codex D297. */
   imageProvider: ImageProvider;
+  /** The Codex model that makes pictures; "" lets the board pick the newest Luna (D297). */
+  imageModel: string;
+  /** What the board learned about Codex making pictures here. Written by the board, not by Settings. */
+  codexPictures: CodexPictures;
+  /** Per picker, the models it does not list: "provider:model". A hide-list, so new models show by themselves (D300). */
+  hiddenModels: Record<ModelSurface, string[]>;
   /** Cloudflare account id (dashboard → Workers AI). Not a secret; the API token lives in the secret store. */
   cloudflareAccountId: string;
   /**
@@ -841,6 +890,8 @@ export interface Settings {
   /** The side chat's model and effort: a balance of quality and price for questions about code. */
   chatModel: string;
   chatEffort: Effort;
+  /** Where the default chat model runs: "anthropic" (Claude) or a Claude-compatible provider's id (D301). */
+  chatProvider: string;
   /** The Spec section's ✦ Rewrite: Opus by default — it reads the code first, and a good spec saves a whole run. */
   specModel: string;
   specEffort: Effort;
@@ -930,6 +981,10 @@ export interface SetupCheckResult {
   why: string;
   ok: boolean;
   detail: string;
+  /** Works, but not the way you probably mean it: shown amber. */
+  warn: boolean;
+  /** The one thing to press now, posted to the board's own endpoint ("Use it" → /codex/link). */
+  action: { label: string; endpoint: string } | null;
   /** What the page may offer: a built-in command, a supervised Claude session, Claude's own login. */
   fixes: ("run" | "claude" | "login")[];
   /** The one-click button's word ("Install" when null). */
@@ -974,4 +1029,5 @@ export type WsMessage =
   | { type: "providers.out"; out: ProviderOut[] }
   | { type: "setup.updated"; check: SetupCheckResult }
   | { type: "setup.output"; id: string; chunk: string }
+  | { type: "codex.updated"; status: { found: boolean; command: string; version: string | null; signedIn: "chatgpt" | "api-key" | null; line: string; linked: boolean } }
   | { type: "health.updated"; health: { loggedIn: boolean; authMethod: string | null; cliVersion: string | null; sdkVersion: string; error: string | null; checkedAt: string } };

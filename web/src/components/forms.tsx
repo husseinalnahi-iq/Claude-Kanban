@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { DependsOn } from "./DependsOn.tsx";
 import type { Mode, Stage } from "../../../server/src/types.ts";
 import { api, type FolderProbe, type ProjectWithGit } from "../lib/api.ts";
 import type { StageStat } from "../../../server/src/routes/analytics.ts";
@@ -44,6 +45,7 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
   const [ownBranch, setOwnBranch] = useState(false);
   const noBranch = branchBlocked(project);
   const [planApproval, setPlanApproval] = useState<boolean | null>(null);
+  const [after, setAfter] = useState<string[]>([]);
   const { busy, error, run } = useAction();
   const invalid = whenInvalid(when);
   // "Quick change": the same pipeline without its plan stage. A one-file fix taken through plan → code →
@@ -65,7 +67,7 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
         onClose();
         return;
       }
-      const t = await api.createTask({ project_id: project.id, title, spec_md: spec, mode, pipeline, parent_id: parentId ?? null, milestone_id: milestoneId ?? null, live, plan_approval: planApproval, own_branch: mode === "supervised" && ownBranch });
+      const t = await api.createTask({ project_id: project.id, title, spec_md: spec, mode, pipeline, parent_id: parentId ?? null, milestone_id: milestoneId ?? null, live, plan_approval: planApproval, own_branch: mode === "supervised" && ownBranch, depends_on: after });
       const startAt = startAtOf(when);
       if (startAt) {
         // A start time means "not now": the scheduler queues it when the time comes, so Create & queue
@@ -101,6 +103,11 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
         <Field label="Spec (markdown)">
           <textarea className={`${inputCls} min-h-[120px] font-mono text-[12.5px]`} value={spec} onChange={(e) => setSpec(e.target.value)} placeholder="What done looks like, constraints, files…" />
         </Field>
+        {when.kind !== "repeat" ? (
+          <Field label="Starts after (optional)" hint={after.length ? "It waits for these to be done, then starts by itself — and is told what they did. Create & queue now: it waits in Queued." : "Chain it after other tasks: pick the ones that must be done first."}>
+            <DependsOn projectId={project.id} value={after} onChange={setAfter} />
+          </Field>
+        ) : null}
         <Field group label={<span className="flex items-center gap-1.5">Run mode <ModeHelp /></span>} hint={mode === "autonomous" ? "Runs in its own worktree on branch kanban/<id>; Approve merges it." : ownBranch && !noBranch ? "Runs on its own branch kanban/<id>; every write waits for your approval, and Approve merges it." : "Runs in the main checkout; every write waits for your approval."}>
           <div className="flex gap-2">
             {(["supervised", "autonomous"] as Mode[]).map((m) => (

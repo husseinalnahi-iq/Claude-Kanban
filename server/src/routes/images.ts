@@ -10,7 +10,7 @@ const SECRET_NAMES = [POLLINATIONS_KEY_REF, CLOUDFLARE_TOKEN_REF] as const;
  * the keys never do (D125), so they are written and removed here, and only "is one set?" is read back.
  */
 export async function imageRoutes(app: FastifyInstance, { repo, runner, bus }: AppDeps) {
-  app.get("/settings/images", async () => runner.imageStatus());
+  app.get("/settings/images", async () => await runner.imageStatus());
 
   app.put("/settings/images/secret", async (req) => {
     const { name, value } = z.object({ name: z.enum(SECRET_NAMES), value: z.string().trim().min(1).max(4000) }).parse(req.body);

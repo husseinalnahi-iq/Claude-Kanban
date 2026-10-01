@@ -19,6 +19,7 @@ import { milestoneRoutes } from "./routes/milestones.ts";
 import { skillRoutes } from "./routes/skills.ts";
 import { settingsRoutes } from "./routes/settings.ts";
 import { healthRoutes } from "./routes/health.ts";
+import { codexRoutes } from "./routes/codex.ts";
 import { systemRoutes } from "./routes/system.ts";
 import { memoryRoutes } from "./routes/memory.ts";
 import { worktreeRoutes } from "./routes/worktrees.ts";
@@ -112,6 +113,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     await settingsRoutes(api, deps);
     await imageRoutes(api, deps);
     await healthRoutes(api, deps);
+    await codexRoutes(api, deps);
     await setupRoutes(api, setup);
     await systemRoutes(api, deps);
     await memoryRoutes(api, deps);

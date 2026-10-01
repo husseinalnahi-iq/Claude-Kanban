@@ -9,7 +9,7 @@ import { DEFAULT_VISION_MODEL, nowIso } from "../db.ts";
 import type { Repo } from "../repo.ts";
 import type { Bus } from "../bus.ts";
 import type {
-  Approval, ApprovalDecision, Blocked, Project, Provider, ProviderOut, ProviderUsage, Run, SessionTools, Settings, Stage, StageName, Task, TaskStatus, TierRef, UsageLimit, UsageTotals,
+  Approval, ApprovalDecision, Blocked, Mode, Project, Provider, ProviderOut, ProviderUsage, Run, SessionTools, Settings, Stage, StageName, Task, TaskStatus, TierRef, UsageLimit, UsageTotals,
 } from "../types.ts";
 
 type RateLimitInfo = {
@@ -32,7 +32,7 @@ import { applyOnboardingResult } from "./onboarding.ts";
 import { buildCriticPrompt, buildRevisionPrompt, extractRevisedPlan, parseCritique } from "./debate.ts";
 import { BROWSER_SERVER, PLAYWRIGHT_PLUGIN_TOOLS, browserCaption, browserDecision, browserServer } from "./browser.ts";
 import { BrowserWatch } from "./browserWatch.ts";
-import { CLOUDFLARE_TOKEN_REF, IMAGE_PREFIX, IMAGE_SERVER, POLLINATIONS_KEY_REF, claudeCodeCommand, createImageServer, generateImage, imageReadiness, type FetchFn, type ImageConfig, type ImageStatus } from "./images.ts";
+import { CLOUDFLARE_TOKEN_REF, IMAGE_PREFIX, IMAGE_SERVER, POLLINATIONS_KEY_REF, claudeCodeCommand, createImageServer, generateImage, imageMakerLine, imageReadiness, type FetchFn, type ImageConfig, type ImageStatus } from "./images.ts";
 import { scanSkills } from "../skills.ts";
 import { freePort, readWorktreeInclude, runProjectCommand, seedWorktree, stopListeners } from "../git/bootstrap.ts";
 import { NOTES_IN_PROMPT } from "../repo.ts";
@@ -40,6 +40,8 @@ import { SecretStore } from "../secrets.ts";
 import { ProviderRegistry } from "./providers/registry.ts";
 import { estimateCost, sumUsage } from "./providers/cost.ts";
 import { ModelCatalog, isLocal } from "./providers/catalog.ts";
+import { codexAuth, codexModels, codexStatus, codexUpgrades } from "./providers/codexLocal.ts";
+import { codexImagePart } from "./codexImages.ts";
 import { setCliSecrets } from "./providers/cli/index.ts";
 import { classifyProviderError, naiveOffsetFor, retryDelayMs, type OutKind } from "./providers/limits.ts";
 import { QuotaReader, type LiveQuota } from "./providers/usage.ts";
@@ -50,7 +52,8 @@ import { ANTHROPIC_PROVIDER_ID, ARTIFACT_EXTS, EFFORTS, usesWorktree, MAX_ATTACH
 import { claudeUpgrades, fromSdk, type SdkModelInfo } from "./claudeModels.ts";
 import { BROWSER_AGENT, helperAgents, usesHelper } from "./helpers.ts";
 import { applyChecklistTool } from "./checklist.ts";
-import { outcomeLine } from "./record.ts";
+import { outcomeLine, resultText } from "./record.ts";
+import { isAnswerPipeline } from "./answer.ts";
 
 export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => AsyncIterable<SDKMessage>;
 
@@ -426,7 +429,9 @@ export class TaskRunner {
     this.secrets = deps.secrets ?? new SecretStore(":memory:");
     this.imageFetch = deps.imageFetch;
     this.providers = new ProviderRegistry(deps.repo, this.secrets);
-    this.catalog = deps.catalog ?? new ModelCatalog();
+    // Codex's models are read from its own folder: what the signed-in plan (or the API) offers (D294).
+    this.catalog = deps.catalog ?? new ModelCatalog(undefined, undefined, (p) =>
+      p.kind === "cli" && p.cli?.preset === "codex" ? codexModels(codexAuth(p, (n) => Boolean(this.secrets.get(n)))) : null);
     this.quota = deps.quota ?? new QuotaReader();
     setCliSecrets(this.secrets);
     this.queue = new RunQueue({
@@ -438,6 +443,23 @@ export class TaskRunner {
       onPump: (phase) => (this.pumpView = phase === "begin" ? { settings: this.repo.getSettings() } : null),
       start: (item) => this.runPipeline(item.taskId),
       onError: (item, err) => this.failTask(item.taskId, err instanceof Error ? err.message : String(err)),
+    });
+    // A queued task that waits on others is held by the queue's veto; something has to look again when
+    // one of them is done or deleted, or the waiting task's own links change (D289).
+    this.bus.subscribe((m) => {
+      if ((m.type === "task.updated" && (m.task.status === "done" || m.task.status === "queued")) || m.type === "task.deleted") this.nudgeQueue();
+    });
+  }
+
+  private nudging = false;
+
+  /** One pump after the current event settles, however many updates asked for it. */
+  private nudgeQueue(): void {
+    if (this.nudging) return;
+    this.nudging = true;
+    setImmediate(() => {
+      this.nudging = false;
+      this.queue.pump();
     });
   }
 
@@ -611,10 +633,8 @@ export class TaskRunner {
     if (!["backlog", "failed", "review"].includes(task.status)) {
       throw new ConflictError(`Cannot queue a task in status "${task.status}".`);
     }
-    const blocked = this.blockers(task);
-    if (blocked.length) {
-      throw new ConflictError(`Waiting on ${blocked.map((b) => `"${b.title}" (${b.status})`).join(", ")}. It starts automatically once those are done.`);
-    }
+    // A task whose dependencies are not done yet is queued all the same: the queue holds it until they
+    // are, then it starts by itself (D289). Refusing it left a chain to be started by hand, link by link.
     this.assertRunnable(task, project);
     this.startOpts.set(taskId, opts);
     // The block is over once the task is sent again; the next prompt still says what stopped it.
@@ -785,6 +805,10 @@ export class TaskRunner {
         // What stopped the last attempt is for the stage that picks up from it, not for every one after.
         this.priorBlocks.delete(taskId);
         this.handovers.delete(taskId);
+        const res = this.providers.resolve(stage.provider);
+        const readOnly = stage.stage === "plan" || stage.stage === "review" || !res.provider?.mayEditFiles;
+        // A supervised checkout may hold your own uncommitted work: what counts is what the run changed.
+        const before = res.adapter.kind === "cli" && readOnly ? await this.workspaceState(cwd) : null;
         const outcome = await this.runQuery({
           task, project, run, cwd, ctl,
           prompt,
@@ -795,12 +819,11 @@ export class TaskRunner {
         });
         // A read-only CLI provider that edited files broke its contract: fail before committing, so
         // the changes are neither kept as this stage's output nor merged (docs/DECISIONS.md D137).
-        const res = this.providers.resolve(stage.provider);
-        const readOnly = stage.stage === "plan" || stage.stage === "review" || !res.provider?.mayEditFiles;
-        if (outcome.ok && res.adapter.kind === "cli" && readOnly && (await this.git.isDirty(cwd).catch(() => false))) {
+        const touched = outcome.ok && before ? await this.workspaceChanges(cwd, before) : [];
+        if (touched.length) {
           this.setTask(taskId, {
             status: "failed",
-            error: `${res.label} was run read-only on the ${stage.stage} stage but left changes in the workspace. Nothing was committed. Inspect ${cwd}, then retry.`,
+            error: `${res.label} was run read-only on the ${stage.stage} stage but changed ${touched.slice(0, 5).join(", ")}${touched.length > 5 ? ` and ${touched.length - 5} more` : ""}. Nothing was committed. Inspect ${cwd}, then retry.`,
           });
           return;
         }
@@ -910,14 +933,35 @@ export class TaskRunner {
           return;
         }
       }
-      this.setTask(taskId, ctl.stopped ? { status: "failed", error: "stopped by user" } : { status: "review" });
+      // An answer card changed nothing, so there is nothing to approve or land: its answer is the result (D284).
+      const finished = isAnswerPipeline(this.repo.getTask(taskId)?.pipeline ?? []) ? "done" : "review";
+      this.setTask(taskId, ctl.stopped ? { status: "failed", error: "stopped by user" } : { status: finished, ...(finished === "done" ? { note: null } : {}) });
     } finally {
       this.pipelines.delete(taskId);
       this.priorBlocks.delete(taskId);
       this.checkoutStamps.delete(taskId);
       // Kept while the task still has stages to go (a debate gate, a limit pause): cleared once it lands in review.
-      if (this.repo.getTask(taskId)?.status === "review") this.sentBack.delete(taskId);
+      if (["review", "done"].includes(this.repo.getTask(taskId)?.status ?? "")) this.sentBack.delete(taskId);
     }
+  }
+
+  /** The workspace's uncommitted files, each with its size and time: what a read-only stage must leave as it found. */
+  private async workspaceState(cwd: string): Promise<Map<string, string> | null> {
+    try {
+      return new Map((await this.git.statusFiles(cwd)).map((f) => [f, fileStamp(join(cwd, f))]));
+    } catch {
+      return null; // not a repository: nothing to compare against
+    }
+  }
+
+  /**
+   * What a run added, changed or put back since `before` (D295). "Is it dirty now?" failed every
+   * read-only Codex stage in a supervised checkout that already held an uncommitted file of the user's.
+   */
+  private async workspaceChanges(cwd: string, before: Map<string, string>): Promise<string[]> {
+    const after = await this.workspaceState(cwd);
+    if (!after) return [];
+    return [...new Set([...after.keys(), ...before.keys()])].filter((f) => before.get(f) !== after.get(f));
   }
 
   /**
@@ -973,6 +1017,8 @@ export class TaskRunner {
     const res = this.providers.resolve(stage.provider);
     const capabilities = res.adapter.hasTools ? (res.adapter.kind === "cli" ? "cli" : "sdk") : "text";
     const ctx = { ...this.promptCtx(task, stageIndex, project), capabilities } as ReturnType<TaskRunner["promptCtx"]> & { capabilities: "sdk" | "cli" | "text"; inlineDiff?: unknown; fileList?: unknown };
+    // No picture maker ready: the prompt says nothing about pictures, so the model works as it would anyway.
+    if (ctx.imageTool) ctx.imageTool = await this.picturesReady();
     if (capabilities === "text") {
       try {
         if (stage.stage === "review") {
@@ -1103,7 +1149,9 @@ export class TaskRunner {
       previousResult: stageIndex > 0 ? prevRun?.result_md ?? null : null,
       previousStage: stageIndex > 0 ? task.pipeline[stageIndex - 1]?.stage ?? null : null,
       live: task.live,
+      // Narrowed to "a picture maker is ready" in stagePromptFor, which can ask Codex (D303).
       imageTool: settings.imageProvider !== "off" && stage.stage !== "plan" && stage.stage !== "review",
+      imageMaker: imageMakerLine(settings),
       previousFrom: prevRun?.provider ? { provider: prevRun.provider, model: prevRun.model } : null,
       earlierResults,
       skills: task.skills,
@@ -1129,6 +1177,12 @@ export class TaskRunner {
         .filter((a) => a.source === "user")
         .slice(0, 8)
         .map((a) => ({ name: a.name, path: a.path, note: a.note, description: a.description, kind: attachmentKind(a.media_type) })),
+      // What the tasks this one waited for reported: a chain hands its results down (D290).
+      dependencies: task.depends_on
+        .map((id) => this.repo.getTask(id))
+        .filter((t): t is Task => Boolean(t))
+        .slice(0, 6)
+        .map((t) => ({ id: t.id, title: t.title, status: t.status, outcome: resultText(this.repo.runsForTask(t.id), t.summary, 1500) })),
       relatedTasks: task.related_to
         .map((id) => this.repo.getTask(id))
         .filter((t): t is Task => Boolean(t))
@@ -1268,6 +1322,8 @@ export class TaskRunner {
     // neither carries the browser or the image tool (D271).
     const critic = run.role === "critic";
     const visual = !critic && run.stage !== "plan";
+    // Only with a picture maker that is ready: a tool that can only fail would just cost a turn (D303).
+    const pictures = visual && run.stage !== "review" && settings.imageProvider !== "off" && (await this.picturesReady());
     const watchPort = visual && settings.browserChecks && settings.liveView ? await freePort().catch(() => undefined) : undefined;
     if (watchPort) this.browserWatch.begin(task.id, run.id, watchPort);
     // Why a command is refused outright — the blocked list, or a kill by name — or null when it is not.
@@ -1341,7 +1397,9 @@ export class TaskRunner {
               hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: message },
             });
             // The board's own tools are always allowed, and a question is answered in canUseTool's own words.
-            if (name.startsWith("mcp__board__") || name === QUESTION_TOOL) return {};
+            // The board's own picture tool too: it saves inside the task's folder, and an autonomous run makes
+            // pictures freely (D262) — without this the gate below refused it as an outside tool (D297).
+            if (name.startsWith("mcp__board__") || name === QUESTION_TOOL || name.startsWith(IMAGE_PREFIX)) return {};
             const outright = refusedOutright(String(input.command ?? ""));
             if (outright) return deny(outright);
             const browser = browserDecision(name, input, true, a.cwd, browserDir);
@@ -1410,7 +1468,7 @@ export class TaskRunner {
         board: createBoardServer(this.repo, this.bus, { taskId: task.id, runId: run.id }, (parent) => this.promoteReady(parent.project_id)),
         ...(browserConfig && !browserByHelper ? { [BROWSER_SERVER]: browserConfig } : {}),
         // Pictures are made while building; a plan, a review or a critique has no use for them.
-        ...(visual && run.stage !== "review" && settings.imageProvider !== "off"
+        ...(pictures
           ? { [IMAGE_SERVER]: createImageServer({ cwd: a.cwd, config: () => this.imageConfig(), fetchFn: this.imageFetch, onImage: (i) => this.keepImage(task.id, run.id, i) }) }
           : {}),
       },
@@ -1864,31 +1922,48 @@ export class TaskRunner {
    * writes that are output rather than source — a report, a spreadsheet, a page, a diagram. They are
    * copied into the board's own storage, so they survive the worktree being removed at approval.
    */
-  /** Settings → Images as the tool reads them: the provider, and its keys from the secret store. */
-  imageConfig(): ImageConfig {
+  /** Settings → Images as the tool reads them: the provider, its keys from the secret store, and Codex when it makes pictures. */
+  async imageConfig(): Promise<ImageConfig> {
     const s = this.repo.getSettings();
     return {
       provider: s.imageProvider,
       pollinationsKey: this.secrets.get(POLLINATIONS_KEY_REF),
       cloudflareAccountId: s.cloudflareAccountId,
       cloudflareToken: this.secrets.get(CLOUDFLARE_TOKEN_REF),
+      codex: await codexImagePart(s, this.secrets, (works, detail, version) => this.rememberCodexPictures(works, detail, version)),
     };
   }
 
+  /** Whether the picture maker in Settings → Images can make a picture now (D303). */
+  async picturesReady(): Promise<boolean> {
+    return imageReadiness(await this.imageConfig()).ready;
+  }
+
+  /** What a try taught about Codex making pictures with this version, kept so a computer where it cannot is not asked every time (D297). */
+  rememberCodexPictures(works: boolean | null, detail: string, version: string | null): void {
+    const settings = this.repo.updateSettings({ codexPictures: { works, version, detail, checked_at: works === null ? null : nowIso() } });
+    this.bus.publish({ type: "settings.updated", settings });
+  }
+
   /** What Settings → Images shows: which keys are set (never their values) and whether an image would come. */
-  imageStatus(): ImageStatus {
-    const cfg = this.imageConfig();
+  async imageStatus(): Promise<ImageStatus> {
+    const cfg = await this.imageConfig();
+    const s = this.repo.getSettings();
+    const st = await codexStatus();
     return {
       provider: cfg.provider, cloudflareAccountId: cfg.cloudflareAccountId,
       hasPollinationsKey: Boolean(cfg.pollinationsKey), hasCloudflareToken: Boolean(cfg.cloudflareToken),
       ...imageReadiness(cfg), claudeCodeCommand: claudeCodeCommand(),
+      codex: { found: st.found, signedIn: st.signedIn, version: st.version, pictures: s.codexPictures, model: cfg.codex?.model ?? s.imageModel },
     };
   }
 
   /** Settings → Images → Try it: one small image from exactly what is set, handed back inline. */
   async testImage(prompt: string): Promise<{ ok: boolean; dataUrl: string | null; provider: string; latencyMs: number; error: string | null }> {
     const t0 = Date.now();
-    const cfg = this.imageConfig();
+    const cfg = await this.imageConfig();
+    const ready = imageReadiness(cfg);
+    if (!ready.ready) return { ok: false, dataUrl: null, provider: cfg.provider, latencyMs: 0, error: ready.detail };
     try {
       const img = await generateImage({ prompt, width: 512, height: 512 }, cfg, { fetchFn: this.imageFetch });
       return { ok: true, dataUrl: `data:image/${img.format};base64,${Buffer.from(img.bytes).toString("base64")}`, provider: img.provider, latencyMs: Date.now() - t0, error: null };
@@ -2072,7 +2147,7 @@ export class TaskRunner {
     const fresh = c && Date.now() - Date.parse(c.checked_at) < (c.source === "live" ? 30 * 60_000 : 30_000);
     if (c && fresh && !force) return c;
     this.claudeListing ??= this.listClaudeModels()
-      .then((r) => (this.followLatestModels(r), r))
+      .then((r) => (this.followLatestModels(r), void this.followCodexModels(), r))
       .finally(() => (this.claudeListing = null));
     return (this.claudeList = await this.claudeListing);
   }
@@ -2081,6 +2156,25 @@ export class TaskRunner {
    * A newer model of a family your settings name (Opus 5 → Opus 5.5) replaces the older one in every
    * pick, as soon as your login lists it. Tasks already on the board keep the models they were given.
    */
+  /**
+   * The same for Codex (D298): when the account lists a newer model of a family a Codex pick names
+   * (GPT-6 Luna → GPT-6.1 Luna), the pick moves and Settings says so. Tasks keep theirs.
+   */
+  async followCodexModels(): Promise<void> {
+    try {
+      const settings = this.repo.getSettings();
+      if (!settings.followLatestModels || !settings.providers.some((p) => p.kind === "cli" && p.cli?.preset === "codex")) return;
+      const rows = await codexModels("login");
+      if (!rows?.length) return;
+      const { moves, patch } = codexUpgrades(settings, rows);
+      if (!moves.length) return;
+      this.bus.publish({ type: "settings.updated", settings: this.repo.updateSettings({ ...patch, lastModelMove: { at: nowIso(), moves } }) });
+      console.log(`Newer Codex models on your account: ${[...new Set(moves.map((m) => `${m.from} → ${m.to}`))].join(", ")}.`);
+    } catch (err) {
+      console.error("Could not move settings to newer Codex models:", err);
+    }
+  }
+
   private followLatestModels(list: ClaudeModelsResult): void {
     try {
       const settings = this.repo.getSettings();
@@ -2094,6 +2188,11 @@ export class TaskRunner {
       // The list itself is still good; the settings simply stay as they were.
       console.error("Could not move settings to newer Claude models:", err);
     }
+  }
+
+  /** The list as last read, without asking Claude Code: for callers that must not start a session to know it. */
+  knownClaudeModels(): ClaudeModelsResult | null {
+    return this.claudeList;
   }
 
   private async listClaudeModels(): Promise<ClaudeModelsResult> {
@@ -2702,6 +2801,8 @@ export class TaskRunner {
   private mayStartNow(taskId: string): boolean {
     const task = this.repo.getTask(taskId);
     if (!task) return true;
+    // Waits for what it depends on to be done (merged), not just reviewed: D52, D289.
+    if (this.blockers(task).length) return false;
     // Inside a pump the settings and the usage gate are the same for every waiting item: read once.
     const view = this.pumpView;
     const settings = view?.settings ?? this.repo.getSettings();
@@ -2932,7 +3033,7 @@ export class TaskRunner {
         }
         if (outcome.providerId !== ANTHROPIC_PROVIDER_ID) this.providerBack(outcome.providerId);
         const fresh = this.repo.getTask(taskId)!;
-        if (this.pipelineComplete(fresh)) this.setTask(taskId, { status: "review" });
+        if (this.pipelineComplete(fresh)) this.setTask(taskId, { status: isAnswerPipeline(fresh.pipeline) ? "done" : "review" });
         else {
           const next = this.defaultStart(fresh).fromStage + 1;
           this.setTask(taskId, { status: "failed", error: `Chat done, but the pipeline is incomplete — Retry continues from stage #${next}.` });
@@ -3064,7 +3165,7 @@ export class TaskRunner {
    * Intake. `classify` fills in type/priority/labels only; `refine` also rewrites the spec and
    * proposes subtasks. Read-only by construction (no tools, no repo access) — see triage.ts.
    */
-  async triage(taskId: string, mode: "classify" | "refine", opts: { apply?: boolean } = {}): Promise<TriageResult | null> {
+  async triage(taskId: string, mode: "classify" | "refine", opts: { apply?: boolean; decided?: { pipeline?: boolean; live?: boolean } } = {}): Promise<TriageResult | null> {
     const { task, project } = this.load(taskId);
     const settings = this.repo.getSettings();
     // Closed vocabulary: the project's configured labels plus whatever is already in use.
@@ -3095,10 +3196,12 @@ export class TaskRunner {
         // accepting it is a decision the human makes. Rejecting keeps the project default.
         // Triage runs in the background: by the time it answers the task may already be running, and
         // a pipeline suggestion shown under a finished run is noise (D191).
-        const sized = settings.autoSizing && fresh.status === "backlog" ? sizedPipeline(result.sizing, settings.tiers) : null;
+        // What the side chat already settled with you (D286) is not offered back as a second opinion.
+        const sized = settings.autoSizing && fresh.status === "backlog" && !opts.decided?.pipeline ? sizedPipeline(result.sizing, settings.tiers) : null;
         // Live-system work is proposed as a live task — one record of it, with plan approval and a
         // review that checks the live system itself — rather than as a mode switch (D241).
-        const toLive = result.live_access && !fresh.live && fresh.status === "backlog";
+        // Reading a live system is not changing it: a lookup gets neither plan approval nor a live review (D287).
+        const toLive = result.live_access?.changes && !fresh.live && fresh.status === "backlog" && !opts.decided?.live;
         this.setTask(taskId, {
           ...(confident ? { type: result.type, labels } : {}),
           triaged_at: nowIso(),
@@ -3121,6 +3224,22 @@ export class TaskRunner {
       }
     }
     return result;
+  }
+
+  /**
+   * Whether a task's mode, branch or pipeline may change now. One rule for the board and the side chat:
+   * never under a run, and never away from a branch that holds work nobody has approved or discarded.
+   */
+  assertReconfigurable(task: Task, patch: { mode?: Mode; pipeline?: Stage[]; own_branch?: boolean }): void {
+    if ((patch.mode || patch.pipeline || patch.own_branch !== undefined) && this.isBusy(task.id)) {
+      throw new ConflictError("Cannot change mode, branch or pipeline while the task is queued or running.");
+    }
+    if (patch.own_branch !== undefined && patch.own_branch !== task.own_branch && (task.branch || task.worktree_path)) {
+      throw new ConflictError(`This task has work on ${task.branch ?? "its worktree"}; approve or discard it before changing where it works.`);
+    }
+    if (patch.mode && patch.mode !== task.mode && (task.branch || task.worktree_path)) {
+      throw new ConflictError(`This task has work on ${task.branch ?? "its worktree"}; approve or discard it before changing mode.`);
+    }
   }
 
   /**
@@ -3317,6 +3436,11 @@ export class TaskRunner {
 
   /** Boot recovery (DECISIONS D11). */
   recover(): void {
+    // Pollinations without a key was the shipped picture maker; its free tier now turns requests away,
+    // so a board still on it moves to "Codex when linked" — no picture tool until one is ready (D303).
+    if (this.repo.getSettings().imageProvider === "pollinations" && !this.secrets.has(POLLINATIONS_KEY_REF)) {
+      this.repo.updateSettings({ imageProvider: "codex" });
+    }
     // Paused tasks keep their resume time across a restart; anything already due resumes now.
     setImmediate(() => this.resumeDue());
     for (const run of this.repo.runsInStatus(["running", "approval"])) {
@@ -3326,7 +3450,9 @@ export class TaskRunner {
         this.repo.updateTask(t.id, { status: "failed", error: "interrupted (server restarted) — Retry resumes the session" });
       }
     }
-    this.repo.expirePendingApprovals();
+    // Announced even though nobody is connected yet: every card ends with a decided event, so a
+    // listener added before boot (a test, a future plugin) never holds one open for ever.
+    for (const approval of this.repo.expirePendingApprovals("the board restarted")) this.bus.publish({ type: "approval.decided", approval });
     for (const t of this.repo.tasksInStatus(["planning", "running", "approval"])) {
       if (t.plan_gate) continue; // nothing was running: the gate is durable and waits for the human
       this.repo.updateTask(t.id, { status: "failed", error: "interrupted (server restarted)" });

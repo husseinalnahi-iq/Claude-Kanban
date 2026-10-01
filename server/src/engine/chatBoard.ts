@@ -2,11 +2,13 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { Repo } from "../repo.ts";
 import type { Bus } from "../bus.ts";
-import type { ChatMessage, EventRow, Task } from "../types.ts";
-import { PRIORITIES, TASK_STATUSES, TASK_TYPES } from "../types.ts";
+import type { ChatMessage, Effort, EventRow, Mode, Stage, Task } from "../types.ts";
+import { EFFORTS, PRIORITIES, TASK_STATUSES, TASK_TYPES } from "../types.ts";
 import { allowedMode, defaultPipeline } from "./boardMcp.ts";
 import type { TaskRunner } from "./runner.ts";
 import type { Scheduler } from "./scheduler.ts";
+import { answerStage, isAnswerPipeline, stageLabel } from "./answer.ts";
+import { findClaudeModel, resolveClaudeModel } from "./claudeModels.ts";
 
 type Card = NonNullable<ChatMessage["meta"]["cards"]>[number];
 
@@ -14,8 +16,13 @@ const text = (value: unknown) => ({
   content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }],
 });
 const fail = (message: string) => ({ ...text(message), isError: true });
+/** "answer · claude-sonnet-5-5 · medium": how a card will run, in one line the model reads cheaply. */
+export const pipelineLine = (p: Stage[]) => p.map((s) => `${stageLabel(s)} · ${s.model} · ${s.effort}`).join(" → ");
 const brief = (t: Task) => ({
   id: t.id, title: t.title, status: t.status, type: t.type, priority: t.priority, mode: t.mode, summary: t.summary, start_at: t.start_at,
+  pipeline: pipelineLine(t.pipeline),
+  ...(t.live ? { live: true } : {}),
+  ...(t.own_branch ? { own_branch: true } : {}),
   // Only when there is one, so a quiet board stays a short list.
   ...(t.questions.some((q) => !q.answer) ? { open_questions: t.questions.filter((q) => !q.answer).length } : {}),
 });
@@ -43,6 +50,9 @@ export function activityLine(e: EventRow): string | null {
   return parts.length ? parts.join("\n") : null;
 }
 
+/** A stage as the chat names it: "answer" is a lookup, the rest are the pipeline's own stages. */
+export type StageArg = { stage: "plan" | "code" | "review" | "answer"; model?: string; effort?: Effort };
+
 export interface ChatBoardDeps {
   repo: Repo;
   bus: Bus;
@@ -56,12 +66,50 @@ export interface ChatBoardDeps {
  * project. It never touches code itself, and never approves, lands or discards work: those stay yours. Handlers are separate from the
  * MCP wrapper so tests call them directly. `onCard` records each card touched, for the chips.
  */
-export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDeps, projectId: string, onCard: (c: Card) => void) {
+export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDeps, projectId: string, chatId: string | null, onCard: (c: Card) => void) {
   const mine = (id: string) => {
     const t = repo.getTask(id);
     return t && t.project_id === projectId ? t : undefined;
   };
   const publish = (t: Task) => bus.publish({ type: "task.updated", task: t });
+
+  /**
+   * The stages the chat asked for, each on the model and effort the user named in words, or the board's
+   * own choice for that stage. An error names what the board has instead, so the chat can pass it on.
+   */
+  const buildPipeline = (stages: StageArg[]): { pipeline: Stage[] } | { error: string } => {
+    const settings = repo.getSettings();
+    const defaults = defaultPipeline(repo, repo.getProject(projectId)!);
+    // Only what is already known: asking Claude Code for its list would start a session mid-reply.
+    const list = runner.knownClaudeModels();
+    if (stages.some((s) => s.stage === "answer") && stages.length > 1) {
+      return { error: "An answer card is one stage on its own. For work that changes something, use plan, code and review stages instead." };
+    }
+    const out: Stage[] = [];
+    for (const want of stages) {
+      const base: Stage =
+        want.stage === "answer"
+          ? answerStage(settings)
+          : { ...(defaults.find((s) => s.stage === want.stage) ?? { stage: want.stage, model: settings.tiers.balanced.model, effort: "medium" as Effort }) };
+      const stage: Stage = { ...base, effort: want.effort ?? base.effort };
+      if (want.model) {
+        const id = resolveClaudeModel(want.model, settings.models, list);
+        if (!id) {
+          const names = settings.models.map((m) => `${m.label} (${m.id})`).join(", ");
+          return { error: `There is no model called "${want.model}" on this board. It has: ${names}. Short names work too: opus, sonnet, haiku.` };
+        }
+        stage.model = id;
+        // A model named by the user is a Claude model, whatever provider the default stage used.
+        delete stage.provider;
+      }
+      const info = findClaudeModel(stage.model, list);
+      if (want.effort && info?.efforts.length && !info.efforts.includes(want.effort)) {
+        return { error: `${info.label} takes ${info.efforts.join(", ")} effort, not ${want.effort}.` };
+      }
+      out.push(stage);
+    }
+    return { pipeline: out };
+  };
 
   return {
     listTasks(args: { status?: string }) {
@@ -86,40 +134,89 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
       return text({ ...brief(t), spec_md: t.spec_md, depends_on: t.depends_on, error: t.error, pipeline: t.pipeline.map((s) => `${s.stage} · ${s.model} · ${s.effort}`) });
     },
 
-    createTask(args: { title: string; spec_md: string; type?: string; priority?: string; mode?: "supervised" | "autonomous"; depends_on?: string[] }) {
+    createTask(args: {
+      title: string; spec_md: string; type?: string; priority?: string; mode?: Mode; depends_on?: string[];
+      stages?: StageArg[]; live?: boolean; own_branch?: boolean;
+    }) {
       const project = repo.getProject(projectId)!;
       const deps = (args.depends_on ?? []).filter((id) => mine(id));
+      const built = args.stages?.length ? buildPipeline(args.stages) : null;
+      if (built && "error" in built) return fail(built.error);
+      const pipeline = built?.pipeline ?? defaultPipeline(repo, project);
+      const answer = isAnswerPipeline(pipeline);
+      // A lookup only reads: it needs no worktree, and an autonomous run's sandbox could not reach a live
+      // system to read it from (D284).
+      const mode: Mode = answer ? "supervised" : allowedMode(project, args.mode ?? "supervised");
       const t = repo.createTask({
         project_id: projectId,
         title: args.title.trim(),
         spec_md: args.spec_md,
-        type: (args.type as Task["type"]) ?? "feature",
+        type: (args.type as Task["type"]) ?? (answer ? "chore" : "feature"),
         priority: (args.priority as Task["priority"]) ?? "p2",
-        mode: allowedMode(project, args.mode ?? "supervised"),
-        pipeline: defaultPipeline(repo, project),
+        mode,
+        own_branch: !answer && mode === "supervised" && Boolean(args.own_branch),
+        live: !answer && Boolean(args.live),
+        pipeline,
         depends_on: deps,
         status: "backlog",
+        chat_id: chatId,
       });
       publish(t);
-      // The same intake a card made on the board gets: type, labels, a sized pipeline, a live-system warning.
-      if (repo.getSettings().autoTriage) void runner.triage(t.id, "classify").catch(() => {});
+      // The same intake a card made on the board gets — type and labels — but what was settled here with
+      // the user is not offered back as a second opinion (D286).
+      if (repo.getSettings().autoTriage) {
+        void runner.triage(t.id, "classify", { decided: { pipeline: Boolean(built), live: answer || args.live !== undefined } }).catch(() => {});
+      }
       onCard({ id: t.id, title: t.title, action: "created" });
-      return text({ created: brief(t), note: "It is in Backlog. Offer to queue it now or schedule it for later." });
+      const downgraded = args.mode === "autonomous" && mode === "supervised";
+      return text({
+        created: brief(t),
+        note: [
+          answer
+            ? "An answer card: one stage that reads and reports, supervised, and it lands in Done with its answer. Start it now if the user asked for the result."
+            : "It is in Backlog. Tell the user how it will run (mode, and why) and offer to start it now or schedule it.",
+          downgraded ? (answer ? "It runs supervised: a lookup needs no branch of its own." : "This project does not allow autonomous runs, so it is supervised.") : "",
+          "Its result is posted into this chat when it finishes.",
+        ].filter(Boolean).join(" "),
+      });
     },
 
-    updateTask(args: { task_id: string; title?: string; spec_md?: string; priority?: string; labels?: string[] }) {
+    updateTask(args: {
+      task_id: string; title?: string; spec_md?: string; priority?: string; labels?: string[];
+      stages?: StageArg[]; mode?: Mode; own_branch?: boolean; live?: boolean;
+    }) {
       const t = mine(args.task_id);
       if (!t) return fail(`No card ${args.task_id} in this project.`);
       if (t.status !== "backlog" && t.status !== "failed") return fail(`"${t.title}" is ${t.status}; only a card in Backlog (or one that failed) can be edited from chat.`);
-      const updated = repo.updateTask(t.id, {
+      const project = repo.getProject(projectId)!;
+      const built = args.stages?.length ? buildPipeline(args.stages) : null;
+      if (built && "error" in built) return fail(built.error);
+      const pipeline = built?.pipeline;
+      const answer = isAnswerPipeline(pipeline ?? t.pipeline);
+      // An answer card is always supervised on the main checkout (D284); anything else asks the project.
+      const mode: Mode | undefined = answer ? (t.mode === "supervised" ? undefined : "supervised") : args.mode && allowedMode(project, args.mode);
+      const ownBranch = answer ? (t.own_branch ? false : undefined) : args.own_branch;
+      try {
+        runner.assertReconfigurable(t, { mode, pipeline, own_branch: ownBranch });
+      } catch (err) {
+        return fail(err instanceof Error ? err.message : String(err));
+      }
+      let updated = repo.updateTask(t.id, {
         title: args.title?.trim() || undefined,
         spec_md: args.spec_md,
         priority: args.priority as Task["priority"] | undefined,
         labels: args.labels,
+        pipeline,
+        mode,
+        own_branch: ownBranch,
+        live: answer ? (t.live ? false : undefined) : args.live,
       });
-      publish(updated);
+      // What the user just settled here replaces what triage offered for the same thing.
+      if (updated.suggestion && (pipeline || args.live !== undefined)) updated = runner.dismissSuggestion(t.id, { pipeline: Boolean(pipeline), live: args.live !== undefined });
+      else publish(updated);
       onCard({ id: t.id, title: updated.title, action: "updated" });
-      return text({ updated: brief(updated) });
+      const refused = args.mode === "autonomous" && updated.mode !== "autonomous";
+      return text({ updated: brief(updated), ...(refused ? { note: answer ? "An answer card runs supervised." : "This project does not allow autonomous runs, so it stays supervised." } : {}) });
     },
 
     queueTask(args: { task_id: string }) {
@@ -132,7 +229,11 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
       try {
         const queued = runner.queueTask(t.id);
         onCard({ id: t.id, title: t.title, action: "queued" });
-        return text({ queued: brief(queued) });
+        const waits = runner.blockers(queued);
+        return text({
+          queued: brief(queued),
+          ...(waits.length ? { note: `It waits for ${waits.map((w) => `"${w.title}" (${w.status})`).join(", ")} to be done, then starts by itself.` } : {}),
+        });
       } catch (err) {
         return fail(`Could not queue "${t.title}": ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -261,8 +362,18 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
   };
 }
 
-export function createChatBoardServer(deps: ChatBoardDeps, projectId: string, onCard: (c: Card) => void) {
-  const h = chatBoardHandlers(deps, projectId, onCard);
+const stagesArg = z
+  .array(z.object({
+    stage: z.enum(["plan", "code", "review", "answer"]),
+    model: z.string().optional().describe('A model in words: "opus", "sonnet", "haiku", "Sonnet 5.5", or a full id. Leave out for the board\'s choice for that stage.'),
+    effort: z.enum(EFFORTS as [Effort, ...Effort[]]).optional().describe("Leave out for the board's choice."),
+  }))
+  .min(1)
+  .max(4)
+  .optional();
+
+export function createChatBoardServer(deps: ChatBoardDeps, projectId: string, chatId: string | null, onCard: (c: Card) => void) {
+  const h = chatBoardHandlers(deps, projectId, chatId, onCard);
   return createSdkMcpServer({
     name: "board",
     version: "1.0.0",
@@ -274,18 +385,28 @@ export function createChatBoardServer(deps: ChatBoardDeps, projectId: string, on
         { status: z.enum(TASK_STATUSES as [string, ...string[]]).optional() }, async (a) => h.listTasks(a)),
       tool("board_get_task", "Read one card: its spec, status, summary and pipeline.", { task_id: z.string() }, async (a) => h.getTask(a)),
       tool("board_create_task",
-        "Create a card in Backlog. Give it a short title and a spec that says what done looks like, in the user's terms. Supervised unless the user asked for autonomous.",
+        "Create a card in Backlog: a short title and a spec that says what done looks like, in the user's terms. " +
+          'stages: [{stage:"answer"}] for a lookup, question or report: one stage that reads and reports, changes nothing, runs supervised and lands in Done with its answer. ' +
+          "For work that changes something, leave stages out for the board's default, or list plan/code/review with the model and effort the user asked for. " +
+          "mode: supervised unless the user chose autonomous. live: true only when the card will change a live system.",
         {
           title: z.string().min(1).max(200),
           spec_md: z.string().max(20_000),
           type: z.enum(TASK_TYPES as [string, ...string[]]).optional(),
           priority: z.enum(PRIORITIES as [string, ...string[]]).optional(),
           mode: z.enum(["supervised", "autonomous"]).optional(),
-          depends_on: z.array(z.string()).max(10).optional().describe("Ids of cards that must finish first."),
+          stages: stagesArg,
+          live: z.boolean().optional().describe("The card changes a live system (an ERP, a production database, a payment API): it then waits for the user's OK on its plan."),
+          own_branch: z.boolean().optional().describe("Supervised only: work on its own branch, landing when the user approves."),
+          depends_on: z.array(z.string()).max(10).optional().describe("Ids of cards that must be done first. It can be started at once: it waits for them, then starts by itself with their results."),
         },
         async (a) => h.createTask(a)),
-      tool("board_update_task", "Edit a card that is in Backlog or failed: title, spec, priority or labels.",
-        { task_id: z.string(), title: z.string().optional(), spec_md: z.string().optional(), priority: z.enum(PRIORITIES as [string, ...string[]]).optional(), labels: z.array(z.string()).max(8).optional() },
+      tool("board_update_task",
+        "Change a card that is in Backlog or failed: title, spec, priority, labels, its stages (model and effort per stage), mode, own branch or live. Not while it runs.",
+        {
+          task_id: z.string(), title: z.string().optional(), spec_md: z.string().optional(), priority: z.enum(PRIORITIES as [string, ...string[]]).optional(), labels: z.array(z.string()).max(8).optional(),
+          stages: stagesArg, mode: z.enum(["supervised", "autonomous"]).optional(), own_branch: z.boolean().optional(), live: z.boolean().optional(),
+        },
         async (a) => h.updateTask(a)),
       tool("board_queue_task", "Start a Backlog card now (it joins the queue). Only when the user asked for it to run.", { task_id: z.string() }, async (a) => h.queueTask(a)),
       tool("board_schedule_task",

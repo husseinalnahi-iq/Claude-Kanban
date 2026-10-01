@@ -5,6 +5,10 @@ import { bundledClaude, pickBrowser, sdkVersion, type Probe } from "./probe.ts";
 import { ENGINE_LATEST_URL, ENGINE_PACKAGE, shouldInstall } from "./engine.ts";
 import { readFileSync } from "node:fs";
 import { isLmStudio, isLocal, isOllama } from "../engine/providers/catalog.ts";
+import { codexStatus } from "../engine/providers/codexLocal.ts";
+import { codexPlanProvider } from "../engine/codexLink.ts";
+import { codexImagePart } from "../engine/codexImages.ts";
+import type { SecretStore } from "../secrets.ts";
 import { hardware, lmsPath, PICKS, SETUP_PICKS, verdictFor, verdictText, type Pick } from "./local.ts";
 import { join } from "node:path";
 import { loadPty, pwshPath } from "../terminal.ts";
@@ -39,6 +43,12 @@ export interface Detected {
   detail: string;
   /** Can't be fixed until this other check passes (identity needs git; models need Ollama). */
   blockedBy?: string;
+  /** Works, but not the way you probably mean it: shown amber (Codex signed in with an API key, D296). */
+  warn?: boolean;
+  /** The one thing to press now, by the board's own endpoint — offered even when the row passes. */
+  action?: { label: string; endpoint: string };
+  /** false: the install and "Fix with Claude" buttons do not fit this state (it is installed). */
+  offerFixes?: boolean;
 }
 
 /** A built-in command. The only user values that reach one are validated form fields. */
@@ -312,6 +322,34 @@ const cliCheck = (p: Provider, preset: Exclude<CliPreset, "custom">): SetupCheck
   };
 };
 
+/**
+ * Codex, offered whether or not it is on the board (D296), one state at a time: install it; sign in; an
+ * amber warning when it is signed in with an API key (the "ChatGPT subscription" entry would bill the
+ * API account); one click to put it on the board; or done.
+ */
+const codexCheck = (settings: Settings): SetupCheck => ({
+  id: "codex",
+  title: "Codex on your ChatGPT plan",
+  level: "optional",
+  why: "OpenAI's Codex can run task stages, argue with plans and make pictures on the ChatGPT plan you already pay for: no API key and no per-token bill.",
+  run: () => [{ command: "npm", args: ["install", "-g", "@openai/codex"], timeoutMs: 10 * MIN }],
+  claude: { goal: "Install OpenAI's `codex` command-line tool on this computer, following https://github.com/openai/codex.", doneWhen: "codex --version" },
+  manual: everywhere("npm install -g @openai/codex\ncodex login   # choose “Sign in with ChatGPT”"),
+  link: { label: "github.com/openai/codex", href: "https://github.com/openai/codex" },
+  async detect({ hasSecret }) {
+    const st = await codexStatus(true);
+    if (!st.found) return bad("Not on this computer: install the CLI here, or the Codex app");
+    const v = st.version ?? "Codex";
+    if (!st.signedIn) return { ok: false, detail: `${v} · not signed in`, offerFixes: false, action: { label: "Sign in", endpoint: "/codex/login" } };
+    if (st.signedIn === "api-key") {
+      return { ok: false, warn: true, offerFixes: false, detail: `${v} · signed in with an API key, so the “ChatGPT subscription” option would bill your API account`, action: { label: "Sign in with ChatGPT", endpoint: "/codex/login" } };
+    }
+    return codexPlanProvider(settings, hasSecret)?.enabled
+      ? ok(`${v} · ChatGPT · on the board`)
+      : { ok: false, offerFixes: false, detail: `${v} · signed in with ChatGPT · not on the board yet`, action: { label: "Use it", endpoint: "/codex/link" } };
+  },
+});
+
 const keyCheck = (p: Provider): SetupCheck => ({
   id: `key-${p.id}`,
   title: `${p.label} key`,
@@ -430,9 +468,9 @@ const providerCredit: SetupCheck = {
 
 const images: SetupCheck = {
   id: "images",
-  title: "Free images for tasks",
+  title: "Pictures for tasks",
   level: "optional",
-  why: "A task that needs an illustration, an icon or a placeholder photo makes one with a free image model instead of leaving a grey box. Pollinations.ai works with no account; a free key removes its watermark. Cloudflare Workers AI needs an account id and a token.",
+  why: "A task that needs an illustration, an icon or a placeholder photo makes one instead of leaving a grey box — with Codex on your ChatGPT plan once Codex is on the board, or Cloudflare Workers AI or Pollinations.ai with your own key. With none of them, tasks simply run without a picture tool.",
   link: { label: "Settings → Browser, images & plugins", href: "#/settings?tab=tools" },
   async detect({ settings, hasSecret }) {
     const r = imageReadiness({
@@ -440,6 +478,8 @@ const images: SetupCheck = {
       pollinationsKey: hasSecret(POLLINATIONS_KEY_REF) ? "set" : null,
       cloudflareAccountId: settings.cloudflareAccountId,
       cloudflareToken: hasSecret(CLOUDFLARE_TOKEN_REF) ? "set" : null,
+      // Only asks Codex when it is on the board; never runs a picture from here.
+      codex: await codexImagePart(settings, { has: hasSecret } as unknown as SecretStore, () => {}),
     });
     return r.ready ? ok(r.detail) : bad(r.detail);
   },
@@ -496,11 +536,13 @@ export function buildChecks(settings: Settings): SetupCheck[] {
   const presets = new Set<string>();
   for (const p of enabled) {
     const preset = p.kind === "cli" ? p.cli?.preset : undefined;
-    if (preset && preset !== "custom" && !presets.has(preset)) {
+    // Codex has its own row below, there whether or not it is on the board (D296).
+    if (preset && preset !== "custom" && preset !== "codex" && !presets.has(preset)) {
       presets.add(preset);
       list.push(cliCheck(p, preset));
     }
   }
+  list.push(codexCheck(settings));
   for (const p of enabled) if (p.kind !== "cli" && p.authRef && !isLocal(p)) list.push(keyCheck(p));
   if (enabled.some((p) => !isLocal(p))) list.push(providerCredit);
   list.push(plugins, terminal);

@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { newId, nowIso } from "./db.ts";
 
@@ -32,9 +32,26 @@ interface Session {
   exitListeners: Set<(code: number | null) => void>;
 }
 
-/** PowerShell 7, where its installer puts it, or null. */
-export function pwshPath(env: Record<string, string | undefined>, exists: (p: string) => boolean = existsSync): string | null {
-  return [env.ProgramFiles, env["ProgramW6432"]].filter(Boolean).map((p) => join(p!, "PowerShell", "7", "pwsh.exe")).find(exists) ?? null;
+/**
+ * existsSync, but also true for a Windows app link: what an app-package install (winget's PowerShell 7,
+ * Store apps) leaves in WindowsApps. Node cannot follow those, so existsSync calls them missing, yet
+ * starting one works.
+ */
+export function pathExists(p: string): boolean {
+  if (existsSync(p)) return true;
+  try {
+    lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** PowerShell 7 where its installer puts it — the MSI under Program Files, the app package's link — or null. */
+export function pwshPath(env: Record<string, string | undefined>, exists: (p: string) => boolean = pathExists): string | null {
+  const msi = [env.ProgramFiles, env["ProgramW6432"]].filter(Boolean).map((p) => join(p!, "PowerShell", "7", "pwsh.exe"));
+  const appPackage = env.LOCALAPPDATA ? [join(env.LOCALAPPDATA, "Microsoft", "WindowsApps", "pwsh.exe")] : [];
+  return [...msi, ...appPackage].find(exists) ?? null;
 }
 
 /**
@@ -48,7 +65,7 @@ const PS_POLICY = ["-ExecutionPolicy", "RemoteSigned"];
 const PS_UTF8 = "[Console]::InputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)";
 
 /** Which shell to open: PowerShell 7 if installed, else Windows PowerShell; elsewhere your login shell. */
-export function shellFor(platform: NodeJS.Platform, env: NodeJS.ProcessEnv, exists: (p: string) => boolean = existsSync): { command: string; args: string[] } {
+export function shellFor(platform: NodeJS.Platform, env: NodeJS.ProcessEnv, exists: (p: string) => boolean = pathExists): { command: string; args: string[] } {
   if (platform === "win32") {
     const pwsh = pwshPath(env, exists);
     if (pwsh) return { command: pwsh, args: ["-NoLogo", ...PS_POLICY] };

@@ -12,6 +12,7 @@ import { buildChecks } from "../src/setup/checks.ts";
 import { pickBrowser, type Probe, type RunResult } from "../src/setup/probe.ts";
 import { SetupService } from "../src/setup/service.ts";
 import { resetHardwareCache } from "../src/setup/local.ts";
+import { setCodexRunner } from "../src/engine/providers/codexLocal.ts";
 import type { Provider, WsMessage } from "../src/types.ts";
 
 async function until(cond: () => boolean, ms = 15_000) {
@@ -92,11 +93,11 @@ const LMS = ["lmstudio", "lmstudio-server", "lmstudio-model:google/gemma-4-12b-q
 test("the checklist follows what is switched on and set up", () => {
   const repo = new Repo(openDb(":memory:"));
   const ids = () => buildChecks(repo.getSettings()).map((c) => c.id);
-  assert.deepEqual(ids(), ["node", "claude-login", "claude-engine", "claude-models", "git", "git-identity", "browser", "images", "images-claude-code", ...LMS, "plugins", "terminal", ...(process.platform === "win32" ? ["pwsh"] : [])]);
+  assert.deepEqual(ids(), ["node", "claude-login", "claude-engine", "claude-models", "git", "git-identity", "browser", "images", "images-claude-code", ...LMS, "codex", "plugins", "terminal", ...(process.platform === "win32" ? ["pwsh"] : [])]);
   repo.updateSettings({ browserChecks: false });
   assert.ok(!ids().includes("browser"));
   repo.updateSettings({ providers: PROVIDERS });
-  assert.deepEqual(ids(), ["node", "claude-login", "claude-engine", "claude-models", "git", "git-identity", "images", "images-claude-code", "ollama", "ollama-model:qwen3-coder", ...LMS, "cli-codex", "key-zai", "provider-credit", "plugins", "terminal", ...(process.platform === "win32" ? ["pwsh"] : [])]);
+  assert.deepEqual(ids(), ["node", "claude-login", "claude-engine", "claude-models", "git", "git-identity", "images", "images-claude-code", "ollama", "ollama-model:qwen3-coder", ...LMS, "codex", "key-zai", "provider-credit", "plugins", "terminal", ...(process.platform === "win32" ? ["pwsh"] : [])]);
 });
 
 test("LM Studio gets a server check and no key check; an Ollama model a pipeline picked gets a pull check", async () => {
@@ -188,9 +189,6 @@ test("detectors: Ollama server, then its models; CLIs; keys", async () => {
   assert.equal((await get("ollama")).ok, true);
   assert.equal((await get("ollama-model:qwen3-coder")).ok, true);
 
-  assert.equal((await get("cli-codex")).ok, false);
-  f.o.cmds["codex --version"] = OK("codex-cli 0.40.0\n");
-  assert.equal((await get("cli-codex")).detail, "codex-cli 0.40.0");
 
   assert.equal((await get("key-zai")).ok, false);
   secret = true;
@@ -261,5 +259,37 @@ test("setup routes: summary, validation, one-click fix, Claude session", async (
   } finally {
     await app.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the Codex row offers install, sign in, a warning for an API-key sign-in, use it, or nothing, by state (D296)", async () => {
+  const repo = new Repo(openDb(":memory:"));
+  const f = fake();
+  const answers: Record<string, { code: number; out: string }> = {};
+  setCodexRunner(async (_cmd, args) => answers[args.join(" ")] ?? { code: 1, out: "" });
+  try {
+    const check = (settings = repo.getSettings()) => buildChecks(settings).find((x) => x.id === "codex")!.detect({ probe: f.probe, settings, hasSecret: () => false });
+
+    const none = await check();
+    assert.equal(none.ok, false);
+    assert.notEqual(none.offerFixes, false, "not there: the install button is offered");
+
+    answers["--version"] = { code: 0, out: "codex-cli 0.159.2\n" };
+    answers["login status"] = { code: 1, out: "Not logged in\n" };
+    assert.deepEqual((await check()).action, { label: "Sign in", endpoint: "/codex/login" });
+
+    answers["login status"] = { code: 0, out: "Logged in using an API key - sk-proj-***\n" };
+    const key = await check();
+    assert.equal(key.warn, true, "an API-key sign-in would bill the API under the subscription option");
+    assert.deepEqual(key.action, { label: "Sign in with ChatGPT", endpoint: "/codex/login" });
+
+    answers["login status"] = { code: 0, out: "Logged in using ChatGPT\n" };
+    const ready = await check();
+    assert.deepEqual([ready.ok, ready.action], [false, { label: "Use it", endpoint: "/codex/link" }], "signed in, not on the board: one click");
+
+    repo.updateSettings({ providers: [{ id: "codex", label: "Codex · ChatGPT subscription", kind: "cli", enabled: true, authRef: "", models: [], cli: { preset: "codex", auth: "login" }, mayEditFiles: false }] });
+    assert.deepEqual(await check(), { ok: true, detail: "codex-cli 0.159.2 · ChatGPT · on the board" });
+  } finally {
+    setCodexRunner(null);
   }
 });

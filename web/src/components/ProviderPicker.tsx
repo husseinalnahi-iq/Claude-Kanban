@@ -1,4 +1,7 @@
-import { ANTHROPIC_PROVIDER_ID, type CatalogModel, type ModelCatalogResult, type ModelEntry, type Provider, type TierRef } from "../../../server/src/types.ts";
+import { ANTHROPIC_PROVIDER_ID, EFFORTS, type CatalogModel, type Effort, type ModelCatalogResult, type ModelEntry, type ModelSurface, type Provider, type TierRef } from "../../../server/src/types.ts";
+import { useAppData } from "../lib/store.tsx";
+import { providerVisibleIn, visibleIn } from "../lib/modelLists.ts";
+import { EffortSelect } from "./ClaudeModelPicker.tsx";
 import { useCatalog } from "../lib/catalog.ts";
 import { claudeOptions, claudeWarning, useClaudeModels } from "../lib/claudeModels.ts";
 import { claudeModelStatus } from "../../../server/src/engine/claudeModels.ts";
@@ -31,10 +34,11 @@ function groupName(m: CatalogModel, r: ModelCatalogResult): string {
     case "downloaded": return "Downloaded in LM Studio · free (loads on first use)";
     case "free": return "Online · free";
     case "paid": return "Online · paid per use";
+    case "plan": return "On your subscription · no per-token bill";
     default: return r.source === "live" && m.installed === false ? "Your list · not on this computer yet" : "Your list";
   }
 }
-const ORDER: CatalogModel["group"][] = ["local", "loaded", "downloaded", "cloud", "free", "paid", "saved"];
+const ORDER: CatalogModel["group"][] = ["plan", "local", "loaded", "downloaded", "cloud", "free", "paid", "saved"];
 
 /** The provider's rows for the model picker: its live list when it has one, else what you typed in. */
 function optionsFor(p: Provider, r: ModelCatalogResult | null): ModelOption[] {
@@ -68,7 +72,7 @@ function providerWarning(p: Provider | undefined, r: ModelCatalogResult | null, 
  * Any id typed into the filter can be used as it is.
  */
 export function ProviderPicker({
-  value, onChange, models, providers, compact, stacked,
+  value, onChange, models, providers, compact, stacked, surface,
 }: {
   value: TierRef;
   onChange: (v: TierRef) => void;
@@ -78,13 +82,18 @@ export function ProviderPicker({
   compact?: boolean;
   /** Provider above model, for a column too narrow to show a whole model id beside it. */
   stacked?: boolean;
+  /** Which picker this is, for Settings → Model lists (D300): what is hidden there is not offered. */
+  surface?: ModelSurface;
 }) {
-  const enabled = providers.filter((p) => p.enabled);
+  const { settings } = useAppData();
+  const enabled = providers.filter((p) => p.enabled && (!surface || providerVisibleIn(settings, surface, p.id, value.provider)));
   const isClaude = !value.provider || value.provider === ANTHROPIC_PROVIDER_ID;
   const current = enabled.find((p) => p.id === value.provider);
   const { result, loading } = useCatalog(isClaude ? undefined : current);
   const claude = useClaudeModels();
-  const options: ModelOption[] = isClaude ? claudeOptions(models, claude.result) : current ? optionsFor(current, result) : [];
+  const options: ModelOption[] = (isClaude ? claudeOptions(models, claude.result) : current ? optionsFor(current, result) : []).filter(
+    (o) => !surface || visibleIn(settings, surface, isClaude ? ANTHROPIC_PROVIDER_ID : value.provider, o.id, value.model),
+  );
   const warn = isClaude ? claudeWarning(claudeModelStatus(value.model, claude.result)) : providerWarning(current, result, value.model);
 
   const pickProvider = (id: string) => {
@@ -114,7 +123,8 @@ export function ProviderPicker({
           const here = enabled.filter((p) => placeOf(p) === place);
           return here.length ? (
             <optgroup key={place} label={label}>
-              {here.map((p) => <option key={p.id} value={p.id}>{p.id}</option>)}
+              {/* The short id fits the closed picker; the open list says which one it is ("Codex · ChatGPT subscription"). */}
+              {here.map((p) => <option key={p.id} value={p.id} data-note={p.label !== p.id ? p.label : undefined}>{p.id}</option>)}
             </optgroup>
           ) : null;
         })}
@@ -134,5 +144,44 @@ export function ProviderPicker({
         }
       />
     </div>
+  );
+}
+
+/** Codex and Claude take an effort; a Claude-compatible endpoint has it stripped by Claude Code (D298). */
+export const takesEffort = (provider: string | null | undefined, providers: Provider[]): boolean => {
+  if (!provider || provider === ANTHROPIC_PROVIDER_ID) return true;
+  const p = providers.find((x) => x.id === provider);
+  return Boolean(p && p.kind === "cli" && p.cli?.preset === "codex");
+};
+
+/**
+ * Effort for a pick on any provider: Claude's levels from your login, a Codex model's own levels from
+ * Codex's list (low to max), and none for an endpoint where it would not be sent (D298).
+ */
+export function ProviderEffort({
+  provider, model, value, onChange, providers, notes, labelled, className,
+}: {
+  provider: string | null | undefined;
+  model: string;
+  value: Effort;
+  onChange: (e: Effort) => void;
+  providers: Provider[];
+  notes?: boolean;
+  labelled?: boolean;
+  className?: string;
+}) {
+  const p = providers.find((x) => x.id === provider && x.enabled);
+  const codex = p?.kind === "cli" && p.cli?.preset === "codex" ? p : undefined;
+  const { result } = useCatalog(codex);
+  const isClaude = !provider || provider === ANTHROPIC_PROVIDER_ID;
+  if (isClaude) return <EffortSelect className={className} notes={notes} labelled={labelled} model={model} value={value} onChange={onChange} />;
+  if (codex) {
+    const levels = result?.models.find((m) => m.id === model)?.efforts ?? EFFORTS;
+    return <EffortSelect className={className} notes={notes} labelled={labelled} model={model} value={value} onChange={onChange} levels={levels} />;
+  }
+  return (
+    <span className="block min-w-0" title="Effort is not sent to this provider">
+      <EffortSelect className={className} notes={notes} labelled={labelled} model={model} value={value} onChange={onChange} disabled />
+    </span>
   );
 }

@@ -1,4 +1,6 @@
-import { EFFORT_NOTES, type Effort, type ModelEntry } from "../../../server/src/types.ts";
+import { ANTHROPIC_PROVIDER_ID, EFFORT_NOTES, type Effort, type ModelEntry, type ModelSurface } from "../../../server/src/types.ts";
+import { useAppData } from "../lib/store.tsx";
+import { visibleIn } from "../lib/modelLists.ts";
 import { claudeModelStatus } from "../../../server/src/engine/claudeModels.ts";
 import { claudeOptions, claudeWarning, effortsFor, useClaudeModels } from "../lib/claudeModels.ts";
 import { ModelCombobox } from "./ModelCombobox.tsx";
@@ -6,7 +8,7 @@ import { RICH_SELECT, Select } from "./ui.tsx";
 
 /** Effort, offering only the levels this Claude model takes (none for Haiku). */
 export function EffortSelect({
-  model, value, onChange, disabled, className = "", notes, labelled,
+  model, value, onChange, disabled, className = "", notes, labelled, levels,
 }: {
   model: string;
   value: Effort;
@@ -17,9 +19,11 @@ export function EffortSelect({
   notes?: boolean;
   /** Say "high effort", not a bare "high": next to a model name a lone level does not read as a setting. */
   labelled?: boolean;
+  /** The levels another provider says this model takes (Codex does, D298); Claude's come from your login. */
+  levels?: Effort[] | null;
 }) {
   const { result } = useClaudeModels();
-  const { efforts, none } = effortsFor(model, result);
+  const { efforts, none } = levels?.length ? { efforts: levels, none: false } : effortsFor(model, result);
   const shown = efforts.includes(value) ? efforts : [...efforts, value];
   // The meaning of a level is a second line in the open list where the browser can draw one, and
   // part of the text where it cannot; the closed box only ever shows the level, so it never clips.
@@ -45,13 +49,14 @@ export function EffortSelect({
 }
 
 /** A Claude-only model picker: your list plus what your login has, and a warning on a bad id. */
-export function ClaudeModelPicker({ value, onChange, models }: { value: string; onChange: (id: string) => void; models: ModelEntry[] }) {
+export function ClaudeModelPicker({ value, onChange, models, surface }: { value: string; onChange: (id: string) => void; models: ModelEntry[]; surface?: ModelSurface }) {
   const { result, loading } = useClaudeModels();
+  const { settings } = useAppData();
   return (
     <ModelCombobox
       value={value}
       onChange={onChange}
-      options={claudeOptions(models, result)}
+      options={claudeOptions(models, result).filter((o) => !surface || visibleIn(settings, surface, ANTHROPIC_PROVIDER_ID, o.id, value))}
       loading={loading && !result}
       warn={claudeWarning(claudeModelStatus(value, result))}
       note={result?.error ? `Could not ask Claude Code for its models (${result.error}). Showing your list.` : null}

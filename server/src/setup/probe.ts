@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { pathExists } from "../terminal.ts";
 
 export interface RunResult {
   /** null when the program could not be started at all (not installed). */
@@ -120,7 +121,7 @@ export const realProbe: Probe = {
         resolve(code);
       });
     }),
-  exists: existsSync,
+  exists: pathExists,
   list: (dir) => {
     try {
       return readdirSync(dir);

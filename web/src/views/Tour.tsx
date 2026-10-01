@@ -176,8 +176,9 @@ export function Tour({ hasProjects, onAddProject }: { hasProjects: boolean; onAd
                 New symptom days later: ↪ Follow-up task, which starts fresh from the repository as it is now.
               </li>
               <li>
-                <b className="text-ink-200">Sound needs one click first.</b> Browsers stay silent until you've clicked the page once. The bell's ▾ has
-                themes, volume and desktop notifications.
+                <b className="text-ink-200">Sound needs one click first.</b> Browsers stay silent until you've clicked the page once (the bell shows an amber
+                dot until then). The bell's ▾ has your inbox — what waits on you, with Allow and Deny — and the themes, volume and desktop
+                notifications.
               </li>
             </ul>
           </div>

@@ -36,6 +36,8 @@ async function until(cond: () => boolean, ms = 15_000) {
 test("the shell: PowerShell 7 if installed, else Windows PowerShell; elsewhere your login shell", () => {
   const pf = "C:\\Program Files";
   assert.equal(shellFor("win32", { ProgramFiles: pf }, (p) => p === join(pf, "PowerShell", "7", "pwsh.exe")).command, join(pf, "PowerShell", "7", "pwsh.exe"));
+  const alias = join("C:\\Users\\me\\AppData\\Local", "Microsoft", "WindowsApps", "pwsh.exe");
+  assert.equal(shellFor("win32", { ProgramFiles: pf, LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local" }, (p) => p === alias).command, alias, "winget's app-package install of PowerShell 7 counts too");
   const winPs = shellFor("win32", { ProgramFiles: pf }, () => false);
   assert.equal(winPs.command, "powershell.exe");
   const args = winPs.args.join(" ");

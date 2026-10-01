@@ -71,14 +71,29 @@ test("a card whose start time has come is queued once, and its schedule cleared"
 test("a scheduled card that cannot start keeps a note saying why, and is not retried forever", () => {
   const b = board();
   try {
+    // No stages: nothing could ever run it, so retrying at every tick would only fail again.
+    const stuck = b.repo.createTask({ project_id: b.project.id, title: "stuck", pipeline: [] });
+    b.repo.updateTask(stuck.id, { start_at: new Date(b.now() - 1000).toISOString() });
+    b.scheduler.tick();
+    const t = b.repo.getTask(stuck.id)!;
+    assert.equal(t.status, "backlog");
+    assert.equal(t.start_at, null);
+    assert.match(t.note ?? "", /scheduled start/i);
+  } finally {
+    b.cleanup();
+  }
+});
+
+test("a scheduled card that waits on another is queued at its time and waits in Queued for it (D289)", () => {
+  const b = board();
+  try {
     const first = b.repo.createTask({ project_id: b.project.id, title: "first", pipeline: ONE });
     const waits = b.repo.createTask({ project_id: b.project.id, title: "waits", pipeline: ONE, depends_on: [first.id] });
     b.repo.updateTask(waits.id, { start_at: new Date(b.now() - 1000).toISOString() });
     b.scheduler.tick();
     const t = b.repo.getTask(waits.id)!;
-    assert.equal(t.status, "backlog");
-    assert.equal(t.start_at, null);
-    assert.match(t.note ?? "", /scheduled start/i);
+    assert.equal(t.status, "queued");
+    assert.equal(t.start_at, null, "the schedule did its job");
   } finally {
     b.cleanup();
   }

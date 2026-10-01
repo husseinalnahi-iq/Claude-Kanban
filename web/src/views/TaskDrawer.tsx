@@ -31,6 +31,8 @@ import { useAsk } from "../components/Ask.tsx";
 import { BlockedPanel, CheckoutNote, QuestionsPanel, ResultPanel } from "../components/Outcome.tsx";
 import { CredentialWarning } from "../components/CredentialWarning.tsx";
 import { ChecklistPanel } from "../components/Checklist.tsx";
+import { RunSuggestions } from "../components/Suggestions.tsx";
+import { DependsOn } from "../components/DependsOn.tsx";
 import { effortsFor, useClaudeModels } from "../lib/claudeModels.ts";
 
 type Tab = "spec" | "plan" | "pipeline" | "transcript" | "approvals" | "browser" | "diff" | "subtasks" | "files" | "messages" | "chat";
@@ -47,9 +49,6 @@ const takeRequested = (taskId: string): Tab | null => {
   requestedTab = null;
   return t;
 };
-/** Two pipelines are the same when every stage, model and effort matches. */
-const samePipeline = (a: PipelineStage[], b: PipelineStage[]) =>
-  a.length === b.length && a.every((s, i) => s.stage === b[i].stage && s.model === b[i].model && s.effort === b[i].effort);
 
 const RUN_TONE = { running: "text-amber", approval: "text-rose", success: "text-moss", failed: "text-rust" } as const;
 
@@ -105,7 +104,7 @@ function ApprovalInput({ a }: { a: Approval }) {
   if (a.tool_name === IMAGE_TOOL)
     return (
       <div className="rounded bg-ink-950 px-2.5 py-2 text-[12px] text-ink-200">
-        <div className="mb-0.5 text-[11px] uppercase tracking-wide text-ink-500">Make an image with the free image model</div>
+        <div className="mb-0.5 text-[11px] uppercase tracking-wide text-ink-500">Make an image with the picture maker in Settings → Images</div>
         <div className="whitespace-pre-wrap">{String(input.prompt ?? "")}</div>
         <div className="mt-1 font-mono text-[11.5px] text-ink-400">
           → {String(input.file ?? "generated-images/…")}{input.width || input.height ? ` · ${input.width ?? 1024}×${input.height ?? 1024}` : ""}
@@ -161,9 +160,6 @@ function PendingToolApproval({ a }: { a: Approval }) {
 
 function SpecTab({ d }: { d: TaskDetail }) {
   const { projects, settings } = useAppData();
-  // The suggested pipeline, being changed before it is used: model and effort per stage.
-  const [adjusting, setAdjusting] = useState<Stage[] | null>(null);
-  const claude = useClaudeModels();
   const project = projects.find((p) => p.id === d.task.project_id);
   const { busy, error, run } = useAction();
   const blocked = project ? autonomousBlocked(project) : null;
@@ -212,74 +208,8 @@ function SpecTab({ d }: { d: TaskDetail }) {
           </div>
         </div>
       ) : null}
-      {/* Triage saw that this changes a live system: offered as a live task, never applied by itself (D241). */}
-      {sug?.live && !t.live && t.status === "backlog" && !d.busy ? (
-        <div className="rounded-lg border border-rose/40 bg-rose/5 px-3 py-2 text-[12.5px]">
-          <div className="mb-1 flex flex-wrap items-center gap-2">
-            <span className="text-rose">Claude thinks this touches a live system</span>
-          </div>
-          {sug.live_reason ? <div className="mb-1.5 text-ink-300">{sug.live_reason}</div> : null}
-          <div className="flex justify-end gap-2">
-            <Button size="sm" variant="go" onClick={() => run(() => api.acceptSuggestion(t.id, { live: true }))}>Mark it live</Button>
-            <Button size="sm" variant="ghost" onClick={() => run(() => api.dismissSuggestion(t.id, { live: true }))}>It isn't</Button>
-          </div>
-        </div>
-      ) : null}
-      {/* The board sizes the pipeline to the task, but never applies it: the wrong guess here costs money.
-          Only before it runs: a sizing shown under a finished run is noise (D191). */}
-      {sug?.pipeline?.length && !samePipeline(sug.pipeline, t.pipeline) && t.status === "backlog" && !d.busy ? (
-        <div className="rounded-lg border border-amber/40 bg-amber/5 px-3 py-2 text-[12.5px]">
-          <div className="mb-1.5 text-amber">Claude sized this task — the model and effort it suggests for each stage:</div>
-          <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
-            {sug.pipeline.map((st, i) => (
-              <span key={i} className="flex items-center gap-1.5">
-                {i ? <span className="text-ink-500">→</span> : null}
-                <span className="rounded-md border border-amber/40 bg-ink-900/60 px-2 py-0.5 font-mono text-[11.5px] text-ink-100">
-                  {st.stage} · {modelLabel(st)} ·{" "}
-                  {/* Haiku has no effort setting: the level sizing picked would not be sent, so it is not shown as if it were. */}
-                  <span className="text-amber">{st.provider || !effortsFor(st.model, claude.result).none ? `${st.effort} effort` : "no effort setting"}</span>
-                </span>
-              </span>
-            ))}
-          </div>
-          {sug.sizing_reason ? <div className="mb-1.5 text-ink-300">{sug.sizing_reason}</div> : null}
-          {adjusting ? (
-            <div className="mb-2">
-              <PipelineEditor value={adjusting} onChange={setAdjusting} models={settings?.models ?? []} />
-            </div>
-          ) : null}
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-mono text-[11px] text-ink-500">now: {pipelineLine(t.pipeline, modelLabel)}</span>
-            <span className="ml-auto flex gap-2">
-              {adjusting ? (
-                <>
-                  <Button
-                    size="sm"
-                    variant="go"
-                    disabled={!adjusting.length}
-                    onClick={() =>
-                      run(async () => {
-                        await api.patchTask(t.id, { pipeline: adjusting });
-                        await api.dismissSuggestion(t.id, { pipeline: true });
-                        setAdjusting(null);
-                      })
-                    }
-                  >
-                    Use these
-                  </Button>
-                  <Button size="sm" variant="ghost" onClick={() => setAdjusting(null)}>Cancel</Button>
-                </>
-              ) : (
-                <>
-                  <Button size="sm" variant="go" busy={d.busy} onClick={() => run(() => api.acceptSuggestion(t.id, { pipeline: true }))}>Use it</Button>
-                  <Button size="sm" variant="ghost" title="Change a model or effort before using it" onClick={() => setAdjusting(sug.pipeline!.map((s) => ({ ...s })))}>Adjust</Button>
-                  <Button size="sm" variant="ghost" onClick={() => run(() => api.dismissSuggestion(t.id, { pipeline: true }))}>Keep default</Button>
-                </>
-              )}
-            </span>
-          </div>
-        </div>
-      ) : null}
+      {/* Is it live, and which models: the same two decisions the side chat shows on its card (D288). */}
+      <RunSuggestions t={t} busy={d.busy} />
       {refining ? <RefineModal taskId={t.id} onClose={() => setRefining(false)} onApplied={() => undefined} /> : null}
       <div className="grid grid-cols-2 gap-3 text-[12px]">
         <div>
@@ -370,15 +300,18 @@ function SpecTab({ d }: { d: TaskDetail }) {
           <div className="mt-0.5 text-[11.5px] text-ink-500">Runs get these as context and can read them with board_get_task.</div>
         </div>
       ) : null}
-      {t.depends_on.length ? (
-        <div className="text-[12px] text-ink-400">
-          Waiting on:{" "}
-          {t.depends_on.map((id, i) => (
-            <span key={id}>
-              {i ? ", " : ""}
-              <button className="text-amber hover:underline cursor-pointer" onClick={() => navigate({ taskId: id })}>{id}</button>
-            </span>
-          ))}
+      {/* What this task starts after: it waits in Queued until they are done, then starts with their results (D289–D291). */}
+      {t.depends_on.length || ["backlog", "failed"].includes(t.status) ? (
+        <div>
+          <div className="mb-1 text-[11px] uppercase tracking-wider text-ink-500">Starts after</div>
+          <DependsOn
+            projectId={t.project_id}
+            selfId={t.id}
+            value={t.depends_on}
+            editable={t.status !== "done" && t.status !== "running" && t.status !== "planning"}
+            onChange={(next) => api.patchTask(t.id, { depends_on: next })}
+          />
+          {t.depends_on.length ? <div className="mt-1 text-[11.5px] text-ink-500">Queued before they are done, it waits and starts by itself — and is told what they did.</div> : null}
         </div>
       ) : null}
       {t.skills.length ? (

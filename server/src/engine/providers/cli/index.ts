@@ -8,6 +8,7 @@ import type { SecretStore } from "../../../secrets.ts";
 import { childEnv } from "./env.ts";
 import { spawnCli, type SpawnFn } from "./spawn.ts";
 import { translatorFor } from "./translate.ts";
+import { codexCommand, codexEffort, noteCodexRefused } from "../codexLocal.ts";
 
 /** Test seam: the runner passes its SecretStore in; adapters resolve auth vars through it. */
 let secretStore: SecretStore | null = null;
@@ -20,21 +21,21 @@ export function setCliSpawn(fn: SpawnFn | undefined): void {
   spawnFn = fn;
 }
 
-const EFFORT_TO_CODEX: Record<Effort, string> = { low: "low", medium: "medium", high: "high", xhigh: "high", max: "high" };
-
 /** How each preset is invoked. The prompt always arrives on stdin (or a temp file for `custom`). */
-function buildInvocation(inv: StageInvocation): { command: string; args: string[]; stdin?: string; promptFile?: string; lastMsgFile?: string } {
+function buildInvocation(inv: StageInvocation, codex = "codex"): { command: string; args: string[]; stdin?: string; promptFile?: string; lastMsgFile?: string } {
   const preset: CliPreset = inv.provider.cli?.preset ?? "custom";
   const extra = inv.provider.cli?.extraArgs ?? [];
   switch (preset) {
     case "codex": {
       const lastMsgFile = join(tmpDir(), `${inv.run.id}.last.md`);
       return {
-        command: "codex",
+        command: codex,
+        // No `-a never`: approval is a top-level flag, and `codex exec` refused it as an unknown
+        // argument, so every Codex stage failed before it began (D294). exec never stops to ask.
         args: [
           "exec", "--json", "--skip-git-repo-check", "-C", inv.cwd, "-m", inv.model,
-          "-s", inv.readOnly ? "read-only" : "workspace-write", "-a", "never",
-          "-c", `model_reasoning_effort=${EFFORT_TO_CODEX[inv.effort]}`, "-o", lastMsgFile,
+          "-s", inv.readOnly ? "read-only" : "workspace-write",
+          "-c", `model_reasoning_effort=${codexEffort(inv.model, inv.effort)}`, "-o", lastMsgFile,
           // Codex attaches images to the first message itself.
           ...(inv.images ?? []).flatMap((p) => ["-i", p]),
           ...extra, "-",
@@ -87,7 +88,7 @@ async function* runCli(inv: StageInvocation): AsyncIterable<SDKMessage> {
   const preset: CliPreset = inv.provider.cli?.preset ?? "custom";
   const session_id = inv.run.id;
   const redact = redactor(inv.secret);
-  const spec = buildInvocation(inv);
+  const spec = buildInvocation(inv, preset === "codex" ? await codexCommand() : undefined);
   if (!spec.command) {
     yield errorResult(session_id, "This custom provider has no command configured.");
     return;
@@ -146,6 +147,8 @@ async function* runCli(inv: StageInvocation): AsyncIterable<SDKMessage> {
     return;
   }
   if (fin.error) {
+    // Codex lists some models it then refuses to the account: the picker says so from now on (D298).
+    if (preset === "codex" && /does not exist or you do not have access/i.test(fin.error)) noteCodexRefused(inv.model);
     yield errorResult(session_id, redact(fin.error));
     return;
   }

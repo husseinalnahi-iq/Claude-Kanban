@@ -165,6 +165,24 @@ test("recover() fails interrupted runs and their tasks", () => {
   }
 });
 
+test("a board restart closes every waiting card with a decided event, so no pop-up waits for ever", () => {
+  const s = setup(fakeQuery().fn);
+  try {
+    const task = s.repo.createTask({ project_id: s.project.id, title: "waiting", mode: "supervised", pipeline: ONE_STAGE });
+    s.repo.updateTask(task.id, { status: "approval" });
+    const run = s.repo.createRun({ task_id: task.id, stage: "code", stage_index: 0, model: "m", effort: "low" });
+    const card = s.repo.createApproval({ run_id: run.id, task_id: task.id, tool_name: "Bash", input: { command: "ls" } });
+    s.runner.recover();
+    assert.equal(s.repo.getApproval(card.id)!.decision, "expired");
+    const decided = s.seen.filter((m) => m.type === "approval.decided");
+    assert.equal(decided.length, 1);
+    assert.equal((decided[0] as any).approval.id, card.id);
+    assert.equal((decided[0] as any).approval.task_title, "waiting");
+  } finally {
+    s.cleanup();
+  }
+});
+
 test("a review that asks for changes fails the task instead of passing it to Approve", async () => {
   const f = fakeQuery({ result: "Found a bug in the retry path.\n\nVERDICT: CHANGES_NEEDED" });
   const s = setup(f.fn);

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { stageLabel } from "../../../server/src/engine/answer.ts";
 import {
   ANTHROPIC_PROVIDER_ID, DEFAULT_EFFORT, supportsFastMode,
   type FastModeStatus, type ModelEntry, type Provider, type Stage, type StageName,
@@ -6,7 +7,7 @@ import {
 import { api } from "../lib/api.ts";
 import { useAppData } from "../lib/store.tsx";
 import { Help, inputCls, Select } from "./ui.tsx";
-import { ProviderPicker } from "./ProviderPicker.tsx";
+import { ProviderEffort, ProviderPicker } from "./ProviderPicker.tsx";
 import { EffortSelect } from "./ClaudeModelPicker.tsx";
 
 /** Fast-mode availability is per account and changes rarely, so every editor on screen shares one check. */
@@ -50,7 +51,8 @@ const onClaude = (s: Stage) => !s.provider || s.provider === ANTHROPIC_PROVIDER_
 
 /** "plan Opus 5.5 · high → code Opus 5.5 · medium" — a pipeline in one line, model and effort for each stage. */
 export function pipelineLine(stages: Stage[], label: (s: Stage) => string): string {
-  return stages.map((s) => `${s.stage} ${label(s)}${onClaude(s) ? ` · ${s.effort}` : ""}`).join(" → ");
+  // Codex takes an effort too (D298); a Claude-compatible endpoint does not.
+  return stages.map((s) => `${stageLabel(s)} ${label(s)}${onClaude(s) || /^codex/.test(s.provider ?? "") ? ` · ${s.effort}` : ""}`).join(" → ");
 }
 
 /** Edits a pipeline: one row per stage with provider + model, effort and optional prompt. */
@@ -83,14 +85,13 @@ export function PipelineEditor({ value, onChange, models, providers: providersPr
             </Select>
             <ProviderPicker
               compact
+              surface="stages"
               value={{ provider: s.provider ?? ANTHROPIC_PROVIDER_ID, model: s.model }}
               models={models}
               providers={providers}
               onChange={(v) => set(i, { model: v.model, provider: v.provider === ANTHROPIC_PROVIDER_ID ? undefined : v.provider, ...(v.provider === ANTHROPIC_PROVIDER_ID ? {} : { fast: undefined }) })}
             />
-            <span className="block min-w-0" title={onClaude(s) ? undefined : "Effort is a Claude control; it is not sent to other providers"}>
-              <EffortSelect notes labelled model={s.model} value={s.effort} disabled={!onClaude(s)} onChange={(effort) => set(i, { effort })} />
-            </span>
+            <ProviderEffort notes labelled provider={s.provider} model={s.model} value={s.effort} providers={providers} onChange={(effort) => set(i, { effort })} />
             {(() => {
               // Fast mode is Opus 5 / 4.8 only, and only when the account allows it. When it cannot run,
               // the toggle says why instead of silently doing nothing.
