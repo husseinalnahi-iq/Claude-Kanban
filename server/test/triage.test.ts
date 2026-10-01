@@ -251,6 +251,7 @@ test("the board sizes the pipeline itself, maps tiers to real models, and never 
   assert.deepEqual(res!.sizing!.stages, [{ stage: "code", tier: "cheap", effort: "low" }]);
   assert.match(res!.sizing!.reason, /find-and-replace/);
   assert.match(calls[0].prompt, /Spending more than the work needs is a defect/, "the prompt makes it account for cost");
+  assert.match(JSON.stringify(calls[0].options), /why that effort/, "the reason shown to the person covers the effort it picked, not only the model");
 
   const tiers = {
     cheap: { provider: "anthropic", model: "claude-haiku-4-5-20251001" },
@@ -310,7 +311,7 @@ test("live-system work is never sized down, and the task is offered as a live ta
     const task = s.repo.createTask({ project_id: s.project.id, title: "allow 40100 on pay via journal", pipeline: THREE_STAGE, mode: "autonomous" });
     await s.runner.triage(task.id, "classify");
     const sug = s.repo.getTask(task.id)!.suggestion!;
-    assert.deepEqual(sug.pipeline, [{ stage: "code", model: "claude-opus-5", effort: "high" }], "strong tier, at least high effort, whatever the model said");
+    assert.deepEqual(sug.pipeline, [{ stage: "code", model: "claude-opus-5-5", effort: "high" }], "strong tier, at least high effort, whatever the model said");
     assert.equal(sug.sizing_reason, "A one-line filter change. Raised to the strong tier: it changes a live system.", "the reason admits the override");
     assert.equal(sug.mode, undefined, "no mode switch is proposed any more");
     assert.equal(sug.live, true);

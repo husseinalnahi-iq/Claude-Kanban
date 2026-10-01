@@ -30,6 +30,9 @@ const createSchema = z.object({
   triage: z.boolean().optional(),
 });
 
+/** How long a task's "commits behind" figure is reused. It costs two git processes, and an open drawer asks for it on every turn of a running stage. */
+const STALENESS_TTL_MS = 30_000;
+
 const patchSchema = z.object({
   title: z.string().trim().min(1).optional(),
   spec_md: z.string().optional(),
@@ -64,6 +67,30 @@ export async function taskRoutes(app: FastifyInstance, { repo, bus, runner }: Ap
     if (err) throw new ConflictError(err);
   };
 
+  /**
+   * A parent and a milestone are picked by id, so the server is what keeps them sensible: a missing
+   * one used to fail as a database error, and one from another project — or the task itself — was kept.
+   */
+  const checkLinks = (taskId: string, projectId: string, links: { parent_id?: string | null; milestone_id?: string | null }) => {
+    if (links.parent_id) {
+      if (links.parent_id === taskId) throw new ConflictError("A task cannot be its own parent.");
+      const parent = repo.getTask(links.parent_id);
+      if (!parent) throw new ConflictError("That parent task no longer exists.");
+      if (parent.project_id !== projectId) throw new ConflictError(`"${parent.title}" belongs to another project, so it cannot be this task's parent.`);
+      // Walking up from the new parent must never arrive back here.
+      const seen = new Set<string>();
+      for (let up = parent.parent_id; taskId && up && !seen.has(up); up = repo.getTask(up)?.parent_id ?? null) {
+        if (up === taskId) throw new ConflictError(`"${parent.title}" is already under this task, so it cannot also be its parent.`);
+        seen.add(up);
+      }
+    }
+    if (links.milestone_id) {
+      const milestone = repo.getMilestone(links.milestone_id);
+      if (!milestone) throw new ConflictError("That milestone no longer exists.");
+      if (milestone.project_id !== projectId) throw new ConflictError(`The milestone "${milestone.title}" belongs to another project.`);
+    }
+  };
+
   app.get("/tasks", async (req) => {
     const q = req.query as { project?: string; parent?: string };
     if (q.project && !q.parent) return repo.taskCards(q.project);
@@ -90,18 +117,27 @@ export async function taskRoutes(app: FastifyInstance, { repo, bus, runner }: Ap
     };
   });
 
+  const stalenessCache = new Map<string, { at: number; key: string; value: { base: string; behind: number } | null }>();
+
   /** How far a task's branch has fallen behind what it will land on. null when it has no worktree. */
-  const staleness = async (task: { project_id: string; branch: string | null; worktree_path: string | null }) => {
+  const staleness = async (task: { id: string; project_id: string; branch: string | null; worktree_path: string | null }) => {
     if (!task.branch || !task.worktree_path) return null;
     const project = repo.getProject(task.project_id);
     if (!project) return null;
+    // Remembered against the branch and the base it was measured for, so changing either asks git again.
+    const key = JSON.stringify([task.branch, project.merge.baseBranch]);
+    const hit = stalenessCache.get(task.id);
+    if (hit && hit.key === key && Date.now() - hit.at < STALENESS_TTL_MS) return hit.value;
+    let value: { base: string; behind: number } | null;
     try {
       const base = project.merge.baseBranch?.trim() || (await currentBranch(project.path));
       const { behind } = await aheadBehind(project.path, base, task.branch);
-      return { base, behind };
+      value = { base, behind };
     } catch {
-      return null; // not a git repo, or the branch is gone: nothing useful to say
+      value = null; // not a git repo, or the branch is gone: nothing useful to say
     }
+    stalenessCache.set(task.id, { at: Date.now(), key, value });
+    return value;
   };
 
   app.post("/tasks", async (req) => {
@@ -109,6 +145,7 @@ export async function taskRoutes(app: FastifyInstance, { repo, bus, runner }: Ap
     const project = repo.getProject(body.project_id);
     if (!project) throw new NotFoundError(`No project ${body.project_id}`);
     if (body.depends_on?.length) checkDeps("", body.project_id, body.depends_on);
+    checkLinks("", body.project_id, body);
     const task = repo.createTask({ ...body, pipeline: body.pipeline?.length ? body.pipeline : defaultPipeline(repo, project) } as never);
     bus.publish({ type: "task.updated", task });
     if (body.triage ?? repo.getSettings().autoTriage) void runner.triage(task.id, "classify").catch(() => {});
@@ -159,6 +196,11 @@ export async function taskRoutes(app: FastifyInstance, { repo, bus, runner }: Ap
       throw new ConflictError(`This task has work on ${current.branch ?? "its worktree"}; approve or discard it before changing mode.`);
     }
     if (body.depends_on) checkDeps(id, current.project_id, body.depends_on);
+    // Only a link that is being changed: a form that sends back what the task already has must still save.
+    checkLinks(id, current.project_id, {
+      parent_id: body.parent_id === current.parent_id ? undefined : body.parent_id,
+      milestone_id: body.milestone_id === current.milestone_id ? undefined : body.milestone_id,
+    });
     const task = repo.updateTask(id, body as never);
     bus.publish({ type: "task.updated", task });
     return task;
@@ -171,6 +213,7 @@ export async function taskRoutes(app: FastifyInstance, { repo, bus, runner }: Ap
     if (task.worktree_path) throw new ConflictError("This task still has a worktree; approve or discard it first.");
     repo.deleteTask(id);
     runner.forget(id);
+    stalenessCache.delete(id);
     removeAttachmentDir(repo.getSettings().stateDir, id);
     bus.publish({ type: "task.deleted", taskId: id });
     return { ok: true };
@@ -215,7 +258,8 @@ export async function taskRoutes(app: FastifyInstance, { repo, bus, runner }: Ap
     const archived: string[] = [];
     for (const t of repo.listTasks({ project_id: body.project_id })) {
       if (t.status !== "done" || t.archived_at) continue;
-      if (Date.parse(t.updated_at) > cutoff) continue;
+      // Finished that long ago — not "last touched": an edited label must not keep an old card on the board.
+      if (Date.parse(t.done_at ?? t.updated_at) > cutoff) continue;
       const updated = repo.updateTask(t.id, { archived_at: new Date().toISOString() });
       bus.publish({ type: "task.updated", task: updated });
       archived.push(t.id);
@@ -265,7 +309,14 @@ export async function taskRoutes(app: FastifyInstance, { repo, bus, runner }: Ap
     return runner.decidePlan(idOf(req), body.choice, body.text);
   });
   /** Catch a long-running task's worktree up with the base branch before it gets further out of date. */
-  app.post("/tasks/:id/update-from-base", async (req) => runner.updateTaskFromBase(idOf(req)));
+  app.post("/tasks/:id/update-from-base", async (req) => {
+    try {
+      return await runner.updateTaskFromBase(idOf(req));
+    } finally {
+      // The answer has just changed: the drawer must not show the old "behind" count for half a minute.
+      stalenessCache.delete(idOf(req));
+    }
+  });
   app.post("/tasks/:id/message", async (req) => {
     const body = z.object({ body: z.string().trim().min(1) }).parse(req.body);
     return runner.chat(idOf(req), body.body);

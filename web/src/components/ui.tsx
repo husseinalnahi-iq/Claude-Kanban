@@ -1,4 +1,4 @@
-import { useEffect, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode, type SelectHTMLAttributes } from "react";
 
 type Variant = "primary" | "ghost" | "danger" | "outline" | "go";
 
@@ -89,21 +89,97 @@ export function ModeChip({ mode, ownBranch }: { mode: "autonomous" | "supervised
   );
 }
 
-export function Modal({ title, onClose, children, width = "max-w-xl" }: { title: string; onClose: () => void; children: ReactNode; width?: string }) {
+/**
+ * Everything open that Escape can close, oldest first. One key press closes only the newest: with a
+ * listener each, Escape in a confirm dialog also closed the task drawer under it, and the chat beside it.
+ */
+const escapeLayers: { current: (e: KeyboardEvent) => void }[] = [];
+if (typeof window !== "undefined") {
+  window.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    // A drop-down list drawn by the page (Chrome's styled <select>) is a layer of its own: Escape
+    // closes the list and nothing else. The operating system's list never let the key reach here.
+    if (selectListOpen(e.target)) return;
+    escapeLayers[escapeLayers.length - 1]?.current(e);
+  });
+}
+
+/** The key lands on the list's focused option, or on the select itself while its list is open. */
+function selectListOpen(target: EventTarget | null): boolean {
+  if (target instanceof HTMLOptionElement) return true;
+  if (!(target instanceof HTMLSelectElement)) return false;
+  try {
+    return target.matches(":open");
+  } catch {
+    return false;
+  }
+}
+
+/** Close on Escape, but only while this is the top thing on screen. `active` is for pop-ups that are sometimes shut. */
+export function useEscape(onEscape: (e: KeyboardEvent) => void, active = true) {
+  const ref = useRef(onEscape);
+  ref.current = onEscape;
   useEffect(() => {
-    const k = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", k);
-    return () => window.removeEventListener("keydown", k);
-  }, [onClose]);
+    if (!active) return;
+    escapeLayers.push(ref);
+    return () => {
+      const i = escapeLayers.indexOf(ref);
+      if (i >= 0) escapeLayers.splice(i, 1);
+    };
+  }, [active]);
+}
+
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/**
+ * Keeps the keyboard inside a dialog while it is open: Tab goes round its own controls instead of
+ * wandering into the page behind it, and focus returns to where it was when the dialog closes.
+ * Put the ref on the dialog's box, with `tabIndex={-1}` so it can hold focus when nothing inside asks for it.
+ */
+export function useFocusTrap<T extends HTMLElement>() {
+  const box = useRef<T>(null);
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const before = document.activeElement as HTMLElement | null;
+    // A field with autoFocus already has it; otherwise the dialog itself takes it.
+    if (!el.contains(document.activeElement)) el.focus({ preventScroll: true });
+    const key = (e: KeyboardEvent) => {
+      // A dialog opened inside this one has already turned the corner.
+      if (e.key !== "Tab" || e.defaultPrevented) return;
+      const items = [...el.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((x) => x.getClientRects().length);
+      const first = items[0];
+      const last = items[items.length - 1];
+      const at = document.activeElement;
+      if (!first || !last) e.preventDefault();
+      else if (e.shiftKey && (at === first || at === el)) (e.preventDefault(), last.focus());
+      else if (!e.shiftKey && at === last) (e.preventDefault(), first.focus());
+    };
+    el.addEventListener("keydown", key);
+    return () => {
+      el.removeEventListener("keydown", key);
+      if (before?.isConnected) before.focus({ preventScroll: true });
+    };
+  }, []);
+  return box;
+}
+
+export function Modal({ title, onClose, children, width = "max-w-xl" }: { title: string; onClose: () => void; children: ReactNode; width?: string }) {
+  useEscape(onClose);
+  const box = useFocusTrap<HTMLDivElement>();
   return (
     // The overlay scrolls, so a form taller than the window (a long pipeline) still reaches its buttons.
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-[var(--kb-scrim)] backdrop-blur-[2px] p-6 pt-[8vh]" onMouseDown={onClose}>
-      <div className={`rise w-full ${width} rounded-xl border border-ink-700 bg-ink-900 kb-raise`} onMouseDown={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between border-b border-ink-700 px-5 py-3">
-          <h2 className="text-[14px] font-semibold text-ink-100">{title}</h2>
-          <button className="text-ink-400 hover:text-ink-100 cursor-pointer text-lg leading-none" onClick={onClose} aria-label="Close">×</button>
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-[var(--kb-scrim)] backdrop-blur-[2px]">
+      {/* The click-outside area is this inner layer, not the scrolling one: a press on the overlay's own
+          scrollbar — the way to reach those buttons — used to close the form and lose what was typed. */}
+      <div className="flex min-h-full items-start justify-center p-6 pt-[8vh]" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+        <div ref={box} tabIndex={-1} role="dialog" aria-modal="true" aria-label={title} className={`rise w-full ${width} rounded-xl border border-ink-700 bg-ink-900 kb-raise focus:outline-none`}>
+          <div className="flex items-center justify-between border-b border-ink-700 px-5 py-3">
+            <h2 className="text-[14px] font-semibold text-ink-100">{title}</h2>
+            <button className="text-ink-400 hover:text-ink-100 cursor-pointer text-lg leading-none" onClick={onClose} aria-label="Close">×</button>
+          </div>
+          <div className="px-5 py-4">{children}</div>
         </div>
-        <div className="px-5 py-4">{children}</div>
       </div>
     </div>
   );
@@ -139,6 +215,45 @@ export function Field({ label, hint, group, children }: { label: ReactNode; hint
 
 export const inputCls =
   "w-full rounded-md border border-ink-700 bg-ink-850 px-2.5 py-1.5 text-[13px] text-ink-100 placeholder:text-ink-500 focus:border-amber/60 focus:outline-none";
+
+/** The one arrow every drop-down and the model picker share, so they read as one family of control. */
+export function Chevron({ className = "" }: { className?: string }) {
+  return (
+    <svg aria-hidden viewBox="0 0 12 12" width="12" height="12" className={`shrink-0 ${className}`} fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 4.5 6 7.5 9 4.5" />
+    </svg>
+  );
+}
+
+/**
+ * Whether this browser lets the page style the open list of a <select> (Chrome and Edge 135+). Where
+ * it does, an option can carry a second line (`data-note`); where it does not, the list is the
+ * operating system's own and only the option text shows, so callers fold the note into the text.
+ */
+export const RICH_SELECT = typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("appearance", "base-select");
+
+/**
+ * A drop-down list: the browser's own <select>, so the keyboard, screen readers and forms keep
+ * working, dressed to match the board. The closed box gets the shared arrow; in Chrome the open list
+ * is styled too (`.kb-select` in index.css) instead of the operating system's white menu. Sized to
+ * its content like a button unless `wide`, which fills the row. `wrapClassName` sizes the whole
+ * control (a max width, say), `className` the box itself.
+ */
+export function Select({
+  className = "", wrapClassName = "", wide, children, ...rest
+}: SelectHTMLAttributes<HTMLSelectElement> & { wide?: boolean; wrapClassName?: string }) {
+  return (
+    <span className={`kb-select relative inline-flex min-w-0 max-w-full ${wide ? "w-full" : ""} ${wrapClassName}`}>
+      <select
+        {...rest}
+        className={`${inputCls} ${wide ? "" : "w-auto!"} cursor-pointer appearance-none truncate pr-7 disabled:cursor-not-allowed disabled:opacity-50 ${className}`}
+      >
+        {children}
+      </select>
+      <Chevron className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-ink-500" />
+    </span>
+  );
+}
 
 export function ErrorLine({ error }: { error: string | null }) {
   if (!error) return null;

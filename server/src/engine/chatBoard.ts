@@ -2,8 +2,8 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { Repo } from "../repo.ts";
 import type { Bus } from "../bus.ts";
-import type { ChatMessage, Task } from "../types.ts";
-import { PRIORITIES, TASK_TYPES } from "../types.ts";
+import type { ChatMessage, EventRow, Task } from "../types.ts";
+import { PRIORITIES, TASK_STATUSES, TASK_TYPES } from "../types.ts";
 import { allowedMode, defaultPipeline } from "./boardMcp.ts";
 import type { TaskRunner } from "./runner.ts";
 import type { Scheduler } from "./scheduler.ts";
@@ -14,7 +14,34 @@ const text = (value: unknown) => ({
   content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }],
 });
 const fail = (message: string) => ({ ...text(message), isError: true });
-const brief = (t: Task) => ({ id: t.id, title: t.title, status: t.status, type: t.type, priority: t.priority, mode: t.mode, summary: t.summary, start_at: t.start_at });
+const brief = (t: Task) => ({
+  id: t.id, title: t.title, status: t.status, type: t.type, priority: t.priority, mode: t.mode, summary: t.summary, start_at: t.start_at,
+  // Only when there is one, so a quiet board stays a short list.
+  ...(t.questions.some((q) => !q.answer) ? { open_questions: t.questions.filter((q) => !q.answer).length } : {}),
+});
+
+const clip = (s: unknown, max: number) => {
+  const t = String(s ?? "").trim();
+  return t.length > max ? `${t.slice(0, max)} …` : t;
+};
+
+/** One transcript row as a plain line: what Claude said or did. null for rows that say nothing to a reader. */
+export function activityLine(e: EventRow): string | null {
+  const p = (e.payload ?? {}) as { type?: string; text?: string; result?: string; is_error?: boolean; message?: { content?: unknown } };
+  if (p.type === "user_chat") return `Message to the task: ${clip(p.text, 300)}`;
+  if (p.type === "result") return `${p.is_error ? "Stage failed" : "Stage finished"}: ${clip(p.result, 400)}`;
+  if (p.type !== "assistant" || !Array.isArray(p.message?.content)) return null;
+  const parts: string[] = [];
+  for (const b of p.message.content as { type?: string; text?: string; name?: string; input?: Record<string, unknown> }[]) {
+    if (b.type === "text" && b.text?.trim()) parts.push(`Claude: ${clip(b.text, 400)}`);
+    else if (b.type === "tool_use") {
+      const i = b.input ?? {};
+      const what = i.file_path ?? i.command ?? i.pattern ?? i.url ?? i.description ?? "";
+      parts.push(`→ ${String(b.name).replace(/^mcp__[^_]+__/, "")}${what ? ` ${clip(what, 140)}` : ""}`);
+    }
+  }
+  return parts.length ? parts.join("\n") : null;
+}
 
 export interface ChatBoardDeps {
   repo: Repo;
@@ -24,8 +51,9 @@ export interface ChatBoardDeps {
 }
 
 /**
- * The side chat's hands: it reads the board and makes, edits, queues and schedules cards in its own
- * project. It never touches code; changing code is what a card is for. Handlers are separate from the
+ * The side chat's hands: it reads the board (cards, how each run is going, what it has done), makes,
+ * edits, queues and schedules cards, and talks to a card's own Claude session — all in its own
+ * project. It never touches code itself, and never approves, lands or discards work: those stay yours. Handlers are separate from the
  * MCP wrapper so tests call them directly. `onCard` records each card touched, for the chips.
  */
 export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDeps, projectId: string, onCard: (c: Card) => void) {
@@ -37,8 +65,19 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
 
   return {
     listTasks(args: { status?: string }) {
-      const tasks = repo.listTasks({ project_id: projectId }).filter((t) => !t.archived_at && (!args.status || t.status === args.status));
-      return text({ tasks: tasks.map(brief), note: tasks.length ? undefined : "No cards on this board yet." });
+      const all = repo.listTasks({ project_id: projectId }).filter((t) => !t.archived_at);
+      // Finished cards are counted, not listed, unless asked for: a board with months of Done would
+      // otherwise bury the handful that are running under hundreds that are not.
+      const tasks = all.filter((t) => (args.status ? t.status === args.status : t.status !== "done"));
+      const counts: Record<string, number> = {};
+      for (const t of all) counts[t.status] = (counts[t.status] ?? 0) + 1;
+      const note = !all.length
+        ? "No cards on this board yet."
+        : !tasks.length
+          ? args.status ? `No card is ${args.status} right now.` : "Every card on this board is done."
+          : !args.status && counts.done ? `${counts.done} done card(s) are not listed; ask with status "done" to see them.` : undefined;
+      // One line per card: the list is read by the model, and indentation only costs tokens.
+      return { content: [{ type: "text" as const, text: JSON.stringify({ counts, tasks: tasks.map(brief), note }) }] };
     },
 
     getTask(args: { task_id: string }) {
@@ -62,6 +101,8 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
         status: "backlog",
       });
       publish(t);
+      // The same intake a card made on the board gets: type, labels, a sized pipeline, a live-system warning.
+      if (repo.getSettings().autoTriage) void runner.triage(t.id, "classify").catch(() => {});
       onCard({ id: t.id, title: t.title, action: "created" });
       return text({ created: brief(t), note: "It is in Backlog. Offer to queue it now or schedule it for later." });
     },
@@ -84,6 +125,10 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
     queueTask(args: { task_id: string }) {
       const t = mine(args.task_id);
       if (!t) return fail(`No card ${args.task_id} in this project.`);
+      // Queueing starts a card from its first stage: on a card in review that would redo reviewed
+      // work, and on a failed one it would pay for the plan again instead of continuing.
+      if (t.status === "failed") return fail(`"${t.title}" failed; use board_retry_task to continue it from the stage that failed.`);
+      if (t.status !== "backlog") return fail(`"${t.title}" is ${t.status}; only a card in Backlog can be started from chat.`);
       try {
         const queued = runner.queueTask(t.id);
         onCard({ id: t.id, title: t.title, action: "queued" });
@@ -109,6 +154,107 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
       return text({ scheduled: brief(updated) });
     },
 
+    /** How a card's run is going: each stage, what it cost, what it is waiting for, and its latest steps. */
+    taskProgress(args: { task_id: string; lines?: number }) {
+      const t = mine(args.task_id);
+      if (!t) return fail(`No card ${args.task_id} in this project.`);
+      const runs = repo.runsForTask(t.id);
+      const latest = runs.at(-1);
+      const recent = latest ? repo.recentEvents(latest.id, 120).map(activityLine).filter((l): l is string => !!l).slice(-(args.lines ?? 20)) : [];
+      return text({
+        ...brief(t),
+        error: t.error,
+        note: t.note,
+        working_now: runner.isBusy(t.id),
+        cost_usd: Number(runs.reduce((sum, r) => sum + r.cost_usd, 0).toFixed(4)),
+        stages: t.pipeline.map((s, i) => {
+          const run = runs.findLast((r) => r.stage_index === i && r.role === "stage");
+          return {
+            stage: `${i + 1}. ${s.stage} · ${s.model} · ${s.effort}`,
+            status: run?.status ?? "not started",
+            cost_usd: run ? Number(run.cost_usd.toFixed(4)) : 0,
+            error: run?.error ?? undefined,
+            result: run?.result_md ? clip(run.result_md, 1500) : undefined,
+          };
+        }),
+        open_questions: t.questions.filter((q) => !q.answer).map((q) => ({ question_id: q.id, text: q.text, options: q.options })),
+        // Claude's own to-do list for the stage: the quickest honest answer to "how far along is it?".
+        steps: t.checklist.map((x) => `${x.status === "completed" ? "[done]" : x.status === "in_progress" ? "[now]" : "[todo]"} ${x.text}`),
+        waiting_for_approval: repo.pendingApprovals(t.id).map((a) => a.title ?? a.tool_name),
+        recent_activity: recent,
+      });
+    },
+
+    /**
+     * Says something to a card's own Claude session: a running stage gets it at its next step, a
+     * finished or failed one continues its session with it. A card that never ran has no session.
+     */
+    messageTask(args: { task_id: string; text: string }) {
+      const t = mine(args.task_id);
+      if (!t) return fail(`No card ${args.task_id} in this project.`);
+      const body = args.text.trim();
+      if (!body) return fail("The message is empty.");
+      const wasRunning = runner.isBusy(t.id);
+      try {
+        runner.chat(t.id, body);
+      } catch (err) {
+        const why = err instanceof Error ? err.message : String(err);
+        const hint = t.status === "backlog" ? " It has not run yet: edit its spec with board_update_task, or queue it." : "";
+        return fail(`Could not message "${t.title}": ${why}${hint}`);
+      }
+      onCard({ id: t.id, title: t.title, action: "messaged" });
+      return text({
+        sent: true,
+        note: wasRunning
+          ? "It is running: Claude gets the message at its next step. Use board_task_progress in a while to see what it did with it."
+          : "Its session has picked the message up and is working on it now. Use board_task_progress to follow it.",
+      });
+    },
+
+    answerQuestion(args: { task_id: string; answer: string; question_id?: string }) {
+      const t = mine(args.task_id);
+      if (!t) return fail(`No card ${args.task_id} in this project.`);
+      const open = t.questions.filter((q) => !q.answer);
+      const q = args.question_id ? open.find((x) => x.id === args.question_id) : open.length === 1 ? open[0] : undefined;
+      if (!q) {
+        return fail(open.length
+          ? `"${t.title}" has ${open.length} open questions; say which with question_id: ${open.map((x) => `${x.id} (${clip(x.text, 80)})`).join("; ")}`
+          : `"${t.title}" has no open question.`);
+      }
+      try {
+        runner.answerQuestion(t.id, q.id, args.answer);
+      } catch (err) {
+        return fail(`Could not answer: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      onCard({ id: t.id, title: t.title, action: "answered" });
+      return text({ answered: q.text, with: args.answer.trim() });
+    },
+
+    stopTask(args: { task_id: string }) {
+      const t = mine(args.task_id);
+      if (!t) return fail(`No card ${args.task_id} in this project.`);
+      try {
+        const stopped = runner.stopTask(t.id);
+        onCard({ id: t.id, title: t.title, action: "stopped" });
+        return text({ stopped: brief(stopped) });
+      } catch (err) {
+        return fail(`Could not stop "${t.title}": ${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+
+    retryTask(args: { task_id: string }) {
+      const t = mine(args.task_id);
+      if (!t) return fail(`No card ${args.task_id} in this project.`);
+      if (t.status !== "failed") return fail(`"${t.title}" is ${t.status}; only a failed card can be retried.`);
+      try {
+        const retried = runner.retryTask(t.id);
+        onCard({ id: t.id, title: t.title, action: "retried" });
+        return text({ retried: brief(retried), note: "It continues from the stage that failed, in the same session." });
+      } catch (err) {
+        return fail(`Could not retry "${t.title}": ${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+
     memory() {
       return text({ memory: repo.notes(projectId).map((n) => n.text) });
     },
@@ -121,10 +267,11 @@ export function createChatBoardServer(deps: ChatBoardDeps, projectId: string, on
     name: "board",
     version: "1.0.0",
     alwaysLoad: true,
-    instructions: "This project's Claude Kanban board. List and read cards, create cards for work to be done, edit Backlog cards, queue them, or schedule them for later.",
+    instructions:
+      "This project's Claude Kanban board. List and read cards and how their runs are going, create cards for work to be done, edit Backlog cards, queue or schedule them, and talk to a card's own Claude session (message it, answer its question, stop it, retry it).",
     tools: [
-      tool("board_list_tasks", "List the cards on this project's board, optionally only one status (backlog, queued, running, review, done, failed…).",
-        { status: z.string().optional() }, async (a) => h.listTasks(a)),
+      tool("board_list_tasks", "List the cards on this project's board with a count per status. Done cards are only counted unless you ask for status \"done\".",
+        { status: z.enum(TASK_STATUSES as [string, ...string[]]).optional() }, async (a) => h.listTasks(a)),
       tool("board_get_task", "Read one card: its spec, status, summary and pipeline.", { task_id: z.string() }, async (a) => h.getTask(a)),
       tool("board_create_task",
         "Create a card in Backlog. Give it a short title and a spec that says what done looks like, in the user's terms. Supervised unless the user asked for autonomous.",
@@ -144,6 +291,18 @@ export function createChatBoardServer(deps: ChatBoardDeps, projectId: string, on
       tool("board_schedule_task",
         'Start a Backlog card later: start_at is an ISO 8601 time with the local offset, or "reset" for when the Claude usage window resets; null cancels.',
         { task_id: z.string(), start_at: z.string().nullable() }, async (a) => h.scheduleTask(a)),
+      tool("board_task_progress",
+        "How a card's run is going: each stage's status, cost and result, what it is waiting for (a question, an approval), and its latest steps in plain lines. Use this to answer “what is it doing?” or “what did it do?”.",
+        { task_id: z.string(), lines: z.number().int().min(1).max(60).optional().describe("How many recent steps to include (default 20).") },
+        async (a) => h.taskProgress(a)),
+      tool("board_message_task",
+        "Say something to a card's own Claude session. A running card gets it at its next step (steering); a card in review or failed continues its session with it. Only when the user asked you to tell the task something.",
+        { task_id: z.string(), text: z.string().min(1).max(8000) }, async (a) => h.messageTask(a)),
+      tool("board_answer_question",
+        "Answer a question a card asked the user (see open_questions in board_task_progress). Only with an answer the user gave you.",
+        { task_id: z.string(), answer: z.string().min(1).max(4000), question_id: z.string().optional() }, async (a) => h.answerQuestion(a)),
+      tool("board_stop_task", "Stop a card that is queued or running. Only when the user asked.", { task_id: z.string() }, async (a) => h.stopTask(a)),
+      tool("board_retry_task", "Run a failed card again from the stage that failed. Only when the user asked.", { task_id: z.string() }, async (a) => h.retryTask(a)),
       tool("board_memory", "Read what the board remembers about this project: decisions and conventions from earlier tasks.", {}, async () => h.memory()),
     ],
   });

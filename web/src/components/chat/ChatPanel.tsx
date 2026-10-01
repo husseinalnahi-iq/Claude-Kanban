@@ -1,21 +1,32 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Chat, ChatMessage, Effort } from "../../../../server/src/types.ts";
 import { effortsFor, useClaudeModels } from "../../lib/claudeModels.ts";
 import { ClaudeModelPicker, EffortSelect } from "../ClaudeModelPicker.tsx";
 import { api, type ProjectWithGit } from "../../lib/api.ts";
-import { useWs, watchChat } from "../../lib/ws.ts";
+import { useWs, useWsReconnect, watchChat } from "../../lib/ws.ts";
 import { navigate } from "../../lib/router.ts";
 import { useAppData } from "../../lib/store.tsx";
 import { Markdown } from "../../lib/markdown.tsx";
 import { ago, cost } from "../../lib/format.ts";
 import { useAsk } from "../Ask.tsx";
+import { useEscape } from "../ui.tsx";
 
 const STARTERS = [
   "What does this project do, in plain words?",
-  "What's on the board right now, and what should I do next?",
+  "What is each task doing right now, and is any waiting on me?",
   "I want a new feature. Help me write the task.",
   "Where would I change the page title?",
 ];
+
+type CardAction = NonNullable<ChatMessage["meta"]["cards"]>[number]["action"];
+/** The chip's word for what the chat did with a card. */
+const ACTION_LABEL: Record<CardAction, string> = {
+  created: "created", updated: "edited", queued: "queued", scheduled: "scheduled",
+  messaged: "told", answered: "answered", stopped: "stopped", retried: "run again",
+};
+
+/** What you were typing, per project, so closing the panel (or Esc) never loses it. */
+const drafts = new Map<string, string>();
 
 /** A project's chats, live. */
 function useChats(projectId: string) {
@@ -24,6 +35,8 @@ function useChats(projectId: string) {
     setChats(null);
     void api.chats(projectId).then(setChats, () => setChats([]));
   }, [projectId]);
+  // A reply that finished while the socket was down would otherwise show as "thinking…" for ever.
+  useWsReconnect(() => void api.chats(projectId).then(setChats, () => {}));
   useWs((m) => {
     if (m.type === "chat.updated" && m.chat.project_id === projectId) {
       setChats((prev) => {
@@ -41,16 +54,26 @@ function useChats(projectId: string) {
 function CardChips({ m }: { m: ChatMessage }) {
   const [started, setStarted] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
+  // One chip per card, naming everything the reply did to it: "created · queued" was two chips, and the
+  // first offered to start a card the chat had already started.
+  const byCard = new Map<string, { id: string; title: string; actions: CardAction[] }>();
+  for (const c of m.meta.cards!) {
+    const seen = byCard.get(c.id) ?? { id: c.id, title: c.title, actions: [] };
+    if (!seen.actions.includes(c.action)) seen.actions.push(c.action);
+    seen.title = c.title;
+    byCard.set(c.id, seen);
+  }
+  const running: CardAction[] = ["queued", "scheduled", "retried", "stopped"];
   return (
     <div className="rise space-y-1.5">
-      {m.meta.cards!.map((c) => (
-        <div key={`${c.id}-${c.action}`} className="flex items-center gap-2 rounded-lg border border-amber/40 bg-amber/5 px-2.5 py-1.5">
-          <span className="font-mono text-[10px] uppercase tracking-wide text-amber/80">{c.action}</span>
+      {[...byCard.values()].map((c) => (
+        <div key={c.id} className="flex items-center gap-2 rounded-lg border border-amber/40 bg-amber/5 px-2.5 py-1.5">
+          <span className="font-mono text-[10px] uppercase tracking-wide text-amber/80">{c.actions.map((a) => ACTION_LABEL[a] ?? a).join(" · ")}</span>
           <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-100">{c.title}</span>
           <button className="cursor-pointer rounded border border-ink-600 px-1.5 py-px font-mono text-[10.5px] text-ink-300 hover:border-ink-400 hover:text-ink-100" onClick={() => navigate({ taskId: c.id })}>
             open
           </button>
-          {c.action === "created" && !started.has(c.id) ? (
+          {c.actions.includes("created") && !c.actions.some((a) => running.includes(a)) && !started.has(c.id) ? (
             <button
               className="cursor-pointer rounded border border-amber/50 px-1.5 py-px font-mono text-[10.5px] text-amber hover:bg-amber/10"
               title="Queue it now"
@@ -66,7 +89,8 @@ function CardChips({ m }: { m: ChatMessage }) {
   );
 }
 
-function MessageRow({ m }: { m: ChatMessage }) {
+/** Memoised: stored messages never change, and a streaming reply re-renders the panel many times a second. */
+const MessageRow = memo(function MessageRow({ m }: { m: ChatMessage }) {
   if (m.role === "user") {
     return (
       <div className="rise flex justify-end">
@@ -80,11 +104,12 @@ function MessageRow({ m }: { m: ChatMessage }) {
   }
   if (m.role === "error") return <div className="rise rounded-lg border border-rust/40 bg-rust/10 px-3 py-2 text-[12.5px] text-rust">{m.text}</div>;
   return <Markdown text={m.text} className="rise text-[13px]" />;
-}
+});
 
 /**
- * Talk to Claude about the project: ask how something works, plan a feature, and have it write the
- * task cards. It reads the code but never changes it. Slides in from the right; the board stays usable.
+ * Talk to Claude about the project: ask how something works, plan a feature, have it write the task
+ * cards, ask how a task is going, and pass a message to a task. It reads the code but never changes
+ * it. Slides in from the right; the board stays usable.
  */
 export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClose: () => void }) {
   const { settings } = useAppData();
@@ -95,7 +120,7 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
   const [pending, setPending] = useState<{ model: string; effort: Effort } | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState("");
-  const [text, setText] = useState("");
+  const [text, setText] = useState(() => drafts.get(project.id) ?? "");
   const [listOpen, setListOpen] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const [closing, setClosing] = useState(false);
@@ -113,18 +138,43 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
     if (chats && !chatId) setChatId(open[0]?.id ?? null);
   }, [chats, chatId]);
   useEffect(() => setChatId(null), [project.id]);
+  useEffect(() => void drafts.set(project.id, text), [project.id, text]);
 
+  const current = useRef(chatId);
+  current.current = chatId;
+  // Merged, not replaced: a message pushed while this was loading must not be dropped, and a slow
+  // answer for the chat you just left must not land in this one.
+  const loadMessages = useCallback((id: string) => {
+    void api.chatMessages(id).then((loaded) => {
+      if (current.current !== id) return;
+      setMessages((prev) => [...loaded, ...prev.filter((x) => !loaded.some((l) => l.id === x.id))]);
+    }, () => {});
+  }, []);
   useEffect(() => {
     watchChat(chatId);
     setStreaming("");
     setMessages([]);
-    if (chatId) void api.chatMessages(chatId).then(setMessages, () => {});
+    if (chatId) loadMessages(chatId);
     return () => watchChat(null);
-  }, [chatId]);
+  }, [chatId, loadMessages]);
+  useWsReconnect(() => {
+    setStreaming("");
+    if (chatId) loadMessages(chatId);
+  });
 
+  // Each delta carries the whole reply so far and is re-parsed as markdown: once per frame is plenty.
+  const latestDelta = useRef("");
+  const frame = useRef(0);
+  useEffect(() => () => cancelAnimationFrame(frame.current), []);
   useWs((m) => {
     if (m.type === "chat.message" && m.message.chat_id === chatId) setMessages((prev) => (prev.some((x) => x.id === m.message.id) ? prev : [...prev, m.message]));
-    else if (m.type === "chat.delta" && m.chatId === chatId) setStreaming(m.text);
+    else if (m.type === "chat.delta" && m.chatId === chatId) {
+      latestDelta.current = m.text;
+      cancelAnimationFrame(frame.current);
+      // The empty delta that ends a reply is applied at once, so the cursor never outlives it.
+      if (!m.text) setStreaming("");
+      else frame.current = requestAnimationFrame(() => setStreaming(latestDelta.current));
+    }
   });
 
   // Follow the conversation as it grows, unless you scrolled up to read.
@@ -138,29 +188,32 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
     setClosing(true);
     setTimeout(onClose, 180);
   }, [onClose]);
-  useEffect(() => {
-    const k = (e: KeyboardEvent) => e.key === "Escape" && !listOpen && close();
-    window.addEventListener("keydown", k);
-    return () => window.removeEventListener("keydown", k);
-  }, [close, listOpen]);
+  // Esc closes one thing at a time: the chat list first, then the panel — and only when nothing is open on top of it.
+  useEscape(() => (listOpen ? setListOpen(false) : close()));
   useEffect(() => input.current?.focus(), [chatId]);
 
   // What this chat runs on: its own row once it exists, otherwise the choice made here, else Settings.
-  const model = chat?.model ?? pending?.model ?? settings?.chatModel ?? "claude-sonnet-5";
+  const model = chat?.model ?? pending?.model ?? settings?.chatModel ?? "sonnet";
   const effort = (chat?.effort ?? pending?.effort ?? settings?.chatEffort ?? "medium") as Effort;
+  // A button that fails says why, instead of looking like it did nothing.
+  const say = (e: unknown) => setError(e instanceof Error ? e.message : String(e));
   const setModel = (id: string) => {
     const next = effortsFor(id, claude.result);
     const keep = next.efforts.includes(effort) ? effort : next.efforts[0] ?? effort;
-    if (chat) void api.patchChat(chat.id, { model: id, ...(keep === effort ? {} : { effort: keep }) });
+    if (chat) void api.patchChat(chat.id, { model: id, ...(keep === effort ? {} : { effort: keep }) }).catch(say);
     else setPending({ model: id, effort: keep });
   };
-  const setEffort = (e: Effort) => (chat ? void api.patchChat(chat.id, { effort: e }) : setPending({ model, effort: e }));
+  const setEffort = (e: Effort) => (chat ? void api.patchChat(chat.id, { effort: e }).catch(say) : setPending({ model, effort: e }));
 
   const newChat = async () => {
-    const c = await api.createChat(project.id);
-    if (pending) await api.patchChat(c.id, pending).catch(() => {});
-    setChatId(c.id);
-    setListOpen(false);
+    try {
+      const c = await api.createChat(project.id);
+      if (pending) await api.patchChat(c.id, pending).catch(() => {});
+      setChatId(c.id);
+      setListOpen(false);
+    } catch (e) {
+      say(e);
+    }
   };
   const send = async (value = text) => {
     const t = value.trim();
@@ -188,13 +241,17 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
   // The board's own dialog, not confirm(): the browser's is dismissed unseen in embedded browsers (D193).
   const remove = async (c: Chat) => {
     if (!(await dialog.confirm({ title: `Delete “${c.title}” for good?`, message: "The chat and its messages are removed. Cards it made stay.", confirmLabel: "Delete", danger: true }))) return;
-    await api.deleteChat(c.id);
-    if (c.id === chatId) setChatId(null);
+    try {
+      await api.deleteChat(c.id);
+      if (c.id === chatId) setChatId(null);
+    } catch (e) {
+      say(e);
+    }
   };
   const archive = (c: Chat, on: boolean) => {
     setLeaving((s) => new Set(s).add(c.id));
     setTimeout(() => {
-      void api.patchChat(c.id, { archived: on }).finally(() => setLeaving((s) => { const n = new Set(s); n.delete(c.id); return n; }));
+      void api.patchChat(c.id, { archived: on }).catch(say).finally(() => setLeaving((s) => { const n = new Set(s); n.delete(c.id); return n; }));
       if (on && c.id === chatId) setChatId(open.find((x) => x.id !== c.id)?.id ?? null);
     }, 170);
   };
@@ -281,7 +338,8 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
               <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-amber/15 text-[18px] text-amber">✦</div>
               <div className="text-[14px] font-medium text-ink-100">Ask about {project.name}</div>
               <p className="mt-1 text-[12px] leading-relaxed text-ink-400">
-                Claude reads the project to answer, and can turn what you want into task cards. It never changes code from here.
+                Claude reads the project to answer, turns what you want into task cards, tells you how each task is going, and can pass your message on
+                to a task. It never changes code from here.
               </p>
               <div className="mt-4 space-y-1.5 text-left">
                 {STARTERS.map((s, i) => (
@@ -328,17 +386,17 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
           <div className="flex items-center gap-1.5 border-t border-ink-800/70 px-2 py-1.5">
             {/* The same pickers the pipeline uses, and they work before the first message: an empty
                 chat has no row to patch yet, so the choice is held here and used when it is created. */}
-            <div className="w-[148px] shrink-0" title="Model for this chat">
+            <div className="w-[196px] shrink-0" title="Model for this chat">
               <ClaudeModelPicker value={model} onChange={setModel} models={settings?.models ?? []} />
             </div>
             {effortsFor(model, claude.result).none ? null : (
-              <div className="w-[104px] shrink-0">
+              <div className="w-[100px] shrink-0">
                 <EffortSelect model={model} value={effort} onChange={setEffort} />
               </div>
             )}
             <span className="ml-auto hidden truncate pr-1 text-[10.5px] text-ink-600 xl:inline">Enter to send · Shift+Enter new line</span>
             {chat?.busy ? (
-              <button className="shrink-0 cursor-pointer rounded-md border border-rust/50 px-2.5 py-1.5 text-[12px] text-rust hover:bg-rust/10" onClick={() => chat && void api.stopChat(chat.id)}>
+              <button className="shrink-0 cursor-pointer rounded-md border border-rust/50 px-2.5 py-1.5 text-[12px] text-rust hover:bg-rust/10" onClick={() => chat && void api.stopChat(chat.id).catch(say)}>
                 ■ Stop
               </button>
             ) : (

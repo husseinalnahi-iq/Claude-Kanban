@@ -1,22 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
 import type { AppDeps } from "../app.ts";
-import { realProbe } from "../setup/probe.ts";
-
-const require = createRequire(import.meta.url);
-
-/** The SDK doesn't export ./package.json, so read it off the resolved entry point. */
-function sdkVersion(): string {
-  try {
-    const pkg = join(dirname(require.resolve("@anthropic-ai/claude-agent-sdk")), "package.json");
-    return (JSON.parse(readFileSync(pkg, "utf8")) as { version: string }).version;
-  } catch {
-    return "unknown";
-  }
-}
+import { realProbe, sdkVersion } from "../setup/probe.ts";
 
 export interface CliHealth {
   loggedIn: boolean;

@@ -46,6 +46,8 @@ export interface PromptCtx {
   previousStage?: StageName | null;
   /** The task changes a live system (production data, a live business app…). D233. */
   live?: boolean;
+  /** Settings → Images is on: the run has `generate_image` (D262). */
+  imageTool?: boolean;
   /** Set when the previous stage ran on another provider: its output is labelled as such (D133). */
   previousFrom?: { provider: string; model: string } | null;
   /** Results of earlier stages (stage index → result), so review sees the plan, not just the code summary. */
@@ -71,7 +73,8 @@ export interface PromptCtx {
   /** The command the board will run to verify this work, if the project defines one. */
   verifyCommand?: string | null;
   /** The run has a browser to look at what it built. `port` is reserved for this task's dev server. */
-  browser?: { port: number | null; chrome: boolean } | null;
+  /** `helper`: a cheaper `browser-check` agent drives the browser, and this stage asks it (D273). */
+  browser?: { port: number | null; chrome: boolean; helper?: boolean } | null;
   /**
    * What the model running this stage can do. `sdk`: Claude Code with every tool and the board MCP
    * server. `cli`: another agent with its own tools, no board server. `text`: nothing but the prompt,
@@ -93,6 +96,25 @@ const TEXT_LIMITS = { diff: 60_000, patchPerFile: 12_000 };
 function browserSection(ctx: PromptCtx): string | null {
   if (!ctx.browser || (ctx.stage !== "code" && ctx.stage !== "review")) return null;
   const port = ctx.browser.port ? `port ${ctx.browser.port} (also in \`$KANBAN_PORT\`)` : "the port in `$KANBAN_PORT`";
+  // Every stage that can see says, in a line the board reads, whether it did — a review once approved
+  // a game it never opened (D275).
+  const verdictLine =
+    ctx.stage === "review"
+      ? "End your review with one line: `Browser: checked — <what you saw>` or `Browser: not needed — <why nothing visible changed>`. A visible change you did not look at is not verified."
+      : null;
+  if (ctx.browser.helper) {
+    return [
+      "\n## Look at it in a browser",
+      ctx.stage === "code"
+        ? "If this change affects something a person sees — a page, a component, a layout, a style — have it checked before you finish, the way a person would:"
+        : "If this change affects something a person sees, have it looked at before your verdict — a summary saying it looks right is not evidence:",
+      `- serve it on ${port} as a background command (the port is reserved for this task) — even a plain HTML file: the browser does not open file:// pages`,
+      "- ask the `browser-check` agent (Agent tool) to open that address and say exactly what to check: what to click, type or press, which sizes, what should happen. It drives the browser on a cheaper model, takes the screenshots and reports what works and what is broken. Act on its report; ask it again after a fix",
+      "- when you are done, stop **only the process you started**: its background command, or its PID. Never kill processes by name (`taskkill /IM`, `pkill`, `killall`, `Stop-Process -Name`) — that also kills the board running this task, and the board refuses it",
+      "Its screenshots are saved to this task on the board. Skip all of this when nothing visible changed.",
+      ...(verdictLine ? [verdictLine] : []),
+    ].join("\n");
+  }
   const lines = [
     "\n## Look at it in a browser",
     ctx.stage === "code"
@@ -102,6 +124,7 @@ function browserSection(ctx: PromptCtx): string | null {
     "- open it with the `browser_*` tools, take a screenshot (no file name — it comes straight back to you), and look at it; fix what is wrong and take one more",
     "- when you are done, stop **only the process you started**: its background command, or its PID. Never kill processes by name (`taskkill /IM`, `pkill`, `killall`, `Stop-Process -Name`) — that also kills the board running this task and everything else on the machine, and the board refuses it",
     "Screenshots are saved to this task on the board, so the person reviewing it sees what you saw. Each one costs about as much as a page of text: take the few that show the result, not one per step. Local addresses (localhost) open freely; anything else is refused or needs approval. Skip all of this when nothing visible changed.",
+    ...(verdictLine ? [verdictLine] : []),
   ];
   if (ctx.browser.chrome) {
     lines.push(
@@ -186,9 +209,11 @@ function stageInstructions(ctx: PromptCtx): string {
           ? "Implement the task below by carrying out the previous stage's plan. Keep the change focused on the spec."
           : "Implement the task below, following the previous stage's plan when there is one. Keep the change focused on the spec.",
         ...(plan ? [FOLLOW_PLAN] : []),
-        ...(plan ? [FOLLOW_PLAN] : []),
         "Treat the plan's established facts as done work: build on them rather than searching for them again, and re-check one only when the code contradicts it.",
         "Every question the spec asks and every \"show me / explain how\" request is part of the task: answer each one in your final summary, in words the person can follow, with real names and steps — not a placeholder for later.",
+        // The card shows this list as "3/7 · Writing the login form" — the one progress signal a person
+        // can read across many tasks at once (D252). Without being asked, Opus kept none.
+        ...(caps === "sdk" ? ["When the work has more than three steps, keep a to-do list with your to-do tool and mark each item as you start and finish it: the person follows your progress on the card through it."] : []),
         ...(sandbox ? [sandbox] : []),
         ctx.verifyCommand
           ? `Before you finish, run \`${ctx.verifyCommand}\` and keep working until it passes — the board runs it too and will send the task back if it fails. Never weaken or delete a check to make it pass.`
@@ -381,6 +406,13 @@ export function buildStagePrompt(ctx: PromptCtx): string {
           : "Nobody is watching this run, so every question for the person goes through `board_ask` — with the default you carry on with — not only into your report: a report is read after the fact, the card is seen now. ") +
         "Use `board_report_blocked` when you cannot do the task from where you run, or cannot go on without an answer: the board stops after this stage and shows your ask, instead of passing unfinished work on as done.",
     );
+    if (ctx.imageTool) {
+      out.push(
+        "\n## Images\nYou can make pictures: `generate_image` (a free AI image model, 10–30 seconds each) saves an illustration, icon, hero image or placeholder photo inside the project and returns its path. " +
+          "Use it when the task needs an image instead of leaving a grey box or asking for one; not for exact text, real brands' logos, or diagrams that must be precise" +
+          (ctx.mode === "supervised" ? " (each image is approved on a card first)." : "."),
+      );
+    }
   }
   return out.join("\n");
 }

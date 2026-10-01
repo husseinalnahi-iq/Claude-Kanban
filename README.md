@@ -29,6 +29,7 @@ lands safely, and an honest record of what everything cost.
 | “I have no idea what that cost or where the time went.” | Every task shows its **cost, tokens and time**; the **Dashboard** adds it all up. |
 | “A big job is too much for one prompt.” | **Improve** turns a rough idea into a clear spec and splits it into subtasks with dependencies; the board runs them in the right order. |
 | “Setting all this up is fiddly.” | The **Setup** page checks your computer and fixes what is missing, mostly in one click. |
+| “The page needs a hero image and I have none.” | A task **makes the pictures it needs** with a free image model — no account, no card — and saves them into the project. Your own Claude Code can have the same tool. |
 
 | Nothing risky happens without you | Free AI on your own computer, set up step by step |
 |---|---|
@@ -74,11 +75,20 @@ opens that page for you if not). A ZIP copy does not update itself — the one-l
 ## Open it
 
 - **Double-click the Claude Kanban icon** on your Desktop (or Start menu → *Claude Kanban*).
-- A small window starts minimised in the taskbar — that is the board's engine; leave it running. Your
-  browser opens the board at <http://127.0.0.1:4310>. Nothing is on the internet: only you can reach it.
-- To stop the board, close that small window. To start it again, double-click the icon.
+- A startup screen shows what it is doing — the first time it installs its parts, which takes a minute
+  or two — then your browser opens the board at <http://127.0.0.1:4310>. Nothing is on the internet:
+  only you can reach it.
+- The board keeps running with an icon **by the clock** (on Windows 11 it may be under the **^** arrow;
+  drag it onto the taskbar to keep it in sight). Closing the browser tab leaves it working. Click the
+  icon to open the board again; right-click it for **Show log**, **Restart** and **Quit Claude Kanban**.
+  Restart and Quit ask first when a task is working.
+- To start it when Windows starts, run this once in PowerShell:
 - To start it when Windows starts, run this once in PowerShell:
   `powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\Claude Kanban\scripts\create-shortcut.ps1" -Startup`
+- `Start Claude Kanban.cmd` in the folder still starts it the old way, in a window that shows everything
+  it prints — handy when something goes wrong. The icon opens `Claude Kanban.exe`, a small program
+  built on your computer by Windows' own C# compiler the first time the board starts (nothing is
+  downloaded for it); where it cannot be built, the icon opens the `.cmd` instead.
 
 ## Your first task (5 minutes)
 
@@ -112,6 +122,17 @@ when you want something built it writes a **task card** for it — a chip under 
 **open** or **start** it, or ask it to schedule the card for tonight. It never changes code from the
 chat; the work still goes through the card, with your approvals and review.
 
+It also follows your tasks and talks to them for you:
+
+- **"What is each task doing?"** — it looks at the board and tells you: which stage each card is on,
+  what it has done so far, what it has cost, and whether one is waiting on you with a question.
+- **"Tell the login task to use the blue from the header."** — it passes your words to that task's own
+  Claude session. A running task takes them in at its next step; one that is in review or failed picks
+  its session up again with them.
+- **"Answer it: the second option."**, **"stop it"**, **"run the failed one again"** — it does that too.
+
+Approving, landing or discarding a task's work stays yours, on the board: the chat never does those.
+
 - **Several chats** per project: **+ New** starts one, the title at the top switches between them,
   and **archive** tucks one away (restore or delete it from *Archived*).
 - It uses **Sonnet at medium effort** by default — a good balance of quality and price for questions.
@@ -125,7 +146,7 @@ it. While it does, its card shows a pulsing **live** chip: click it (or open the
 to watch the page as Claude clicks, types and scrolls, with what it is doing written underneath. After
 the run, the last picture stays; every screenshot it took is in the **Files** tab. Nothing pops up over
 your work, and the picture is streamed only while you are watching. Switch it off in Settings →
-*Browser & plugins* → *Live view*.
+*Browser, images & plugins* → *Live view*.
 
 ## Claude Code and Claude Kanban
 
@@ -136,7 +157,8 @@ your work, and the picture is streamed only while you are watching. Switch it of
 | Chat about the project | yes | **✦ Chat** — reads code, writes task cards |
 | Claude asks you mid-task | yes | yes — a question card on the task |
 | Test your app in a browser | Playwright plugin | built in, one browser per task, and you can **watch it live** |
-| Use your signed-in Chrome | Claude in Chrome | supervised tasks, every action approved (Settings → Browser & plugins) |
+| Use your signed-in Chrome | Claude in Chrome | supervised tasks, every action approved (Settings → Browser, images & plugins) |
+| Make an image | an MCP server you find and set up | built in, free, nothing to sign up for — and one line gives Claude Code the same tool |
 | Your skills, plugins, hooks, CLAUDE.md | yes | loaded into every run |
 | Many sessions at once, costs, schedules, safe merging | — | what the board is for |
 | Control other desktop apps | — | not built: a board that can click anything on your PC is a risk it does not take |
@@ -242,8 +264,11 @@ task cost.
 
 ## If something goes wrong
 
-- **The icon flashes a window and nothing happens:** open the `Claude Kanban` folder and double-click
-  `Start Claude Kanban.cmd` — the window stays open and says what is wrong.
+- **The startup screen says something went wrong:** it says what, in words. **Show details** opens the
+  full log; **Try again** starts over. The same log is under the icon by the clock → **Show log**
+  (it is `.claude-kanban\logs\claude-kanban.log` in your user folder, with the run before it beside it).
+- **Nothing happens at all when you click the icon:** open the `Claude Kanban` folder and double-click
+  `Start Claude Kanban.cmd` — its window stays open and says what is wrong.
 - **“Claude Kanban needs Node.js 24 or newer”:** install the LTS version from
   [nodejs.org](https://nodejs.org/en/download), then open the board again.
 - **The installer says a program was installed but “this window cannot see it yet”:** close PowerShell,
@@ -251,8 +276,17 @@ task cost.
 - **The browser says the page cannot be reached:** the board is not running — double-click the icon.
 - **Something is missing or red:** open the **Setup** tab; it checks everything and offers a fix.
 - **An amber bar says the board is running older code, or a screen says it hit an error:** the board
-  was updated while it kept running. Close the minimised `Claude Kanban` window in the taskbar (best
-  when no task is running), then open the board again from its icon.
+  was updated while it kept running. Open it again from its icon: the launcher restarts it when it is
+  not in the middle of anything. If it is (a task working, a chat replying, a terminal open), wait,
+  or choose **Restart** from the icon by the clock yourself (it asks first), then open it again.
+- **"Claude Kanban is already running on this computer":** two boards on one state folder would
+  interrupt each other's runs, so the second one stops and says which one holds the folder and since
+  when. Use the one that is open, or close it first. A board that was force-stopped leaves nothing
+  behind: the next start takes the folder over.
+- **A model is missing from the list, or Setup says a newer engine is out:** the board fetches
+  Claude's engine each time it starts (Settings → *Models & pipeline* → *Keep Claude's engine up to
+  date*). Close the board's window and open it again; if it still does not show, run
+  `node scripts/update-engine.mjs --force` in the Claude Kanban folder and start it again.
 - **The terminal says "basic mode":** its terminal part did not install, so commands work but
   full-screen programs (editors, pickers) do not. Open **Setup** → *The built-in terminal* →
   **Repair**; new terminals use the full one as soon as it finishes.
@@ -407,7 +441,7 @@ top. Each pipeline stage sets both.
 |---|---|
 | `low` | Fastest and cheapest |
 | `medium` | Reduces token usage |
-| `high` | Default on most models — the board's default too |
+| `high` | Default on most models — the board plans at it |
 | `xhigh` | Deeper reasoning at higher token spend |
 | `max` | Demanding tasks needing maximum reasoning |
 
@@ -423,6 +457,14 @@ not support fast mode simply runs at standard speed.
 
 There is no "slow / balanced / fast" setting in Claude; these two controls are what exists.
 
+**Where you set effort.** Every pipeline — Settings → Models & pipeline, the New task form, and a
+task's **Pipeline** tab — has an effort box on each stage that reads *high effort*, *medium effort* and
+so on, next to the model. The New task form's *Quick change* / *Full* buttons show model and effort
+for each stage before you pick one. The default pipeline is **plan on Opus 5.5 at high effort, code
+on Opus 5.5 at medium, review on Sonnet 5.5 at medium**: a plan is where thinking pays off; once the
+plan says what to do, coding at medium thinks less per step. A board that still had the old default
+(plan on Fable) moves to this one by itself; a default you changed is left alone.
+
 ## Claude models: picked, not typed
 
 **Settings → Models & pipeline → Claude models** fills itself from your Claude login: the board asks
@@ -437,6 +479,23 @@ The same check follows every Claude pick — pipeline stages, right-sizing tiers
 triage, vision and side-chat models: a bad one gets a ⚠ on its picker and a banner at the top of
 Settings, and **Setup** lists it under *Claude models in your settings*. A stage's effort box offers
 only the levels its model takes (Haiku has none). **Refresh** asks again after Claude ships a model.
+
+**New models arrive by themselves.** The list comes from Claude's engine inside the board (the Agent
+SDK and the Claude Code binary it carries), so an old engine cannot show a model that shipped after
+it. Two switches in the same section, both on by default, take care of that:
+
+- **Keep Claude's engine up to date** — each time the board starts, the launcher asks npm whether a
+  newer engine is out and installs it before the server starts. Only a newer
+  patch of the version the board was tested on is taken; one that does not start is put back and not
+  tried again. Nothing in the program folder that git tracks is changed. **Setup** shows the row
+  *Claude's engine is up to date*, and says when a restart would bring a newer one: quit Claude Kanban from its icon by the clock (or
+  close its black window) and open it again — closing the browser tab leaves it running.
+- **Move to newer models by themselves** — when your login lists a newer model of a family your
+  settings use (Opus 5 → Opus 5.5), every pick on the older one moves to it: your Claude list, the
+  default pipeline, the right-sizing tiers, the plan critic, and the triage, vision, side-chat, spec
+  and live-review models. The section then says what was moved and when. Tasks already on the board
+  keep the models they were given, picks on other providers are untouched, and short names (`opus`,
+  `sonnet`) need no moving. Switched off, the same section offers a **Move them** button instead.
 
 Ollama, LM Studio, OpenRouter and the other providers need no list: switch a picker's first box from
 `claude` to the provider and it shows what that provider has right now (below). The Claude models
@@ -531,12 +590,14 @@ pieces collapses back. When it does split, each subtask declares the files it wi
 
 **Which pipeline this deserves.** Most work does not need three stages on the strongest model:
 
-> **Claude sized this task** `code haiku-4-5/low`
-> *Straightforward find-and-replace of a year value in the footer — no complex logic, no multiple
-> files, no architectural decisions needed.*
-> now: plan fable-5-1/high → code opus-5/high → review sonnet-5/medium **[Use it] [Keep default]**
+> **Claude sized this task — the model and effort it suggests for each stage:**
+> `code · haiku-4-5 · low effort`
+> *Low effort: a find-and-replace of a year value in the footer — no logic, one file.*
+> now: plan opus-5-5 · high → code opus-5-5 · medium → review sonnet-5-5 · medium **[Use it] [Adjust] [Keep default]**
 
-Nothing is applied until you press **Use it**. It costs nothing extra — the proposal comes back in the
+It picks an effort for each stage as well as a model, and says why. **Adjust** opens the suggestion
+in a pipeline editor so you can change a model or an effort before using it. Nothing is applied until
+you press **Use it** (or **Use these** after adjusting). It costs nothing extra — the proposal comes back in the
 same cheap intake call that classifies the task. The model picks a **tier** (cheap / balanced /
 strong), never a model id, so it cannot invent one; what each tier means is three dropdowns in
 Settings.
@@ -655,15 +716,26 @@ sandboxed frame with scripts disabled — a generated page can never run in the 
 
 ## Browser checks and plugins
 
-Settings → **Browser & plugins**.
+Settings → **Browser, images & plugins**.
 
 **Browser checks** (on by default) let a run look at what it built, the way Claude Code does. Each
 session gets its own Playwright browser: headless, so no windows open over your work; isolated, so two
 tasks running at once do not fight over one browser profile; and writing its page snapshots outside
 the project, so none of them get committed. When a change affects something you can see, the code stage
 starts the app on the task's own port (`$KANBAN_PORT`), takes a screenshot and fixes what looks wrong.
-The review stage then looks for itself before approving. The screenshots land in the task's **Files**
-tab. A change with nothing visible skips all of it, so a backend task pays nothing.
+The review stage then looks for itself before approving, and ends with a line saying whether it did —
+*Browser: checked …* or *Browser: not needed …*. A review that passes a change to pages or styles without
+that line leaves a note on the card: open it yourself before you approve. The screenshots land in the
+task's **Files** tab. A change with nothing visible skips all of it, so a backend task pays nothing.
+
+**Who looks** (Settings → Browser checks). By default the stage looks itself. You can instead have it
+ask a **browser-check helper** on Sonnet (or Haiku), which opens the page, clicks and types as asked,
+takes the screenshots and reports back in a few lines. It was built to save money and measured on four
+whole runs of the same task: the Opus stage re-read half as much, but the helper checked far more (four
+times the screenshots), so the task cost about the same ($3.24 without, $3.34 with, on average) and
+took about 10% longer. What it does buy is thoroughness — in one run it found three visual bugs the
+stage alone shipped. A stage already on Sonnet or Haiku never gets a helper: two sessions doing one job
+only cost more. Only code and review stages get a browser; a plan or a plan critique never does.
 
 | In the browser | Autonomous | Supervised |
 |---|---|---|
@@ -685,6 +757,40 @@ supervised runs ask you before every call.
 
 ---
 
+## Images
+
+A task that needs an illustration, an icon, a hero image or a placeholder photo makes one itself: every
+run has a `generate_image` tool that asks a **free** image model and saves the picture inside the task's
+folder (`generated-images/<name>.jpg`, or the path the task chooses — never above the project, never
+over a file that is already there). A copy lands in the task's **Files** tab so you see it without
+opening the folder. Autonomous tasks make images freely; a supervised task shows an approval card with
+the description first, like any new file. The tool is for illustrations and photos, not for exact text,
+real brands' logos or precise diagrams — the prompt says so.
+
+Two providers, both free without a card, in Settings → **Browser, images & plugins → Images**:
+
+| | Pollinations.ai (default) | Cloudflare Workers AI |
+|---|---|---|
+| Account | none needed | a free Cloudflare account |
+| What you paste | nothing — or a free key from enter.pollinations.ai | your account id and an API token (Workers AI permission) |
+| Limits | without a key: about one image every 15 s and a small watermark; with one: neither | 10,000 free "neurons" a day, roughly 500 images at 1024×1024 |
+| Model | FLUX | FLUX.1 schnell |
+
+**Try it** makes one small picture with what is set, and shows it. **Off** removes the tool from runs.
+Keys are stored in the board's secrets file, never in settings, and never travel to the browser (D125).
+
+**In your own Claude Code**: the same tool, reading the same settings and keys, is one line away — the
+Images section shows it with a Copy button, and Setup has an **Add** button that runs it for you:
+
+```
+claude mcp add --scope user images -- node "<Claude Kanban>\node_modules\tsx\dist\cli.mjs" "<Claude Kanban>\server\src\imageMcp.ts"
+```
+
+It works with the board closed (it reads the board's files directly), and `claude mcp remove images`
+undoes it. Google's Gemini is not offered: its free tier reports a limit of zero for its image models.
+
+---
+
 ## Guardrails
 
 What stops an unattended run from doing damage, in Settings → *Runs & limits*:
@@ -699,7 +805,11 @@ What stops an unattended run from doing damage, in Settings → *Runs & limits*:
 - **The autonomous sandbox** — an autonomous run reads, writes and runs commands only inside its own
   worktree (plus its task's attachments and your skills), so the gitignored `.env` and API keys of your
   main checkout are out of its reach. Every refusal tells it to report **blocked** instead of looking for
-  a way round; after five, the board stops the stage and marks it blocked itself.
+  a way round; after five, the board stops the stage and marks it blocked itself. A command is read
+  the way its shell would read it (bash, PowerShell and cmd each quote differently), including what
+  it pipes to, runs inside `$(…)`, or hands to another shell as a string; `..` anywhere in a path and
+  every spelling of the home folder count as leaving. A line the board cannot read with confidence,
+  an open quote say, is refused rather than guessed at.
 - **Blocked is not done** — a stage that reports it cannot do the task stops the pipeline there: no
   "success", no next stage, no Approve. Review judges the result against what you asked, item by item.
 - **Questions on the card** — a stage that needs your decision but can carry on puts the question on
@@ -776,10 +886,19 @@ Each chat is one Claude Code session in the project folder, resumed on every mes
 socket watching that chat). It loads the project's `CLAUDE.md` (`settingSources: ["project"]`) but not
 your global tool servers (`strictMcpConfig`), so it stays quick and cheap. Read tools are allowed;
 `Edit`, `Write`, `Bash`, subagents and `AskUserQuestion` are not offered, and anything else is refused.
-Its own board server can list and read cards, create cards (always in Backlog, under the project's
-mode policy), edit Backlog cards, and queue or schedule them — never in another project. The system
-prompt tells it the local time and offset, so "tonight at 3" schedules correctly, and never to queue or
-schedule a card you did not ask to run. API: `/api/projects/:id/chats`, `/api/chats/:id`
+Reading stays inside the project folder and away from credential files (`.env`, key files): a page or
+file it reads could otherwise talk it into fetching your keys, and no approval card would show it.
+Its own board server can list cards (with a count per status; Done is counted, not listed), read one,
+create cards (always in Backlog, under the project's mode policy, with the same intake as a card made
+on the board), edit Backlog cards, and queue or schedule them — never in another project. It can also
+follow and talk to a card: `board_task_progress` (each stage's status, cost and result, open questions,
+pending approvals and the latest steps as plain lines), `board_message_task` (the task's own session
+gets the message — `runner.chat`, so a running stage is steered and a finished one continues),
+`board_answer_question`, `board_stop_task` and `board_retry_task`. It cannot approve, land or discard.
+Each message carries the local time and offset in front of it (not in the system prompt, where a
+changing clock would re-bill the cached conversation every minute), so "tonight at 3" schedules
+correctly; the prompt tells it never to queue or schedule a card you did not ask to run, and to pass
+on your words to a task rather than invent instructions. API: `/api/projects/:id/chats`, `/api/chats/:id`
 (`PATCH` title/model/effort/archived, `DELETE`), `/api/chats/:id/messages`, `/send`, `/stop`.
 
 ## Live browser view
@@ -805,7 +924,14 @@ every shell ends when the board stops. API: `GET/POST /api/terminals`, `DELETE /
 ## What a task costs
 
 Click the cost figure on a task for the breakdown: input and output tokens, cost and time **per
-stage**, and an approximate share of your **five-hour subscription window**.
+stage**, and an approximate share of your **five-hour subscription window**. Hover a stage's input to
+see how much was re-read from the prompt cache, written to it, or new; a stage that used helpers shows
+what they cost under its own figure.
+
+The Dashboard's **Where the money goes** splits all spend by job — stages on their own model, the
+helpers inside them, the plan critic, the side chat, spec rewrites, and the small intake jobs (sorting
+a new task, describing an attached image) — and shows what share of the runs' tokens were cached
+re-reads (cheapest) versus written by the model (dearest per token).
 
 A task that hits a ceiling shows **needs you · cost** in rose on the board, with what it spent so far.
 **Continue** on the card, or in the task, carries on from the same session with one more stage's worth
@@ -819,20 +945,46 @@ than inventing a number.
 
 **Where the tokens actually go** — measured, not estimated:
 
-| | tokens per stage |
+| What a stage carries before it starts (measured 2026-10-01, 13 plugins installed) | tokens |
 |---|---|
-| Claude Code preset | ~39,000 |
-| Your global plugins, hooks and skills | ~5,400 |
-| The board's own stage prompt | ~1,750 |
-| **Total** | **~44,500** |
+| Claude Code itself (system prompt, built-in tools) and the board's own tools and stage prompt | ~38,200 |
+| Your global plugins, hooks and skills | ~2,000 |
+| The browser and image tools | ~400 |
+| Your claude.ai connectors (Gmail, Vercel, Slack …) | ~300 — Claude Code loads a connector's tools only when it searches for one |
+| **Total** | **~40,700** |
 
-The prefix is cached: a warm stage **reads ~34,700 of those at a tenth of the price** and writes only
-~6,800. So the levers that matter are the number of stages and what is loaded into each one — not the
-prompt text.
+That start is cached and re-read at a fraction of the price, so it is not where money goes. What costs
+is **how many steps a stage takes, times how much it has read by then**: in the Neon Drift run the
+coding stage took 29 steps and re-read 2.7 million tokens, and its own writing (48,000 tokens) was half
+its cost. The levers that move it, in order of effect: accept the right-sizing proposal (fewer stages,
+cheaper models, lower effort), and plan at high effort and code at medium. Two cleverer ideas were
+measured and did not pay: leaving your connectors out of autonomous stages (under 1% of a stage's
+start, because Claude Code only loads a connector's tools when it searches for one), and a reading
+helper on Sonnet (offered to Opus on a plan that had to read this whole repository, it was never
+called). Turning off your plugins saves about 5% of a stage's start.
 
-Ways to spend less, in order of effect: accept the right-sizing proposal; turn off *Load your global
-plugins, hooks and skills into runs* (~12% of every stage — project settings and `CLAUDE.md` still
-load); cheaper models and lower effort per stage; switch unused skills off.
+---
+
+## Following a task, and keeping its story
+
+**Where each card is.** While a task works, its card shows Claude's own to-do list for the stage as
+one line, *3/7 · Writing the login form*, with a thin bar; hover for the whole list, and the task's
+own page has it step by step under **Claude's steps**. It is read off the list Claude keeps for itself
+as it works, so it costs nothing and reads the same on ten cards at once. A finished task shows none.
+
+**Comment on the code, line by line.** On a task's **Changes** tab, click any line of the diff to pin
+a comment to it. When you have said everything, **Send** hands all of them to the task's own session in
+one message, each with its file, line and the line's text, and the task deals with them and says what
+it changed; the diff updates when it is done. A task that has landed shows its diff read-only.
+
+**⤓ Record.** Transcripts are pruned after a while (Settings), so the button on a task saves its whole
+story as one Markdown file while it is still there: what was asked, every stage with its model, time
+and cost, each step Claude took in order, what it asked and was told, what you approved, and the files
+it changed. Keep it, share it, or read it back months later. API: `GET /api/tasks/:id/record`
+(`?download=1` saves it).
+
+**A finished task is dated by when it finished.** Archiving or editing it later does not move it on
+the dashboard, and *Tidy the Done column* goes by that date too.
 
 ---
 
@@ -879,6 +1031,16 @@ always there; each card in it says whether it is *planning*, *coding*, *reviewin
 the window evenly; fixed widths are there if you would
 rather have narrow cards and scroll sideways. Both are stored per machine. Anywhere the board offers a
 choice you might not know the words for, there is a **?** that explains it on hover.
+
+**Light, dark or navy** is the ◐ ☀ ☾ ◈ switch beside the size control: Auto follows the computer
+between light and dark, the other three are fixed. *Navy* is a deep blue ground with its own typefaces,
+Inter and JetBrains Mono, where the other two use IBM Plex. The same choice, with words, is in
+Settings → *Appearance*.
+
+**Drop-down lists** are the browser's own, so they work with the keyboard and a screen reader, and in
+Chrome and Edge the open list is drawn in the board's colours, with a second line under a choice where
+one helps (what each effort level means). Other browsers show the closed box the same way and open
+the system's list.
 
 ---
 
@@ -937,3 +1099,6 @@ write to it. A genuinely shared board is a roadmap item.
 - Electron wrapper, and a `claude://` deep link into Claude Desktop
 - One shared board across two machines
 - Triggers from outside the board (a chat message, a repository event) and scheduled recurring tasks
+
+What the board does less well than Claude Code, Codex, Antigravity and Cline as of September 2026,
+and which five gaps to close first, is in [docs/gap-analysis-2026-09-30.md](docs/gap-analysis-2026-09-30.md).

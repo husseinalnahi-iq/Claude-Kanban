@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Milestone, TaskCard } from "../../../server/src/types.ts";
 import { api, type ProjectWithGit } from "../lib/api.ts";
-import { useWs } from "../lib/ws.ts";
+import { useWs, useWsReconnect } from "../lib/ws.ts";
 import { navigate } from "../lib/router.ts";
 import { STATUS_META } from "../lib/format.ts";
-import { Button, inputCls, ModeChip } from "../components/ui.tsx";
+import { Button, ErrorLine, inputCls, ModeChip, useAction } from "../components/ui.tsx";
 import { NewTaskForm } from "../components/forms.tsx";
 import { useAsk } from "../components/Ask.tsx";
 import { useTaskCards } from "./Board.tsx";
@@ -19,14 +19,17 @@ export function Roadmap({ project }: { project: ProjectWithGit }) {
   const [over, setOver] = useState<string | null>(null);
   const [creatingIn, setCreatingIn] = useState<string | null>(null);
   const dialog = useAsk();
-  const load = useCallback(() => void api.milestones(project.id).then(setMilestones), [project.id]);
+  // Every change here goes through `run`, so one that the server refuses says so instead of doing nothing.
+  const { error, run } = useAction();
+  const load = useCallback(() => void api.milestones(project.id).then(setMilestones, () => {}), [project.id]);
   const removeMilestone = async (ms: Milestone) => {
     if (await dialog.confirm({ title: `Delete milestone "${ms.title}"?`, message: "Its tasks become unscheduled; nothing else changes.", confirmLabel: "Delete", danger: true })) {
-      await api.deleteMilestone(ms.id);
+      await run(() => api.deleteMilestone(ms.id));
       load();
     }
   };
   useEffect(load, [load]);
+  useWsReconnect(load);
   useWs((m) => m.type === "milestone.updated" && m.milestone.project_id === project.id && load());
 
   const top = cards.filter((c) => !c.parent_id);
@@ -35,14 +38,16 @@ export function Roadmap({ project }: { project: ProjectWithGit }) {
   const drop = async (colId: string, e: React.DragEvent) => {
     setOver(null);
     const id = e.dataTransfer.getData("text/task-id");
-    if (id) await api.patchTask(id, { milestone_id: colId === UNSCHEDULED ? null : colId });
+    if (id) await run(() => api.patchTask(id, { milestone_id: colId === UNSCHEDULED ? null : colId }));
   };
   const swap = async (i: number, d: -1 | 1) => {
     const a = milestones[i];
     const b = milestones[i + d];
     if (!a || !b) return;
-    await api.patchMilestone(a.id, { position: b.position });
-    await api.patchMilestone(b.id, { position: a.position });
+    await run(async () => {
+      await api.patchMilestone(a.id, { position: b.position });
+      await api.patchMilestone(b.id, { position: a.position });
+    });
     load();
   };
 
@@ -56,9 +61,11 @@ export function Roadmap({ project }: { project: ProjectWithGit }) {
           onSubmit={async (e) => {
             e.preventDefault();
             if (!title.trim()) return;
-            await api.createMilestone({ project_id: project.id, title, due_date: due || null });
-            setTitle("");
-            setDue("");
+            await run(async () => {
+              await api.createMilestone({ project_id: project.id, title, due_date: due || null });
+              setTitle("");
+              setDue("");
+            });
             load();
           }}
         >
@@ -67,6 +74,7 @@ export function Roadmap({ project }: { project: ProjectWithGit }) {
           <Button type="submit" variant="primary">+ Milestone</Button>
         </form>
       </header>
+      {error ? <div className="px-6 pt-3"><ErrorLine error={error} /></div> : null}
       <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto px-6 py-4">
         {columns.map(({ id, ms }, i) => {
           const list = top.filter((c) => (c.milestone_id ?? UNSCHEDULED) === id);
@@ -84,17 +92,18 @@ export function Roadmap({ project }: { project: ProjectWithGit }) {
                   {ms ? (
                     <input
                       className="min-w-0 flex-1 bg-transparent text-[13px] font-semibold text-ink-100 focus:outline-none"
+                      aria-label="Milestone title"
                       defaultValue={ms.title}
-                      onBlur={(e) => e.target.value.trim() && e.target.value !== ms.title && void api.patchMilestone(ms.id, { title: e.target.value }).then(load)}
+                      onBlur={(e) => e.target.value.trim() && e.target.value !== ms.title && void run(() => api.patchMilestone(ms.id, { title: e.target.value })).then(load)}
                     />
                   ) : (
                     <span className="flex-1 text-[13px] font-semibold text-ink-400">Unscheduled</span>
                   )}
                   {ms ? (
                     <div className="flex text-ink-500">
-                      <button className="px-0.5 hover:text-ink-100 disabled:opacity-30 cursor-pointer" disabled={i === 0} onClick={() => swap(i, -1)}>←</button>
-                      <button className="px-0.5 hover:text-ink-100 disabled:opacity-30 cursor-pointer" disabled={i === milestones.length - 1} onClick={() => swap(i, 1)}>→</button>
-                      <button className="px-0.5 hover:text-rust cursor-pointer" onClick={() => void removeMilestone(ms)}>×</button>
+                      <button className="px-0.5 hover:text-ink-100 disabled:opacity-30 cursor-pointer" disabled={i === 0} onClick={() => swap(i, -1)} aria-label="Move this milestone left">←</button>
+                      <button className="px-0.5 hover:text-ink-100 disabled:opacity-30 cursor-pointer" disabled={i === milestones.length - 1} onClick={() => swap(i, 1)} aria-label="Move this milestone right">→</button>
+                      <button className="px-0.5 hover:text-rust cursor-pointer" onClick={() => void removeMilestone(ms)} aria-label="Delete this milestone">×</button>
                     </div>
                   ) : null}
                 </div>
@@ -113,7 +122,10 @@ export function Roadmap({ project }: { project: ProjectWithGit }) {
                     draggable
                     onDragStart={(e) => e.dataTransfer.setData("text/task-id", c.id)}
                     onClick={() => navigate({ view: "roadmap", taskId: c.id })}
-                    className="rise cursor-pointer rounded-lg border border-ink-700 bg-ink-850 px-3 py-2 hover:border-ink-500"
+                    role="link"
+                    tabIndex={0}
+                    onKeyDown={(e) => e.key === "Enter" && navigate({ view: "roadmap", taskId: c.id })}
+                    className="rise cursor-pointer rounded-lg border border-ink-700 bg-ink-850 px-3 py-2 hover:border-ink-500 focus-visible:border-amber focus-visible:outline-none"
                   >
                     <div className="flex items-start gap-2">
                       <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${STATUS_META[c.status].dot}`} />

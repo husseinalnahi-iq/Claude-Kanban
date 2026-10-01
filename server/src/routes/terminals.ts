@@ -4,13 +4,17 @@ import { z } from "zod";
 import type { AppDeps } from "../app.ts";
 import { NotFoundError } from "../engine/runner.ts";
 import type { TerminalManager } from "../terminal.ts";
+import { reportBusy } from "./busy.ts";
 
 /**
  * Your own terminal inside the board. A shell only ever opens in a registered project's folder or in
  * one of its tasks' worktrees, and the socket carrying it is behind the same local-only guard as the
  * rest of the API (a website in another tab cannot reach it).
  */
-export async function terminalRoutes(app: FastifyInstance, { repo, terminals }: AppDeps & { terminals: TerminalManager }) {
+export async function terminalRoutes(app: FastifyInstance, { repo, runner, terminals }: AppDeps & { terminals: TerminalManager }) {
+  // A shell you left open ends with the server, and whatever was running in it with it.
+  reportBusy(runner, "terminal", () => terminals.list().filter((t) => t.alive).map((t) => ({ what: "terminal", project_id: t.project_id })));
+
   app.get("/api/terminals", async () => terminals.list());
 
   app.post("/api/terminals", async (req) => {

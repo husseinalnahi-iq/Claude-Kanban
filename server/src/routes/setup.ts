@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { SetupService } from "../setup/service.ts";
 import { localModelsStatus } from "../setup/local.ts";
+import { reportBusy } from "./busy.ts";
 
 const fixSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("run"), input: z.record(z.string(), z.string()).default({}) }),
@@ -9,6 +10,9 @@ const fixSchema = z.discriminatedUnion("kind", [
 ]);
 
 export async function setupRoutes(app: FastifyInstance, setup: SetupService) {
+  // An install or a model download the Setup page started is cut off if the server stops.
+  reportBusy(setup.runner, "setup", () => setup.fixing().map(() => ({ what: "setup" })));
+
   app.get("/setup", async (req) => {
     const checks = await setup.all((req.query as { fresh?: string }).fresh === "1");
     const failing = (level: string) => checks.filter((c) => !c.ok && c.level === level).length;

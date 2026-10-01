@@ -125,6 +125,7 @@ export function LocalModelsGuide({ providers, presets }: { providers: Provider[]
   const [s, setS] = useState<LocalModelsStatus | null>(null);
   const [ctxDone, setCtxDone] = useState(saved.ctxDone ?? false);
   const [adding, setAdding] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
   const [test, setTest] = useState<ProviderTestResult | null>(null);
   const [testing, setTesting] = useState(false);
 
@@ -159,10 +160,14 @@ export function LocalModelsGuide({ providers, presets }: { providers: Provider[]
     const preset = presets.find((p) => p.id === providerId);
     if (!preset) return;
     setAdding(true);
+    setAddError(null);
     try {
       const { blurb: _b, help: _h, seedSecret: _s, ...rest } = preset;
       const next = onBoard ? providers.map((p) => (p.id === onBoard.id ? { ...p, enabled: true } : p)) : [...providers, { ...rest, enabled: true }];
       await api.patchSettings({ providers: next });
+    } catch (err) {
+      // A button that spins and then does nothing reads as "added".
+      setAddError(err instanceof Error ? err.message : String(err));
     } finally {
       setAdding(false);
     }
@@ -297,6 +302,7 @@ export function LocalModelsGuide({ providers, presets }: { providers: Provider[]
           )}
           <Step n={5} title={`Add ${app === "lmstudio" ? "LM Studio" : "Ollama"} to the board`} state={states[4]} current={current === 4} detail={a.added ? "Added: it shows in every pipeline's provider box." : "One click."}>
             {!a.added ? <Button size="sm" variant="primary" busy={adding} onClick={() => void addToBoard()}>Add {app === "lmstudio" ? "LM Studio" : "Ollama"}</Button> : null}
+            {addError ? <p className="text-rust">It was not added: {addError}</p> : null}
             <p className="text-ink-500">No key is needed{app === "lmstudio" ? " unless you switched on “Require authentication” in LM Studio" : ""}.</p>
           </Step>
           <Step n={6} title="Try it, then use it in a task" state={states[5]} current={current === 5} detail={test ? (test.ok ? `Works — answered in ${(test.latencyMs / 1000).toFixed(1)} s.` : `Did not work: ${test.error}`) : "Send it one tiny message."}>

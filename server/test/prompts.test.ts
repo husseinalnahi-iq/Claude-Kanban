@@ -98,7 +98,7 @@ test("autonomous gate: bypasses found in review are refused", () => {
 });
 
 test("autonomous reads: the main checkout's secrets are out of reach, attachments and skills are not (D187)", () => {
-  const repo = "C:\\Users\\me\\CloudSync\\Client Work Folder\\Acme-Ledger";
+  const repo = "C:\\Users\\me\\OneDrive\\Client Work Folder\\Acme-Ledger";
   const cwd = `${repo}\\.kanban\\wt\\t_1`;
   const roots = ["C:\\Users\\me\\.claude-kanban\\attachments\\t_1", "C:\\Users\\me\\.claude\\skills"];
   const read = (tool: string, input: Record<string, unknown>) => readViolation(tool, input, cwd, roots);
@@ -106,7 +106,7 @@ test("autonomous reads: the main checkout's secrets are out of reach, attachment
   assert.match(read("Read", { file_path: `${repo}\\.codex-secrets\\bizapp-api.json` }) ?? "", /refused/);
   assert.match(read("Read", { file_path: "C:\\Users\\me\\.claude-kanban\\secrets.json" }) ?? "", /refused/, "the board's own provider keys");
   assert.match(read("Grep", { pattern: "api_key", path: repo }) ?? "", /refused/);
-  assert.match(read("Glob", { pattern: "/c/Users/me/CloudSync/**/*.json" }) ?? "", /refused/, "an absolute glob is a path");
+  assert.match(read("Glob", { pattern: "/c/Users/me/OneDrive/**/*.json" }) ?? "", /refused/, "an absolute glob is a path");
   assert.equal(read("Glob", { pattern: "**/*.ts" }), null, "a relative glob searches the worktree");
   assert.equal(read("Read", { file_path: "C:\\Users\\me\\.claude-kanban\\attachments\\t_1\\shot.png" }), null, "this task's attachments");
   assert.equal(read("Read", { file_path: "C:\\Users\\me\\.claude\\skills\\bizapp\\SKILL.md" }), null, "skills");
@@ -115,7 +115,7 @@ test("autonomous reads: the main checkout's secrets are out of reach, attachment
 });
 
 test("absolute paths are read the way a shell would, whatever quotes sit elsewhere in the command (D188)", () => {
-  // The command that exposed it: a heredoc whose body the old tokenizer mis-paired, cutting the path at "Client".
+  // The command that exposed it: a heredoc whose body the old tokenizer mis-paired, cutting the path at "Codes".
   const cmd = `cd "/c/Users/me/Client Work Folder/proj/.kanban/wt/t_1" && python - <<'EOF'\nimport json\nc=json.load(open(r"C:\\Users\\me\\Client Work Folder\\proj\\.codex-secrets\\bizapp-api.json"))\nprint("it's here")\nEOF`;
   assert.deepEqual(absolutePaths(cmd), ["/c/Users/me/Client Work Folder/proj/.kanban/wt/t_1", "C:\\Users\\me\\Client Work Folder\\proj\\.codex-secrets\\bizapp-api.json"]);
   assert.deepEqual(absolutePaths("ls /c/tmp/x && type C:\\a\\b.txt"), ["/c/tmp/x", "C:\\a\\b.txt"]);

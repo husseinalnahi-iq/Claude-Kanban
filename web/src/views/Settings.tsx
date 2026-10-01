@@ -1,21 +1,22 @@
-import { useEffect, useState } from "react";
-import { ANTHROPIC_PROVIDER_ID, EFFORTS, type ModelEntry, type Note, type Provider, type Settings as SettingsShape, type Stage, type TierRef } from "../../../server/src/types.ts";
+import { useEffect, useRef, useState } from "react";
+import { ANTHROPIC_PROVIDER_ID, EFFORTS, type HelperModel, type ImageProvider, type ModelEntry, type Note, type Provider, type Settings as SettingsShape, type Stage, type TierRef } from "../../../server/src/types.ts";
 import { api, type ProjectWithGit, type WorktreeRow } from "../lib/api.ts";
 import { ago } from "../lib/format.ts";
 import { useAppData } from "../lib/store.tsx";
 import { navigate } from "../lib/router.ts";
-import { Button, ErrorLine, Field, Help, ModeHelp, Switch, inputCls, useAction } from "../components/ui.tsx";
+import { Button, ErrorLine, Field, Help, ModeHelp, Select, Switch, inputCls, useAction } from "../components/ui.tsx";
 import { PipelineEditor } from "../components/PipelineEditor.tsx";
 import { useAsk } from "../components/Ask.tsx";
 import { ProviderPicker } from "../components/ProviderPicker.tsx";
 import { ClaudeModelPicker, EffortSelect } from "../components/ClaudeModelPicker.tsx";
 import { ClaudeModelList } from "./settings/ClaudeModelList.tsx";
 import { useClaudeModels } from "../lib/claudeModels.ts";
-import { badClaudePicks } from "../../../server/src/engine/claudeModels.ts";
+import { badClaudePicks, claudeUpgrades } from "../../../server/src/engine/claudeModels.ts";
 import { ProviderSettings } from "./settings/ProviderSettings.tsx";
 import { GitSettings } from "./settings/GitSettings.tsx";
 import { ClaudeMdSettings } from "./settings/ClaudeMdSettings.tsx";
 import { SessionToolsPanel } from "./settings/ToolsSettings.tsx";
+import { ImageSettings } from "./settings/ImageSettings.tsx";
 import { COLUMN_SIZES, setViewPrefs, THEMES, useViewPrefs, ZOOMS } from "../lib/view.ts";
 import { disableNotifications, enableNotifications, notifyState } from "../lib/notify.ts";
 
@@ -36,11 +37,13 @@ function WorkspaceSettings({ project }: { project: ProjectWithGit }) {
   const [setup, setSetup] = useState(project.env.setupCommand ?? "");
   const [verify, setVerify] = useState(project.env.verifyCommand ?? "");
   const { busy, error, run } = useAction();
+  // Keyed on what is saved, not on the project object: every reload of the project list makes a new
+  // object, so saving the section above (or a task finishing in another project) wiped what was typed here.
   useEffect(() => {
     setInclude(project.env.worktreeInclude.join("\n"));
     setSetup(project.env.setupCommand ?? "");
     setVerify(project.env.verifyCommand ?? "");
-  }, [project]);
+  }, [project.id, JSON.stringify(project.env)]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <Section title="Task workspace" hint="A worktree is a fresh checkout: gitignored files are missing and nothing is installed.">
       <div className="space-y-3">
@@ -173,10 +176,11 @@ function ProjectSettings({ project }: { project: ProjectWithGit }) {
       navigate({ projectId: null, view: "board", taskId: null });
     });
   };
+  // As in the workspace section: only a real change to the saved values refills the form.
   useEffect(() => {
     setName(project.name);
     setPolicy(project.policy);
-  }, [project]);
+  }, [project.id, project.name, JSON.stringify(project.policy)]); // eslint-disable-line react-hooks/exhaustive-deps
   const opt = (key: "worktrees" | "autonomous") => (
     <div className="flex items-center justify-between rounded-md border border-ink-700 px-3 py-2">
       <span className="flex items-center gap-1.5 text-[12.5px] capitalize text-ink-200">
@@ -332,7 +336,7 @@ const TABS: { id: Tab; label: string; needsProject?: boolean }[] = [
   { id: "models", label: "Models & pipeline" },
   { id: "providers", label: "Providers" },
   { id: "runs", label: "Runs & limits" },
-  { id: "tools", label: "Browser & plugins" },
+  { id: "tools", label: "Browser, images & plugins" },
   { id: "git", label: "Git & merging", needsProject: true },
   { id: "project", label: "Project", needsProject: true },
   { id: "claudemd", label: "CLAUDE.md", needsProject: true },
@@ -341,6 +345,17 @@ const TABS: { id: Tab; label: string; needsProject?: boolean }[] = [
 ];
 /** Tabs whose contents are saved by the global Save button. */
 const GLOBAL_TABS: Tab[] = ["models", "providers", "runs", "tools"];
+
+/** Which model a helper runs on: a cheaper Claude, or the stage's own model (no helper — the stage does it itself). */
+function HelperSelect({ value, onChange, disabled }: { value: HelperModel; onChange: (v: HelperModel) => void; disabled?: boolean }) {
+  return (
+    <Select wide value={value} disabled={disabled} onChange={(e) => onChange(e.target.value as HelperModel)}>
+      <option value="stage">The stage itself (recommended)</option>
+      <option value="sonnet">A Sonnet helper — checks more thoroughly, about the same cost, a little slower</option>
+      <option value="haiku">A Haiku helper — cheaper to run, less careful</option>
+    </Select>
+  );
+}
 
 export function Settings({ project }: { project: ProjectWithGit | null }) {
   // #/settings?tab=providers opens on that tab (the model picker's "+ Add a provider" link).
@@ -358,15 +373,17 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [maxTurns, setMaxTurns] = useState(60);
   const [autoContinue, setAutoContinue] = useState(2);
   const [planApproval, setPlanApproval] = useState(false);
-  const [liveReviewModel, setLiveReviewModel] = useState("claude-opus-5");
+  const [liveReviewModel, setLiveReviewModel] = useState("claude-opus-5-5");
+  const [followLatest, setFollowLatest] = useState(true);
+  const [autoEngine, setAutoEngine] = useState(true);
   const [maxCost, setMaxCost] = useState(5);
   const [subDepth, setSubDepth] = useState(2);
   const [subMax, setSubMax] = useState(5);
   const [cacheable, setCacheable] = useState(true);
   const [triageModel, setTriageModel] = useState("");
-  const [chatModel, setChatModel] = useState("claude-sonnet-5");
+  const [chatModel, setChatModel] = useState("claude-sonnet-5-5");
   const [chatEffort, setChatEffort] = useState<SettingsShape["chatEffort"]>("medium");
-  const [specModel, setSpecModel] = useState("claude-opus-5");
+  const [specModel, setSpecModel] = useState("claude-opus-5-5");
   const [specEffort, setSpecEffort] = useState<SettingsShape["specEffort"]>("high");
   const [vision, setVision] = useState<TierRef>({ provider: ANTHROPIC_PROVIDER_ID, model: "" });
   const [autoSizing, setAutoSizing] = useState(true);
@@ -375,7 +392,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   });
   const [providers, setProviders] = useState<Provider[]>([]);
   const [delegateTimeout, setDelegateTimeout] = useState(30);
-  const [debate, setDebate] = useState<SettingsShape["debate"]>({ enabled: false, critic: { provider: "anthropic", model: "claude-sonnet-5", effort: "medium" } });
+  const [debate, setDebate] = useState<SettingsShape["debate"]>({ enabled: false, critic: { provider: "anthropic", model: "claude-sonnet-5-5", effort: "medium" } });
   const [maxTaskCost, setMaxTaskCost] = useState(15);
   const [maxRepeats, setMaxRepeats] = useState(8);
   const [retention, setRetention] = useState(30);
@@ -386,56 +403,74 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [keepAwake, setKeepAwake] = useState(true);
   const [questionWait, setQuestionWait] = useState(0);
   const [browserChecks, setBrowserChecks] = useState(true);
+  const [browserCheckModel, setBrowserCheckModel] = useState<HelperModel>("stage");
   const [chrome, setChrome] = useState(false);
   const [readOnlyNoCard, setReadOnlyNoCard] = useState(true);
   const [liveView, setLiveView] = useState(true);
+  const [imageProvider, setImageProvider] = useState<ImageProvider>("pollinations");
+  const [cloudflareAccountId, setCloudflareAccountId] = useState("");
   const [checklist, setChecklist] = useState("");
   const [notif, setNotif] = useState(notifyState());
   const claude = useClaudeModels();
   const { busy, error, run } = useAction();
   const [saved, setSaved] = useState(false);
 
+  // What the form was last filled from. A push then moves only the fields it changed: every save
+  // anywhere sends the whole settings again ("Save key" and "Add" on this very page, the board's
+  // one-at-a-time switch, another tab), and refilling everything wiped whatever was typed and not yet saved.
+  const filledFrom = useRef<SettingsShape | null>(null);
   useEffect(() => {
     if (!settings) return;
-    setModels(settings.models);
-    setPipeline(settings.defaultPipeline);
-    setGlobalCap(settings.globalCap);
-    setSerial(settings.serial);
-    setForced(settings.maxForcedParallel);
-    setDefMax(settings.defaultMaxConcurrent);
-    setMaxTurns(settings.maxTurnsPerStage);
-    setAutoContinue(settings.autoContinueTurns);
-    setPlanApproval(settings.planApproval);
-    setLiveReviewModel(settings.liveReviewModel);
-    setMaxCost(settings.maxCostPerStageUsd);
-    setSubDepth(settings.maxSubagentDepth);
-    setSubMax(settings.maxConcurrentSubagents);
-    setCacheable(settings.cacheableSystemPrompt);
-    setTriageModel(settings.triageModel);
-    setChatModel(settings.chatModel);
-    setChatEffort(settings.chatEffort);
-    setSpecModel(settings.specModel);
-    setSpecEffort(settings.specEffort);
-    setVision({ provider: settings.visionProvider || ANTHROPIC_PROVIDER_ID, model: settings.visionModel });
-    setAutoSizing(settings.autoSizing);
-    setTiers(settings.tiers);
-    setProviders(settings.providers);
-    setDelegateTimeout(settings.delegateTimeoutMin);
-    setDebate(settings.debate);
-    setMaxTaskCost(settings.maxCostPerTaskUsd);
-    setMaxRepeats(settings.maxRepeatedToolCalls);
-    setRetention(settings.eventRetentionDays);
-    setBlocked(settings.blockedCommands.join(String.fromCharCode(10)));
-    setLoadPlugins(settings.loadUserPlugins);
-    setAutoResume(settings.autoResume);
-    setClaudeFallback(settings.claudeFallback);
-    setKeepAwake(settings.keepAwake);
-    setQuestionWait(settings.questionWaitMin);
-    setBrowserChecks(settings.browserChecks);
-    setChrome(settings.chromeInSupervised);
-    setReadOnlyNoCard(settings.autoAllowReadOnly);
-    setLiveView(settings.liveView);
-    setChecklist(settings.onboardingChecklist);
+    const before = filledFrom.current;
+    filledFrom.current = settings;
+    const take = <T,>(of: (s: SettingsShape) => T, set: (v: T) => void) => {
+      const now = of(settings);
+      if (!before || JSON.stringify(of(before)) !== JSON.stringify(now)) set(now);
+    };
+    take((s) => s.models, setModels);
+    take((s) => s.defaultPipeline, setPipeline);
+    take((s) => s.globalCap, setGlobalCap);
+    take((s) => s.serial, setSerial);
+    take((s) => s.maxForcedParallel, setForced);
+    take((s) => s.defaultMaxConcurrent, setDefMax);
+    take((s) => s.maxTurnsPerStage, setMaxTurns);
+    take((s) => s.autoContinueTurns, setAutoContinue);
+    take((s) => s.planApproval, setPlanApproval);
+    take((s) => s.liveReviewModel, setLiveReviewModel);
+    take((s) => s.followLatestModels ?? true, setFollowLatest);
+    take((s) => s.autoUpdateEngine ?? true, setAutoEngine);
+    take((s) => s.maxCostPerStageUsd, setMaxCost);
+    take((s) => s.maxSubagentDepth, setSubDepth);
+    take((s) => s.maxConcurrentSubagents, setSubMax);
+    take((s) => s.cacheableSystemPrompt, setCacheable);
+    take((s) => s.triageModel, setTriageModel);
+    take((s) => s.chatModel, setChatModel);
+    take((s) => s.chatEffort, setChatEffort);
+    take((s) => s.specModel, setSpecModel);
+    take((s) => s.specEffort, setSpecEffort);
+    take((s) => ({ provider: s.visionProvider || ANTHROPIC_PROVIDER_ID, model: s.visionModel }), setVision);
+    take((s) => s.autoSizing, setAutoSizing);
+    take((s) => s.tiers, setTiers);
+    take((s) => s.providers, setProviders);
+    take((s) => s.delegateTimeoutMin, setDelegateTimeout);
+    take((s) => s.debate, setDebate);
+    take((s) => s.maxCostPerTaskUsd, setMaxTaskCost);
+    take((s) => s.maxRepeatedToolCalls, setMaxRepeats);
+    take((s) => s.eventRetentionDays, setRetention);
+    take((s) => s.blockedCommands.join(String.fromCharCode(10)), setBlocked);
+    take((s) => s.loadUserPlugins, setLoadPlugins);
+    take((s) => s.autoResume, setAutoResume);
+    take((s) => s.claudeFallback, setClaudeFallback);
+    take((s) => s.keepAwake, setKeepAwake);
+    take((s) => s.questionWaitMin, setQuestionWait);
+    take((s) => s.browserChecks, setBrowserChecks);
+    take((s) => s.browserCheckModel ?? "stage", setBrowserCheckModel);
+    take((s) => s.chromeInSupervised, setChrome);
+    take((s) => s.autoAllowReadOnly, setReadOnlyNoCard);
+    take((s) => s.liveView, setLiveView);
+    take((s) => s.imageProvider, setImageProvider);
+    take((s) => s.cloudflareAccountId, setCloudflareAccountId);
+    take((s) => s.onboardingChecklist, setChecklist);
   }, [settings]);
 
   if (!settings) return <div className="p-6 text-ink-400">Loading…</div>;
@@ -444,7 +479,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
       setSettings(
         await api.patchSettings({
           models, defaultPipeline: pipeline, globalCap, serial, maxForcedParallel: forced, defaultMaxConcurrent: defMax,
-          maxTurnsPerStage: maxTurns, maxCostPerStageUsd: maxCost, autoContinueTurns: autoContinue, planApproval, liveReviewModel,
+          maxTurnsPerStage: maxTurns, maxCostPerStageUsd: maxCost, autoContinueTurns: autoContinue, planApproval, liveReviewModel, followLatestModels: followLatest, autoUpdateEngine: autoEngine,
           maxSubagentDepth: subDepth, maxConcurrentSubagents: subMax, cacheableSystemPrompt: cacheable,
           triageModel, chatModel, chatEffort, specModel, specEffort, visionModel: vision.model, visionProvider: vision.provider, autoSizing, tiers,
           providers: providers.map((p) => ({ ...p, models: p.models.filter((m) => m.id.trim()).map((m) => ({ ...m, label: m.label.trim() || m.id })) })),
@@ -458,9 +493,12 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           keepAwake,
           questionWaitMin: questionWait,
           browserChecks,
+          browserCheckModel,
           chromeInSupervised: chrome,
           autoAllowReadOnly: readOnlyNoCard,
           liveView,
+          imageProvider,
+          cloudflareAccountId,
           onboardingChecklist: checklist,
         }),
       );
@@ -536,6 +574,67 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           hint="The Claude models the pickers offer, checked against your Claude login — a misspelt id shows here in red instead of failing a run. Add a new one from the list the day it ships."
         >
           <ClaudeModelList models={models} onChange={setModels} providers={providers} onOpenProviders={() => setTab("providers")} />
+          {(() => {
+            // What is still on an older model of a family your login has a newer one of (Opus 5 → Opus 5.5).
+            const { moves, patch } = claudeUpgrades(
+              { models, defaultPipeline: pipeline, tiers, debate, triageModel, chatModel, specModel, liveReviewModel, visionModel: vision.model, visionProvider: vision.provider },
+              claude.result,
+            );
+            const newer = [...new Set(moves.map((m) => m.label))].join(", ");
+            const last = settings.lastModelMove;
+            const moveNow = () => {
+              if (patch.models) setModels(patch.models);
+              if (patch.defaultPipeline) setPipeline(patch.defaultPipeline);
+              if (patch.tiers) setTiers(patch.tiers);
+              if (patch.debate) setDebate(patch.debate);
+              if (patch.triageModel) setTriageModel(patch.triageModel);
+              if (patch.chatModel) setChatModel(patch.chatModel);
+              if (patch.specModel) setSpecModel(patch.specModel);
+              if (patch.liveReviewModel) setLiveReviewModel(patch.liveReviewModel);
+              if (patch.visionModel) setVision({ ...vision, model: patch.visionModel });
+            };
+            return (
+              <div className="mt-3 space-y-2 border-t border-ink-800 pt-3">
+                <label className="flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
+                  <input type="checkbox" className="mt-1 accent-amber" checked={followLatest} onChange={(e) => setFollowLatest(e.target.checked)} />
+                  <span>
+                    Move to newer models by themselves
+                    <span className="block text-[11.5px] text-ink-400">
+                      When Claude ships a newer model of one you use (Opus 5 → Opus 5.5), every pick on the older one moves to it, and this page says so. Tasks
+                      already on the board keep their models. Turn off to stay on an older model.
+                    </span>
+                  </span>
+                </label>
+                <label className="flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
+                  <input type="checkbox" className="mt-1 accent-amber" checked={autoEngine} onChange={(e) => setAutoEngine(e.target.checked)} />
+                  <span>
+                    Keep Claude's engine up to date
+                    <span className="block text-[11.5px] text-ink-400">
+                      The list above comes from the engine inside the board (Claude Code). Each time the board starts it gets the newest one, so a model
+                      Claude ships appears here without waiting for a board update. A version that does not start is put back.
+                    </span>
+                  </span>
+                </label>
+                {moves.length ? (
+                  <div className="fade-in flex flex-wrap items-center gap-2 rounded-md border border-amber/40 bg-amber/5 px-2.5 py-1.5 text-[12px] text-amber">
+                    <span>
+                      Newer on your login: {newer} — {moves.length} {moves.length === 1 ? "pick is" : "picks are"} still on the older model.
+                    </span>
+                    <Button size="sm" variant="ghost" onClick={moveNow} title={moves.map((m) => `${m.where}: ${m.from} → ${m.to}`).join("\n")}>
+                      Move them
+                    </Button>
+                    <span className="text-ink-400">then Save settings</span>
+                  </div>
+                ) : null}
+                {last?.moves.length ? (
+                  <p className="text-[11.5px] text-ink-400" title={last.moves.map((m) => `${m.where}: ${m.from} → ${m.to}`).join("\n")}>
+                    <span className="text-moss">✓</span> Moved {ago(last.at)}: {[...new Set(last.moves.map((m) => `${m.from} → ${m.label}`))].join(", ")} ({last.moves.length}{" "}
+                    {last.moves.length === 1 ? "pick" : "picks"}).
+                  </p>
+                ) : null}
+              </div>
+            );
+          })()}
         </Section>
 
         <Section title="Default pipeline" hint="New tasks start with this (a project can override it).">
@@ -668,7 +767,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
               ["strong", "Strong", "Only where getting it right is genuinely hard."],
             ] as const).map(([key, label, hint]) => (
               <Field key={key} label={label} hint={hint}>
-                <ProviderPicker compact value={tiers[key]} models={models} providers={providers} onChange={(v) => setTiers({ ...tiers, [key]: v })} />
+                <ProviderPicker stacked value={tiers[key]} models={models} providers={providers} onChange={(v) => setTiers({ ...tiers, [key]: v })} />
               </Field>
             ))}
           </div>
@@ -744,8 +843,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           <div className="mt-3 text-[12.5px] text-ink-200">
             When Claude's usage runs out mid-task
             <div className="mt-1.5 flex flex-wrap items-center gap-2">
-              <select
-                className={`${inputCls} w-auto!`}
+              <Select
                 value={claudeFallback ? "move" : "wait"}
                 onChange={(e) => {
                   if (e.target.value === "wait") return setClaudeFallback(null);
@@ -755,7 +853,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
               >
                 <option value="wait">Wait for it to reset</option>
                 <option value="move" disabled={!providers.some((p) => p.enabled)}>Carry the stage on with another provider</option>
-              </select>
+              </Select>
               {claudeFallback ? (
                 <div className="min-w-[300px] flex-1">
                   <ProviderPicker value={claudeFallback} onChange={setClaudeFallback} models={models} providers={providers} compact />
@@ -783,12 +881,12 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           <div className="mt-4 text-[12.5px] text-ink-200">
             When Claude asks you a question mid-task
             <div className="mt-1.5 flex flex-wrap items-center gap-2">
-              <select className={`${inputCls} w-auto!`} value={questionWait} onChange={(e) => setQuestionWait(Number(e.target.value))}>
+              <Select value={questionWait} onChange={(e) => setQuestionWait(Number(e.target.value))}>
                 <option value={0}>Wait for my answer, however long it takes</option>
                 {[15, 30, 60, 120, 240].map((m) => (
                   <option key={m} value={m}>Wait {m < 60 ? `${m} minutes` : `${m / 60} hour${m > 60 ? "s" : ""}`}, then let Claude decide</option>
                 ))}
-              </select>
+              </Select>
             </div>
             <span className="mt-1 block text-[11.5px] text-ink-400">
               The task shows <b className="text-iris">asks you</b> and plays the “needs you” sound. Waiting is safest for decisions that
@@ -844,6 +942,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
         </>) : null}
 
         {tab === "tools" ? (<>
+
         <Section
           title="Browser checks"
           hint="Lets a run open what it built and look at it, the way Claude Code does — instead of only saying it should look right."
@@ -860,6 +959,12 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
               </span>
             </span>
           </label>
+          <Field
+            label="Who looks"
+            hint="Measured on four whole runs of the same task: a Sonnet helper halves what an Opus stage re-reads, but checks far more (four times the screenshots), so the task costs about the same and takes about 10% longer. It found visual bugs the stage alone missed. Choose it for thoroughness, not to save money."
+          >
+            <HelperSelect value={browserCheckModel} onChange={setBrowserCheckModel} disabled={!browserChecks} />
+          </Field>
           <div className="mt-3 overflow-x-auto">
             <table className="w-full text-left text-[11.5px]">
               <thead className="text-ink-500">
@@ -912,6 +1017,18 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
               </span>
             </span>
           </label>
+        </Section>
+        <Section
+          title="Images"
+          hint="A task that needs an illustration, an icon or a placeholder photo makes one with a free image model, instead of leaving a grey box or stopping to ask."
+        >
+          <ImageSettings
+            provider={imageProvider}
+            setProvider={setImageProvider}
+            accountId={cloudflareAccountId}
+            setAccountId={setCloudflareAccountId}
+            saved={settings.imageProvider === imageProvider && settings.cloudflareAccountId === cloudflareAccountId}
+          />
         </Section>
         <SessionToolsPanel />
         </>) : null}

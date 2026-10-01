@@ -6,7 +6,7 @@ import { api, type ProjectWithGit, type TerminalInfo } from "../lib/api.ts";
 
 /**
  * The board's palette, as xterm wants it (plain colour strings), read from the theme tokens so the
- * terminal follows Light / Dark like the rest of the board. xterm cannot read CSS variables itself.
+ * terminal follows Light / Dark / Navy like the rest of the board. xterm cannot read CSS variables itself.
  *
  * ANSI black and white are the one place the inverted ink ramp would be wrong: programs print "black"
  * meaning dark and "white" meaning light, so in light mode black takes the darkest rung, not ink-800
@@ -22,6 +22,8 @@ function terminalTheme() {
     brightBlack: v(light ? "ink-300" : "ink-500"), brightRed: v("rose"), brightGreen: v("lime"), brightYellow: v("amber"), brightBlue: v("slate"), brightMagenta: v("iris"), brightCyan: v("cyan"), brightWhite: v(light ? "ink-500" : "ink-100"),
   };
 }
+/** The board's code face, which Navy swaps for JetBrains Mono; xterm needs the name, not the variable. */
+const terminalFont = () => getComputedStyle(document.documentElement).getPropertyValue("--font-mono").trim() || '"IBM Plex Mono", "Cascadia Code", Consolas, monospace';
 const HEIGHT_KEY = "kanban.terminal.height";
 const readHeight = () => {
   try {
@@ -31,17 +33,12 @@ const readHeight = () => {
   }
 };
 
-/** Opens a terminal from anywhere (a task's "Open terminal here"): the dock listens for this. */
-export function openTerminal(detail: { projectId: string; taskId?: string | null }) {
-  window.dispatchEvent(new CustomEvent("kanban:terminal", { detail }));
-}
-
 /** One live terminal: xterm on screen, a socket to the shell behind it. Remounting replays the scrollback. */
 function TerminalView({ term, onExit }: { term: TerminalInfo; onExit: () => void }) {
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const xterm = new Terminal({
-      theme: terminalTheme(), fontFamily: '"IBM Plex Mono", "Cascadia Code", Consolas, monospace', fontSize: 13, lineHeight: 1.2,
+      theme: terminalTheme(), fontFamily: terminalFont(), fontSize: 13, lineHeight: 1.2,
       cursorBlink: true, scrollback: 5000, allowProposedApi: false,
     });
     const fit = new FitAddon();
@@ -70,7 +67,11 @@ function TerminalView({ term, onExit }: { term: TerminalInfo; onExit: () => void
     ro.observe(box.current!);
     xterm.focus();
     // Repaint when the board's theme changes (the Auto/Light/Dark switch, or the OS in Auto).
-    const themed = new MutationObserver(() => (xterm.options.theme = terminalTheme()));
+    const themed = new MutationObserver(() => {
+      xterm.options.theme = terminalTheme();
+      xterm.options.fontFamily = terminalFont();
+      fit.fit();
+    });
     themed.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
     return () => {
       themed.disconnect();

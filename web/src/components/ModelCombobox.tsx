@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { inputCls } from "./ui.tsx";
+import { pageZoom } from "../lib/view.ts";
+import { Chevron, inputCls } from "./ui.tsx";
 
 export interface ModelOption {
   id: string;
@@ -69,9 +70,12 @@ export function ModelCombobox({
     const left = Math.min(Math.max(8, r.left), window.innerWidth - width - 8);
     const below = window.innerHeight - r.bottom - 8;
     const above = r.top - 8;
+    // Measured in screen pixels, placed in zoomed ones: at 125% the panel sat a quarter of the way
+    // across the screen from its button, and off the screen from the chat composer.
+    const z = pageZoom();
     return below >= 260 || below >= above
-      ? { left, top: r.bottom + 4, width, maxHeight: Math.min(420, below - 4) }
-      : { left, bottom: window.innerHeight - r.top + 4, width, maxHeight: Math.min(420, above - 4) };
+      ? { left: left / z, top: (r.bottom + 4) / z, width: width / z, maxHeight: Math.min(420, below - 4) / z }
+      : { left: left / z, bottom: (window.innerHeight - r.top + 4) / z, width: width / z, maxHeight: Math.min(420, above - 4) / z };
   };
   const place = () => setPos((prev) => { const next = measure(); return next && samePos(prev, next) ? prev : next; });
 
@@ -151,7 +155,7 @@ export function ModelCombobox({
       <button
         ref={button}
         type="button"
-        className={`${inputCls} flex min-w-0 cursor-pointer items-center gap-1 text-left font-mono ${
+        className={`${inputCls} flex min-w-0 cursor-pointer items-center gap-1.5 text-left font-mono ${
           warn?.tone === "red" ? "border-rust/70!" : warn ? "border-amber/60!" : ""
         }`}
         onClick={() => setOpen((o) => !o)}
@@ -173,7 +177,7 @@ export function ModelCombobox({
         <span className={`min-w-0 flex-1 truncate ${value ? "" : "text-ink-500"}`}>{value || placeholder || "choose…"}</span>
         {warn ? <span className={`shrink-0 text-[11px] ${warn.tone === "red" ? "text-rust" : "text-amber"}`}>⚠</span> : null}
         {current?.free ? <span className="shrink-0 text-[10px] text-moss">free</span> : null}
-        <span className="shrink-0 text-[10px] text-ink-500">▾</span>
+        <Chevron className="text-ink-500" />
       </button>
       {open && pos
         ? createPortal(

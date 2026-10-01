@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { Approval } from "../../../server/src/types.ts";
+import { IMAGE_TOOL, type Approval } from "../../../server/src/types.ts";
 import { api } from "../lib/api.ts";
 import { useAppData } from "../lib/store.tsx";
 import { navigate } from "../lib/router.ts";
@@ -11,7 +11,7 @@ import { isQuestion } from "../lib/questions.ts";
 
 function inputSummary(a: Approval): string {
   const i = (a.input ?? {}) as Record<string, unknown>;
-  const first = (i.command ?? i.file_path ?? i.pattern ?? i.path ?? "") as string;
+  const first = (i.command ?? i.file_path ?? i.pattern ?? i.path ?? i.prompt ?? "") as string;
   return typeof first === "string" ? first : "";
 }
 
@@ -37,7 +37,7 @@ function ToolRow({ a, focused }: { a: Approval; focused: boolean }) {
       </div>
       <CredentialWarning a={a} />
       <pre className="max-h-40 overflow-auto rounded bg-ink-950 px-2.5 py-2 font-mono text-[11.5px] text-ink-300 whitespace-pre-wrap">
-        {typeof i.command === "string" ? `$ ${i.command}` : JSON.stringify(i, null, 2).slice(0, 2000)}
+        {typeof i.command === "string" ? `$ ${i.command}` : a.tool_name === IMAGE_TOOL ? `Make an image: ${String(i.prompt ?? "")}\n→ ${String(i.file ?? "generated-images/…")}` : JSON.stringify(i, null, 2).slice(0, 2000)}
       </pre>
       <div className="mt-2 flex items-center gap-2">
         <input className={inputCls} placeholder="Note to Claude (sent with Deny)" value={note} onChange={(e) => setNote(e.target.value)} />
@@ -67,7 +67,12 @@ export function Approvals() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
+      // One press, one card. A key held a moment too long repeats, and each repeat allowed the next
+      // card unread; Ctrl+Y and the like are not an answer either.
+      if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+      // With a task or a dialog open on top, the card these keys would answer is not the one in view.
+      if (document.querySelector('[role="dialog"]')) return;
       const top = pending[0];
       // y / n are for approvals; a question is answered on its own card.
       if (!top || isQuestion(top)) return;

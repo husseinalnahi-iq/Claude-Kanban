@@ -41,17 +41,17 @@ test("Rewrite: Opus at high by default, read-only tools, your text kept as the o
   const q = writer();
   const r = rig(q);
   try {
-    assert.equal(r.specs.start(r.task.id).model, "claude-opus-5");
+    assert.equal(r.specs.start(r.task.id).model, "claude-opus-5-5");
     await r.settled();
     const o = q.calls[0].options;
-    assert.equal(o.model, "claude-opus-5");
+    assert.equal(o.model, "claude-opus-5-5");
     assert.equal(o.effort, "high");
     assert.deepEqual(o.tools, SPEC_READ_TOOLS, "it can look, never change anything");
     assert.equal(o.permissionMode, "dontAsk");
     assert.equal(o.cwd, r.project.path);
     assert.match(q.calls[0].prompt, /make search faster pls/);
 
-    assert.equal(r.repo.getTask(r.task.id)!.spec_md, "## Done when\n- written by claude-opus-5");
+    assert.equal(r.repo.getTask(r.task.id)!.spec_md, "## Done when\n- written by claude-opus-5-5");
     const v = r.specs.status(r.task.id).versions;
     assert.deepEqual(v.map((x) => x.kind), ["yours", "ai"]);
     assert.equal(v[0].spec_md, "make search faster pls", "the original is stored");
@@ -113,7 +113,7 @@ test("Stop and a failed answer leave the spec untouched", async () => {
   try {
     r.specs.start(r.task.id);
     assert.throws(() => r.specs.start(r.task.id), /already running/);
-    assert.equal(r.specs.status(r.task.id).rewriting?.model, "claude-opus-5", "a drawer opened now shows it working");
+    assert.equal(r.specs.status(r.task.id).rewriting?.model, "claude-opus-5-5", "a drawer opened now shows it working");
     assert.equal(r.specs.stop(r.task.id), true);
     release();
     await r.settled();

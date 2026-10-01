@@ -2,9 +2,9 @@ import { useEffect, useState } from "react";
 import type { ProviderOut, Task } from "../../../server/src/types.ts";
 import { api } from "../lib/api.ts";
 import { useAppData } from "../lib/store.tsx";
-import { useWs } from "../lib/ws.ts";
+import { useWs, useWsReconnect } from "../lib/ws.ts";
 import { clock, until } from "../lib/format.ts";
-import { Switch } from "./ui.tsx";
+import { Switch, useAction } from "./ui.tsx";
 
 /**
  * One task at a time, or several. This writes the global setting, so it reads the same on every
@@ -12,23 +12,15 @@ import { Switch } from "./ui.tsx";
  */
 export function SerialSwitch() {
   const { settings, setSettings } = useAppData();
-  const [busy, setBusy] = useState(false);
+  const { busy, error, run } = useAction();
   if (!settings) return null;
   const serial = settings.serial;
-  const flip = async (on: boolean) => {
-    setBusy(true);
-    try {
-      setSettings(await api.patchSettings({ serial: on }));
-    } finally {
-      setBusy(false);
-    }
-  };
   return (
     <label className="flex items-center gap-2 whitespace-nowrap font-mono text-[11px] text-ink-400">
       <Switch
         on={serial}
         disabled={busy}
-        onChange={(v) => void flip(v)}
+        onChange={(v) => void run(async () => setSettings(await api.patchSettings({ serial: v })))}
         title={
           serial
             ? `Running one task at a time: each finishes and commits before the next starts. Applies to every project. Turn off to run up to ${settings.globalCap} at once.`
@@ -36,6 +28,8 @@ export function SerialSwitch() {
         }
       />
       one at a time
+      {/* A switch that silently stays where it was looks broken; say it did not take. */}
+      {error ? <span className="text-rust" title={error}>· not changed</span> : null}
     </label>
   );
 }
@@ -50,10 +44,12 @@ export function LimitBanner() {
   const [outs, setOuts] = useState<ProviderOut[]>([]);
   const load = () => void api.pausedTasks().then(setPaused, () => {});
   const loadOuts = () => void api.providerOuts().then(setOuts, () => {});
-  useEffect(() => {
+  const loadAll = () => {
     load();
     loadOuts();
-  }, []);
+  };
+  useEffect(loadAll, []);
+  useWsReconnect(loadAll);
   useWs((m) => {
     if (m.type === "task.updated" && (m.task.status === "paused" || paused.some((p) => p.id === m.task.id))) load();
     if (m.type === "providers.out") setOuts(m.out);

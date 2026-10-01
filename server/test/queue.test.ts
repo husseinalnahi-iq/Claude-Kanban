@@ -106,6 +106,26 @@ test("canStart holds an item without consuming a slot", async () => {
   assert.deepEqual(started, ["free", "held"]);
 });
 
+test("the owner is told when a pump begins and ends, once for all waiting items, and not at all when nothing waits", async () => {
+  const phases: string[] = [];
+  const asked: string[] = [];
+  const { q, done } = manual({ onPump: (p) => phases.push(p), canStart: (i) => (asked.push(i.taskId), true) });
+  q.pump();
+  assert.deepEqual(phases, [], "an empty queue has nothing to read for");
+
+  q.enqueue({ taskId: "a", projectId: "p" });
+  assert.deepEqual(phases, ["begin", "end"]);
+  q.enqueue({ taskId: "b", projectId: "p" });
+  q.enqueue({ taskId: "c", projectId: "p" });
+  phases.length = 0;
+  asked.length = 0;
+
+  done("a");
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(phases, ["begin", "end"], "one pump when the slot frees, however many wait");
+  assert.deepEqual(asked, ["b"], "and every question about the waiting items falls between the two");
+});
+
 // ---------------------------------------------------------------- the usage-limit gate
 
 /** A paused task with a reset time in the future is what "the Claude window is shut" looks like. */

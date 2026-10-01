@@ -19,7 +19,9 @@ export function GitSettings({ project }: { project: ProjectWithGit }) {
   const [m, setM] = useState<MergePolicy>(project.merge);
   const { busy, error, run } = useAction();
   const [saved, setSaved] = useState(false);
-  useEffect(() => setM(project.merge), [project]);
+  // Keyed on the saved values, not the project object: the project list is reloaded on any project's
+  // change, and a new object with the same values used to wipe choices made here and not yet saved.
+  useEffect(() => setM(project.merge), [project.id, JSON.stringify(project.merge)]); // eslint-disable-line react-hooks/exhaustive-deps
   const set = (patch: Partial<MergePolicy>) => setM({ ...m, ...patch });
 
   return (

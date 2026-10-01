@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AppDeps } from "../app.ts";
 import { mergeSchema, stageSchema } from "./projects.ts";
-import { ANTHROPIC_PROVIDER_ID, EFFORTS } from "../types.ts";
+import { ANTHROPIC_PROVIDER_ID, EFFORTS, HELPER_MODELS, IMAGE_PROVIDERS } from "../types.ts";
 import { PROVIDER_PRESETS } from "../engine/providers/presets.ts";
 import { fileURLToPath } from "node:url";
 
@@ -66,6 +66,8 @@ const patchSchema = z.object({
   triageModel: z.string().trim().min(1).optional(),
   visionModel: z.string().trim().min(1).optional(),
   visionProvider: z.string().trim().min(1).max(64).optional(),
+  imageProvider: z.enum(IMAGE_PROVIDERS).optional(),
+  cloudflareAccountId: z.string().trim().max(64).regex(/^[A-Za-z0-9]*$/, "a Cloudflare account id is letters and digits only").optional(),
   tiers: z.object({ cheap: tierRef, balanced: tierRef, strong: tierRef }).optional(),
   providers: z.array(providerSchema).max(30).optional(),
   debate: z.object({ enabled: z.boolean(), critic: tierRef.extend({ effort: z.enum(EFFORTS as [string, ...string[]]) }) }).optional(),
@@ -86,6 +88,9 @@ const patchSchema = z.object({
   planApproval: z.boolean().optional(),
   autoContinueTurns: z.number().int().min(0).max(5).optional(),
   liveReviewModel: z.string().trim().min(1).max(120).optional(),
+  followLatestModels: z.boolean().optional(),
+  browserCheckModel: z.enum(HELPER_MODELS as [string, ...string[]]).optional(),
+  autoUpdateEngine: z.boolean().optional(),
   liveView: z.boolean().optional(),
   maxCostPerTaskUsd: z.number().min(0.1).max(500).optional(),
   maxRepeatedToolCalls: z.number().int().min(2).max(50).optional(),

@@ -3,7 +3,7 @@ import type { Attachment } from "../../../server/src/types.ts";
 import { ATTACHMENT_TYPES, attachmentKind } from "../../../server/src/types.ts";
 import { api } from "../lib/api.ts";
 import { ago } from "../lib/format.ts";
-import { Button, ErrorLine, useAction } from "./ui.tsx";
+import { Button, ErrorLine, useAction, useEscape } from "./ui.tsx";
 
 const MAX_BYTES = 10 * 1024 * 1024;
 const EXTS = Object.keys(ATTACHMENT_TYPES);
@@ -75,11 +75,7 @@ function Preview({ a, onClose }: { a: Attachment; onClose: () => void }) {
     };
   }, [a.id, kind]);
 
-  useEffect(() => {
-    const k = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", k);
-    return () => window.removeEventListener("keydown", k);
-  }, [onClose]);
+  useEscape(onClose);
 
   const body = () => {
     if (kind === "image") {
@@ -213,14 +209,16 @@ export function Gallery({ taskId, attachments, onChange }: { taskId: string; att
               href={api.attachmentUrl(a.id)}
               download={a.name}
               title="Download"
-              className="cursor-pointer text-ink-500 opacity-0 transition-opacity hover:text-amber group-hover:opacity-100"
+              aria-label={`Download ${a.name}`}
+              className="cursor-pointer text-ink-500 opacity-0 transition-opacity hover:text-amber group-hover:opacity-100 group-focus-within:opacity-100"
               onClick={(e) => e.stopPropagation()}
             >
               ↓
             </a>
             <button
-              className="cursor-pointer text-ink-500 opacity-0 transition-opacity hover:text-rust group-hover:opacity-100"
+              className="cursor-pointer text-ink-500 opacity-0 transition-opacity hover:text-rust group-hover:opacity-100 group-focus-within:opacity-100"
               title="Delete this file"
+              aria-label={`Delete ${a.name}`}
               onClick={() => run(async () => { await api.deleteAttachment(a.id); onChange(); })}
             >
               ×

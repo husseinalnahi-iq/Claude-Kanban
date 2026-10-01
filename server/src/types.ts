@@ -22,6 +22,26 @@ export const usesWorktree = (t: { mode: Mode; own_branch?: boolean }): boolean =
 
 export const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
 
+/** Where `generate_image` makes pictures: free Pollinations.ai, Cloudflare Workers AI with your token, or nowhere (D262). */
+export const IMAGE_PROVIDERS = ["pollinations", "cloudflare", "off"] as const;
+export type ImageProvider = (typeof IMAGE_PROVIDERS)[number];
+/** The image tool's MCP names, here so the web can label its cards without importing the engine. */
+export const IMAGE_SERVER = "images";
+export const IMAGE_PREFIX = `mcp__${IMAGE_SERVER}__`;
+export const IMAGE_TOOL = `${IMAGE_PREFIX}generate_image`;
+
+/** What Settings → Images shows: which keys are set (never their values), whether an image would come, and how to give your own Claude Code the tool. */
+export interface ImageStatus {
+  provider: ImageProvider;
+  cloudflareAccountId: string;
+  hasPollinationsKey: boolean;
+  hasCloudflareToken: boolean;
+  ready: boolean;
+  detail: string;
+  /** The one line that adds the tool to your own Claude Code (`claude mcp add …`). */
+  claudeCodeCommand: string;
+}
+
 export interface Stage {
   stage: StageName;
   model: string;
@@ -95,6 +115,16 @@ export interface ClaudeModel {
   efforts: Effort[];
   /** The short names that point at it too ("sonnet", "opus[1m]"). */
   aliases: string[];
+}
+
+/** One pick moved to a newer model of its family. */
+export interface ModelMove {
+  /** "default pipeline, stage 2 (code)" */
+  where: string;
+  from: string;
+  to: string;
+  /** "Opus 5.5" */
+  label: string;
 }
 
 export interface ClaudeModelsResult {
@@ -260,6 +290,21 @@ export interface Blocked {
  * the question waits on the card. The plan that prompted this asked two questions in its report and
  * the pipeline ran on without anyone seeing them (docs/DECISIONS.md D203).
  */
+/** A helper agent's model: a cheaper Claude, or "stage" for the model of the stage that sends it. */
+export type HelperModel = "sonnet" | "haiku" | "stage";
+export const HELPER_MODELS: HelperModel[] = ["sonnet", "haiku", "stage"];
+
+/** One line of Claude's own to-do list for a stage. */
+export interface ChecklistItem {
+  id: string;
+  text: string;
+  /** How it reads while in progress: "Writing the login form". */
+  doing?: string;
+  status: "pending" | "in_progress" | "completed";
+  /** Removed by Claude. Kept, hidden, so the items after it keep the numbers Claude Code gave them. */
+  deleted?: true;
+}
+
 export interface TaskQuestion {
   id: string;
   stage_index: number;
@@ -414,6 +459,8 @@ export interface Task {
   triaged_at: string | null;
   /** Hidden from the board when set. Purely visual — the task, its runs and its history stay. */
   archived_at: string | null;
+  /** When the task became done, or null while it is not. Unlike updated_at, archiving or editing it later does not move this. */
+  done_at: string | null;
   /** When a task paused by a usage limit will pick up again (ISO time), or null. */
   resume_at: string | null;
   /**
@@ -457,6 +504,8 @@ export interface Task {
   blocked: Blocked | null;
   /** Questions stages asked with `board_ask`, answered or not. */
   questions: TaskQuestion[];
+  /** Claude's own to-do list for the stage it is running (or last ran), shown on the card. D252. */
+  checklist: ChecklistItem[];
   /** Supervised runs: the checkout's state around the run. */
   checkout: CheckoutState | null;
   mode: Mode;
@@ -516,14 +565,14 @@ export interface Chat {
 
 /**
  * One line of a side chat. `tool` rows are the quiet "read server/src/db.ts" lines; `meta.cards` are
- * task cards the chat created, queued or scheduled, shown as chips you can open.
+ * task cards the chat created, queued, scheduled or talked to, shown as chips you can open.
  */
 export interface ChatMessage {
   id: number;
   chat_id: string;
   role: "user" | "assistant" | "tool" | "error";
   text: string;
-  meta: { cards?: { id: string; title: string; action: "created" | "updated" | "queued" | "scheduled" }[]; cost_usd?: number };
+  meta: { cards?: { id: string; title: string; action: "created" | "updated" | "queued" | "scheduled" | "messaged" | "answered" | "stopped" | "retried" }[]; cost_usd?: number };
   ts: string;
 }
 
@@ -551,6 +600,14 @@ export interface Run {
   /** Tokens held in the session's context at the last assistant turn, and the model's window size. */
   context_tokens: number;
   context_window: number;
+  /** Of the input: what was re-read from the prompt cache, and what was written to it (D276). */
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  /**
+   * Spent on models other than the stage's own within this run: its helpers (browser-check,
+   * the browser-check helper and Claude Code's own small calls. Part of cost_usd, not added to it.
+   */
+  other_models_usd: number;
   /**
    * Five-hour subscription window usage (0–1) as the CLI reported it when this run started and when
    * it ended. The difference is what this run cost you of the thing that actually runs out.
@@ -747,6 +804,10 @@ export interface Settings {
   visionModel: string;
   /** Where the vision model runs: "anthropic" (Claude, the default) or a provider id from Settings → Providers. */
   visionProvider: string;
+  /** Which free image model runs make pictures with (`generate_image`), or "off". D262. */
+  imageProvider: ImageProvider;
+  /** Cloudflare account id (dashboard → Workers AI). Not a secret; the API token lives in the secret store. */
+  cloudflareAccountId: string;
   /**
    * What "cheap / balanced / strong" mean here. Sizing picks a tier, never a model id, so it cannot
    * invent one — and changing model here changes every future sizing at once.
@@ -801,6 +862,21 @@ export interface Settings {
   autoContinueTurns: number;
   /** Claude model the review stage of a live task runs on, whatever its pipeline says. D233. */
   liveReviewModel: string;
+  /**
+   * When your Claude login gets a newer model of a family your settings name (Opus 5 → Opus 5.5), move
+   * every such pick to it and say so. Off: Settings only offers the move. D250.
+   */
+  followLatestModels: boolean;
+  /**
+   * Who drives the browser for a stage's visual check: the stage itself ("stage", the default) or a
+   * cheaper helper. Measured over four whole runs (D273): the helper halves what the stage re-reads
+   * but checks far more, so a task costs about the same and takes a little longer — more thorough, not cheaper.
+   */
+  browserCheckModel: HelperModel;
+  /** Get newer versions of Claude's engine when the board starts, so new models show up. D249. */
+  autoUpdateEngine: boolean;
+  /** The last time picks were moved to newer models, and which — shown in Settings so it is never silent. */
+  lastModelMove: { at: string; moves: ModelMove[] } | null;
   /** Stream a live picture of each task's browser into its card (only while someone is watching). */
   liveView: boolean;
   /** Landing policy new projects start with. */
@@ -889,6 +965,8 @@ export type WsMessage =
   | { type: "message.posted"; message: Message }
   | { type: "attachment.added"; attachment: Attachment }
   | { type: "project.updated"; project: Project }
+  /** A project was removed, with its tasks: other open tabs drop it without waiting for a reload. */
+  | { type: "project.deleted"; id: string }
   | { type: "milestone.updated"; milestone: Milestone }
   | { type: "settings.updated"; settings: Settings }
   | { type: "limits.updated"; limits: UsageLimit[] }

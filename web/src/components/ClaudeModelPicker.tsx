@@ -2,11 +2,11 @@ import { EFFORT_NOTES, type Effort, type ModelEntry } from "../../../server/src/
 import { claudeModelStatus } from "../../../server/src/engine/claudeModels.ts";
 import { claudeOptions, claudeWarning, effortsFor, useClaudeModels } from "../lib/claudeModels.ts";
 import { ModelCombobox } from "./ModelCombobox.tsx";
-import { inputCls } from "./ui.tsx";
+import { RICH_SELECT, Select } from "./ui.tsx";
 
 /** Effort, offering only the levels this Claude model takes (none for Haiku). */
 export function EffortSelect({
-  model, value, onChange, disabled, className = "", notes,
+  model, value, onChange, disabled, className = "", notes, labelled,
 }: {
   model: string;
   value: Effort;
@@ -15,24 +15,32 @@ export function EffortSelect({
   className?: string;
   /** Show each level's meaning next to it. */
   notes?: boolean;
+  /** Say "high effort", not a bare "high": next to a model name a lone level does not read as a setting. */
+  labelled?: boolean;
 }) {
   const { result } = useClaudeModels();
   const { efforts, none } = effortsFor(model, result);
   const shown = efforts.includes(value) ? efforts : [...efforts, value];
+  // The meaning of a level is a second line in the open list where the browser can draw one, and
+  // part of the text where it cannot; the closed box only ever shows the level, so it never clips.
   return (
-    <select
-      className={`${inputCls} font-mono ${className}`}
+    <Select
+      wide
+      className={`font-mono ${className}`}
       value={value}
       disabled={disabled || none}
-      title={none ? "This model has no effort setting" : EFFORT_NOTES[value]}
+      title={none ? "This model has no effort setting" : `Effort: how long it may think before answering. Higher thinks more and costs more. ${EFFORT_NOTES[value]}`}
       onChange={(e) => onChange(e.target.value as Effort)}
     >
-      {shown.map((ef) => (
-        <option key={ef} value={ef}>
-          {none ? "no effort setting" : !efforts.includes(ef) ? `${ef} — not for this model` : notes ? `${ef} — ${EFFORT_NOTES[ef]}` : ef}
-        </option>
-      ))}
-    </select>
+      {shown.map((ef) => {
+        const note = !efforts.includes(ef) ? "not for this model" : notes ? EFFORT_NOTES[ef] : undefined;
+        return (
+          <option key={ef} value={ef} data-note={RICH_SELECT ? note : undefined}>
+            {none ? "no effort setting" : note && !RICH_SELECT ? `${ef} — ${note}` : labelled ? `${ef} effort` : ef}
+          </option>
+        );
+      })}
+    </Select>
   );
 }
 

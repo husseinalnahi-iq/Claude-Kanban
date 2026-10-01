@@ -7,6 +7,8 @@ import { ConflictError, NotFoundError } from "../engine/runner.ts";
 import { isGitRepo } from "../git/worktree.ts";
 import { probeFolder } from "../engine/onboarding.ts";
 import { answersSchema, queueBootstrapTask, queueInitTask } from "./claudeMd.ts";
+import { removeAttachmentDir } from "./attachments.ts";
+import { busyItems } from "./busy.ts";
 import { EFFORTS, EMPTY_ENV, type MergePolicy, type Policy } from "../types.ts";
 
 export const stageSchema = z.object({
@@ -124,7 +126,26 @@ export async function projectRoutes(app: FastifyInstance, { repo, bus, runner }:
     const tasks = repo.listTasks({ project_id: id });
     if (tasks.some((t) => runner.isBusy(t.id))) throw new ConflictError("Stop this project's running tasks first.");
     if (tasks.some((t) => t.worktree_path)) throw new ConflictError("Some tasks still have worktrees; approve or discard them first.");
+    // Work that is not a queued task but would go on writing to rows that are about to disappear.
+    const taskIds = new Set(tasks.map((t) => t.id));
+    const inFlight = busyItems(runner);
+    if (inFlight.some((i) => i.what === "chat" && i.project_id === id)) {
+      throw new ConflictError("A side chat in this project is still writing its reply. Wait for it or stop it, then delete the project.");
+    }
+    if (inFlight.some((i) => i.what === "spec" && i.task_id !== undefined && taskIds.has(i.task_id))) {
+      throw new ConflictError("A spec rewrite is still running in this project. Wait for it or stop it, then delete the project.");
+    }
+    const existed = Boolean(repo.getProject(id));
     repo.deleteProject(id);
+    // The database drops the project's tasks with it; their files and the engine's notes about them
+    // are not in the database, and used to stay behind for good.
+    const stateDir = repo.getSettings().stateDir;
+    for (const t of tasks) {
+      runner.forget(t.id);
+      removeAttachmentDir(stateDir, t.id);
+      bus.publish({ type: "task.deleted", taskId: t.id });
+    }
+    if (existed) bus.publish({ type: "project.deleted", id });
     return { ok: true };
   });
 }

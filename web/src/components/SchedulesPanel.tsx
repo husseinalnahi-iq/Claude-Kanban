@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Schedule, Task, TaskCard } from "../../../server/src/types.ts";
 import { api, type ProjectWithGit } from "../lib/api.ts";
-import { useWs } from "../lib/ws.ts";
+import { useWs, useWsReconnect } from "../lib/ws.ts";
 import { navigate } from "../lib/router.ts";
 import { useAppData } from "../lib/store.tsx";
 import { clock, until } from "../lib/format.ts";
-import { Button, ErrorLine, Modal, Switch, useAction } from "./ui.tsx";
+import { Button, ErrorLine, Modal, Switch, useAction, useEscape } from "./ui.tsx";
 import { useAsk } from "./Ask.tsx";
 import { defaultWhen, describeDays, startAtOf, WhenPicker, whenInvalid, type When } from "./WhenPicker.tsx";
 
@@ -14,6 +14,7 @@ export function useSchedules(projectId: string) {
   const [list, setList] = useState<Schedule[]>([]);
   const reload = useCallback(() => void api.schedules(projectId).then(setList, () => {}), [projectId]);
   useEffect(reload, [reload]);
+  useWsReconnect(reload);
   useWs((m) => {
     if (m.type === "schedule.updated" && m.schedule.project_id === projectId) {
       setList((prev) => (prev.some((s) => s.id === m.schedule.id) ? prev.map((s) => (s.id === m.schedule.id ? m.schedule : s)) : [...prev, m.schedule]));
@@ -116,11 +117,7 @@ export function SchedulesPanel({ project, cards, schedules, onClose, onNew }: {
     setClosing(true);
     setTimeout(onClose, 180);
   };
-  useEffect(() => {
-    const k = (e: KeyboardEvent) => e.key === "Escape" && close();
-    window.addEventListener("keydown", k);
-    return () => window.removeEventListener("keydown", k);
-  }, []);
+  useEscape(close);
   const oneTime = cards.filter((c) => c.start_at).sort((a, b) => (a.start_at === "reset" ? 1 : b.start_at === "reset" ? -1 : a.start_at!.localeCompare(b.start_at!)));
 
   return (

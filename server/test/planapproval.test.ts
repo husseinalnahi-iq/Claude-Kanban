@@ -68,6 +68,41 @@ test("plan approval: Send back returns the task to Backlog with the note", async
   }
 });
 
+test("a task waiting on its plan cannot be messaged, and Stop then Retry brings the plan back instead of starting the code", async () => {
+  const f = fakeQuery({ byCall: (i) => (i === 0 ? { result: "## Execution steps\n1. do it" } : undefined) });
+  const s = setup(f.fn);
+  try {
+    const task = s.repo.createTask({ project_id: s.project.id, title: "x", mode: "supervised", pipeline: [...PIPE] as never, live: true });
+    s.runner.queueTask(task.id);
+    await until(() => s.repo.getTask(task.id)!.status === "approval");
+
+    // A message here used to run in the plan's session, replace the plan with its reply, and leave the task failed.
+    assert.throws(() => s.runner.chat(task.id, "what does step 1 mean?"), /waiting for you to choose a plan — decide that first, then message it/);
+    const waiting = s.repo.getTask(task.id)!;
+    assert.equal(waiting.status, "approval");
+    assert.match(waiting.plan_gate!.original, /Execution steps/);
+    assert.equal(f.calls.length, 1, "no session was started");
+
+    s.runner.stopTask(task.id);
+    assert.equal(s.repo.getTask(task.id)!.status, "failed");
+    s.runner.retryTask(task.id);
+    await until(() => s.repo.getTask(task.id)!.status === "approval" && !s.runner.isBusy(task.id));
+    assert.equal(f.calls.length, 1, "the code stage did not start on a plan nobody approved");
+    assert.match(s.repo.getTask(task.id)!.plan_gate!.original, /Execution steps/, "the same plan is offered again, without paying for it twice");
+
+    // "review" is also the status while the review stage runs, so wait for the pipeline itself to end.
+    s.runner.decidePlan(task.id, "original");
+    await until(() => s.repo.getTask(task.id)!.status === "review" && f.calls.length === 3 && !s.runner.isBusy(task.id));
+
+    // Approved once is approved: a later retry of the code stage does not ask again.
+    s.runner.retryTask(task.id, 1);
+    await until(() => s.repo.getTask(task.id)!.status === "review" && f.calls.length === 5 && !s.runner.isBusy(task.id));
+    assert.equal(s.repo.getTask(task.id)!.plan_gate, null);
+  } finally {
+    s.cleanup();
+  }
+});
+
 test("a live task: plan approval is forced on and review runs on the live review model (D233)", async () => {
   const f = fakeQuery();
   const s = setup(f.fn);
@@ -78,9 +113,9 @@ test("a live task: plan approval is forced on and review runs on the live review
     s.runner.decidePlan(task.id, "original");
     await until(() => s.repo.getTask(task.id)!.status === "review" && f.calls.length === 3);
     const review = s.repo.runsForTask(task.id).find((r) => r.stage === "review")!;
-    assert.equal(review.model, "claude-opus-5");
+    assert.equal(review.model, "claude-opus-5-5");
     assert.equal(review.effort, "high");
-    assert.equal(f.calls[2].options.model, "claude-opus-5");
+    assert.equal(f.calls[2].options.model, "claude-opus-5-5");
     assert.match(f.calls[2].prompt, /## Live system[\s\S]*read the live system yourself/);
     assert.match(f.calls[1].prompt, /## Live system[\s\S]*dry-run before every live change/);
   } finally {

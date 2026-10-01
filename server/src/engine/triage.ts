@@ -124,7 +124,8 @@ function schemaFor(labelVocabulary: string[]) {
     },
     pipeline_reason: {
       type: "string",
-      description: "One sentence to the requester on why that pipeline fits this task — name what makes it easy or hard, not a generality.",
+      description:
+        "One sentence to the requester on why that pipeline fits this task — name what makes it easy or hard, not a generality — and why that effort (e.g. \"low effort: a one-line copy change\", \"high effort on the plan: three systems must agree\").",
     },
     split_reason: {
       type: "string",

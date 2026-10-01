@@ -7,7 +7,8 @@
     <link rel="icon" href="/favicon.ico" sizes="any" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet" />
+    <!-- Inter and JetBrains Mono are the Navy theme's faces; a browser only downloads a face once text is drawn in it. -->
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Inter:ital,wght@0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
     <!--
       Theme before first paint. The app sets the same attribute once React mounts; doing it here too is
       what stops a light machine seeing a black flash while the bundle loads.
@@ -17,7 +18,7 @@
         var t = "system";
         try {
           var v = JSON.parse(localStorage.getItem("kanban.view") || "null");
-          if (v && (v.theme === "light" || v.theme === "dark" || v.theme === "system")) t = v.theme;
+          if (v && (v.theme === "light" || v.theme === "dark" || v.theme === "navy" || v.theme === "system")) t = v.theme;
         } catch (e) {}
         document.documentElement.dataset.theme =
           t === "system" ? (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark") : t;

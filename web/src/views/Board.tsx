@@ -1,11 +1,11 @@
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { type StageState, type TaskCard, type TaskStatus } from "../../../server/src/types.ts";
 import { api, type ProjectWithGit } from "../lib/api.ts";
-import { useWs } from "../lib/ws.ts";
+import { useWs, useWsReconnect } from "../lib/ws.ts";
 import { navigate } from "../lib/router.ts";
 import { useAppData } from "../lib/store.tsx";
 import { clock, cost, PRIORITY_META, shortModel, STATUS_META, TYPE_META, until } from "../lib/format.ts";
-import { Button, Chip, ModeChip, inputCls } from "../components/ui.tsx";
+import { Button, Chip, ModeChip, Select, inputCls } from "../components/ui.tsx";
 import { NewTaskForm } from "../components/forms.tsx";
 import { LimitBanner, SerialSwitch } from "../components/QueueControls.tsx";
 import { DepGraph } from "../components/DepGraph.tsx";
@@ -14,6 +14,7 @@ import { isQuestion } from "../lib/questions.ts";
 import { liveTasks } from "../components/LiveBrowser.tsx";
 import { openTaskOn } from "./TaskDrawer.tsx";
 import { COLUMN_SIZES, setViewPrefs, useViewPrefs } from "../lib/view.ts";
+import { ChecklistLine } from "../components/Checklist.tsx";
 
 const DOT: Record<StageState, string> = {
   idle: "border border-ink-500 bg-transparent",
@@ -67,12 +68,14 @@ function phase(card: TaskCard, asking?: boolean): { text: string; tone: string; 
 export function useTaskCards(projectId: string | null) {
   const [cards, setCards] = useState<TaskCard[]>([]);
   const reload = useCallback(async () => {
-    if (projectId) setCards(await api.tasks(projectId));
+    // A failed reload keeps the cards that are there; the next push or reconnect asks again.
+    if (projectId) await api.tasks(projectId).then(setCards, () => {});
   }, [projectId]);
   useEffect(() => {
     setCards([]);
     void reload();
   }, [reload]);
+  useWsReconnect(() => void reload());
   useWs((m) => {
     if (m.type === "task.updated" && m.task.project_id === projectId) {
       setCards((prev) => {
@@ -87,9 +90,14 @@ export function useTaskCards(projectId: string | null) {
     } else if (m.type === "task.deleted") {
       setCards((prev) => prev.filter((c) => c.id !== m.taskId));
     } else if (m.type === "run.updated") {
-      setCards((prev) =>
-        prev.map((c) => (c.id === m.run.task_id ? { ...c, stage_states: c.stage_states.map((s, i) => (i === m.run.stage_index ? m.run.status : s)) } : c)),
-      );
+      // A running stage sends this on nearly every message (its context size grew), and for every
+      // project. The same list back means no re-render; a new one redrew the whole board each time.
+      setCards((prev) => {
+        const card = prev.find((c) => c.id === m.run.task_id);
+        const now = card?.stage_states[m.run.stage_index];
+        if (!card || now === undefined || now === m.run.status) return prev;
+        return prev.map((c) => (c === card ? { ...c, stage_states: c.stage_states.map((s, i) => (i === m.run.stage_index ? m.run.status : s)) } : c));
+      });
     } else if (m.type === "run.finished") {
       void reload();
     }
@@ -105,7 +113,6 @@ const Card = memo(function Card({
   serial,
   asking,
   watching,
-  onDragStart,
 }: {
   card: TaskCard;
   parentTitle?: string;
@@ -117,7 +124,6 @@ const Card = memo(function Card({
   asking?: boolean;
   /** Its browser is open right now: offer to watch. */
   watching?: boolean;
-  onDragStart: (e: React.DragEvent) => void;
 }) {
   const draggable = card.status === "backlog" || card.status === "queued";
   const live = ["planning", "running", "approval"].includes(card.status);
@@ -137,9 +143,18 @@ const Card = memo(function Card({
   return (
     <div
       draggable={draggable}
-      onDragStart={onDragStart}
+      // Set here, not passed in: a handler made afresh by the board on every render undid the memo above.
+      onDragStart={(e) => {
+        e.dataTransfer.setData("text/task-id", card.id);
+        e.dataTransfer.setData("text/task-status", card.status);
+      }}
       onClick={() => navigate({ taskId: card.id })}
-      className={`rise group relative cursor-pointer rounded-lg border bg-ink-850 px-3 py-2.5 transition-colors hover:border-ink-500 hover:bg-ink-800 ${
+      // Reachable without a mouse: Tab to the card, Enter to open it.
+      role="link"
+      tabIndex={0}
+      aria-label={`Open task: ${card.title}`}
+      onKeyDown={(e) => e.key === "Enter" && e.target === e.currentTarget && navigate({ taskId: card.id })}
+      className={`rise group relative cursor-pointer rounded-lg border bg-ink-850 px-3 py-2.5 transition-colors hover:border-ink-500 hover:bg-ink-800 focus-visible:border-amber focus-visible:outline-none ${
         card.status === "approval" ? "border-rose/60" : live ? "border-amber/40" : "border-ink-700"
       } ${card.archived_at ? "opacity-55 hover:opacity-100" : ""}`}
     >
@@ -199,6 +214,7 @@ const Card = memo(function Card({
       </div>
       <div className="text-[13px] font-medium leading-snug text-ink-100">{card.title}</div>
       {card.summary ? <div className="mt-1.5 line-clamp-2 text-[12px] leading-snug text-ink-300">{card.summary}</div> : null}
+      {IN_PROGRESS.includes(card.status) || card.status === "failed" ? <ChecklistLine list={card.checklist} live={live} /> : null}
       {card.blocked && card.status === "failed" ? (
         <div className="mt-1.5 line-clamp-2 text-[11.5px] text-rose">{card.blocked.reason}</div>
       ) : card.error && card.status === "failed" ? (
@@ -268,9 +284,10 @@ const Card = memo(function Card({
           </button>
         </div>
       ) : null}
-      <div className="mt-2.5 flex items-center gap-2.5">
-        {/* The stage chips give way first: in a narrow column the hover actions must stay on the card. */}
-        <div className="flex min-w-0 shrink items-center gap-2 overflow-hidden">
+      <div className="relative mt-2.5 flex items-center gap-2.5">
+        {/* The stage chips get the row. The hover actions sit over its right end and do not take space
+            while hidden: laid out beside the chips, the invisible buttons squeezed them to one letter. */}
+        <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
           {card.pipeline.map((s, i) => (
             <span key={i} className={`flex items-center gap-1 font-mono text-[10px] ${s.provider ? "text-iris" : "text-ink-400"}`} title={`${s.stage} · ${s.model}${s.provider ? ` via ${s.provider}` : ""} · ${s.effort} · ${card.stage_states[i]}`}>
               <span className={`inline-block h-2 w-2 rounded-full ${DOT[card.stage_states[i] ?? "idle"]}`} />
@@ -280,19 +297,19 @@ const Card = memo(function Card({
             </span>
           ))}
         </div>
-        <div className="ml-auto flex shrink-0 items-center gap-1.5">
-          {card.cost_usd > 0 ? <span className="font-mono text-[10.5px] text-ink-400">{cost(card.cost_usd)}</span> : null}
+        {card.cost_usd > 0 ? <span className="shrink-0 font-mono text-[10.5px] text-ink-400">{cost(card.cost_usd)}</span> : null}
+        <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center gap-1.5 pl-3 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 bg-ink-850 group-hover:bg-ink-800">
           {(card.status === "backlog" || card.status === "failed") && !needsSwitch ? (
             <>
               <button
-                className="rounded border border-ink-600 px-1.5 py-px font-mono text-[10.5px] text-ink-300 opacity-0 transition-opacity hover:border-amber hover:text-amber group-hover:opacity-100 cursor-pointer"
+                className="rounded border border-ink-600 px-1.5 py-px font-mono text-[10.5px] text-ink-300 hover:border-amber hover:text-amber cursor-pointer"
                 onClick={(e) => act(e, () => (card.status === "failed" ? api.retry(card.id) : api.queue(card.id)))}
               >
                 {card.status === "failed" ? "retry" : "queue"}
               </button>
               {serial ? (
                 <button
-                  className="rounded border border-ink-600 px-1.5 py-px font-mono text-[10.5px] text-ink-300 opacity-0 transition-opacity hover:border-cyan hover:text-cyan group-hover:opacity-100 cursor-pointer"
+                  className="rounded border border-ink-600 px-1.5 py-px font-mono text-[10.5px] text-ink-300 hover:border-cyan hover:text-cyan cursor-pointer"
                   title="Start it now, beside whatever is already running, instead of waiting its turn"
                   onClick={(e) => act(e, () => (card.status === "failed" ? api.retry(card.id, undefined, true) : api.queue(card.id, true)))}
                 >
@@ -303,7 +320,7 @@ const Card = memo(function Card({
           ) : null}
           {card.status === "done" ? (
             <button
-              className="rounded border border-ink-600 px-1.5 py-px font-mono text-[10.5px] text-ink-300 opacity-0 transition-opacity hover:border-amber hover:text-amber group-hover:opacity-100 cursor-pointer"
+              className="rounded border border-ink-600 px-1.5 py-px font-mono text-[10.5px] text-ink-300 hover:border-amber hover:text-amber cursor-pointer"
               title={card.archived_at ? "Bring it back onto the board" : "Hide it from the board — nothing is deleted"}
               onClick={(e) => act(e, () => (card.archived_at ? api.unarchive(card.id) : api.archive(card.id)))}
             >
@@ -312,7 +329,7 @@ const Card = memo(function Card({
           ) : null}
           {card.status === "queued" || live ? (
             <button
-              className="rounded border border-ink-600 px-1.5 py-px font-mono text-[10.5px] text-ink-300 opacity-0 transition-opacity hover:border-rust hover:text-rust group-hover:opacity-100 cursor-pointer"
+              className="rounded border border-ink-600 px-1.5 py-px font-mono text-[10.5px] text-ink-300 hover:border-rust hover:text-rust cursor-pointer"
               onClick={(e) => act(e, () => api.stop(card.id))}
             >
               stop
@@ -332,7 +349,9 @@ export function Board({ project }: { project: ProjectWithGit }) {
   const [schedulesOpen, setSchedulesOpen] = useState(false);
   // Tasks whose browser is open now, for the "live" chip.
   const [live, setLive] = useState<Set<string>>(new Set());
-  useEffect(() => void liveTasks().then((ids) => setLive(new Set(ids)), () => {}), [project.id]);
+  const loadLive = () => void liveTasks().then((ids) => setLive(new Set(ids)), () => {});
+  useEffect(loadLive, [project.id]);
+  useWsReconnect(loadLive);
   useWs((m) => {
     if (m.type === "browser.live") setLive((prev) => {
       const next = new Set(prev);
@@ -445,19 +464,19 @@ export function Board({ project }: { project: ProjectWithGit }) {
       <LimitBanner />
       <div className="flex flex-wrap items-center gap-2 border-b border-ink-800 px-6 py-2">
         <input className={`${inputCls} max-w-[220px]`} placeholder="Filter tasks…" value={filter.q} onChange={(e) => setFilter({ ...filter, q: e.target.value })} />
-        <select className={`${inputCls} w-auto! font-mono text-[12px]`} value={filter.type} onChange={(e) => setFilter({ ...filter, type: e.target.value })}>
+        <Select className="font-mono text-[12px]" aria-label="Filter by type" value={filter.type} onChange={(e) => setFilter({ ...filter, type: e.target.value })}>
           <option value="">any type</option>
           {Object.keys(TYPE_META).map((t) => <option key={t} value={t}>{t}</option>)}
-        </select>
-        <select className={`${inputCls} w-auto! font-mono text-[12px]`} value={filter.priority} onChange={(e) => setFilter({ ...filter, priority: e.target.value })}>
+        </Select>
+        <Select className="font-mono text-[12px]" aria-label="Filter by priority" value={filter.priority} onChange={(e) => setFilter({ ...filter, priority: e.target.value })}>
           <option value="">any priority</option>
-          {Object.keys(PRIORITY_META).map((p) => <option key={p} value={p}>{p}</option>)}
-        </select>
+          {(Object.keys(PRIORITY_META) as (keyof typeof PRIORITY_META)[]).map((p) => <option key={p} value={p}>{PRIORITY_META[p].short}</option>)}
+        </Select>
         {labels.length ? (
-          <select className={`${inputCls} w-auto! font-mono text-[12px]`} value={filter.label} onChange={(e) => setFilter({ ...filter, label: e.target.value })}>
+          <Select className="font-mono text-[12px]" aria-label="Filter by label" value={filter.label} onChange={(e) => setFilter({ ...filter, label: e.target.value })}>
             <option value="">any label</option>
             {labels.map((l) => <option key={l} value={l}>{l}</option>)}
-          </select>
+          </Select>
         ) : null}
         {filter.q || filter.type || filter.priority || filter.label ? (
           <button className="cursor-pointer font-mono text-[11px] text-ink-400 hover:text-ink-100" onClick={() => setFilter({ q: "", type: "", priority: "", label: "" })}>
@@ -501,7 +520,7 @@ export function Board({ project }: { project: ProjectWithGit }) {
       {dragError ? (
         <div className="mx-6 mt-3 flex items-center justify-between rounded-md border border-rust/40 bg-rust/10 px-3 py-2 text-[12.5px] text-rust">
           {dragError}
-          <button className="cursor-pointer text-rust/70 hover:text-rust" onClick={() => setDragError(null)}>×</button>
+          <button className="cursor-pointer text-rust/70 hover:text-rust" onClick={() => setDragError(null)} aria-label="Dismiss">×</button>
         </div>
       ) : null}
       {view === "graph" ? (
@@ -561,10 +580,6 @@ export function Board({ project }: { project: ProjectWithGit }) {
                     serial={settings?.serial}
                     asking={projectPending.some((a) => a.task_id === c.id && isQuestion(a))}
                     watching={live.has(c.id)}
-                    onDragStart={(e) => {
-                      e.dataTransfer.setData("text/task-id", c.id);
-                      e.dataTransfer.setData("text/task-status", c.status);
-                    }}
                   />
                 ))}
                 {status === "done" && archivedCount ? (

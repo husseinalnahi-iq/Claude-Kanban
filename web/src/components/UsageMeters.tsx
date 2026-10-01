@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import type { Task, UsageLimit } from "../../../server/src/types.ts";
 import { api } from "../lib/api.ts";
-import { useWs } from "../lib/ws.ts";
+import { useWs, useWsReconnect } from "../lib/ws.ts";
 import { ago, clock, until } from "../lib/format.ts";
 import { navigate } from "../lib/router.ts";
 import { useProviderUsage } from "../lib/providerUsage.ts";
 import { ProviderUsageCard } from "./ProviderUsage.tsx";
+import { useEscape } from "./ui.tsx";
 
 const LABELS: Record<string, string> = {
   five_hour: "5-hour window",
@@ -57,10 +58,12 @@ export function UsageMeters() {
   const outNow = (others.rows ?? []).filter((u) => u.out);
 
   const loadPaused = () => void api.pausedTasks().then(setPaused, () => {});
-  useEffect(() => {
+  const load = () => {
     void api.limits().then(setLimits, () => {});
     loadPaused();
-  }, []);
+  };
+  useEffect(load, []);
+  useWsReconnect(load);
   useWs((m) => {
     if (m.type === "limits.updated") setLimits(m.limits);
     if (m.type === "task.updated" && (m.task.status === "paused" || paused.some((p) => p.id === m.task.id))) loadPaused();
@@ -68,14 +71,10 @@ export function UsageMeters() {
   useEffect(() => {
     if (!open) return;
     const close = (e: MouseEvent) => !box.current?.contains(e.target as Node) && setOpen(false);
-    const esc = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
     window.addEventListener("mousedown", close);
-    window.addEventListener("keydown", esc);
-    return () => {
-      window.removeEventListener("mousedown", close);
-      window.removeEventListener("keydown", esc);
-    };
+    return () => window.removeEventListener("mousedown", close);
   }, [open]);
+  useEscape(() => setOpen(false), open);
 
   const shown = limits.filter((l) => label(l.type)).sort((a, b) => rank(a.type) - rank(b.type));
   const blocked = shown.some((l) => l.status === "rejected");

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { pageZoom } from "../lib/view.ts";
 import { layout } from "../../../server/src/engine/graph.ts";
 import type { Priority, TaskStatus, TaskType } from "../../../server/src/types.ts";
 import { PRIORITY_META, STATUS_META, TYPE_META } from "../lib/format.ts";
@@ -69,7 +70,9 @@ export function DepGraph({ tasks, editable = true }: { tasks: GraphCard[]; edita
     if (!drag) return;
     const move = (e: MouseEvent) => {
       const box = inner.current?.getBoundingClientRect();
-      if (box) setDrag((d) => (d ? { ...d, x: e.clientX - box.left, y: e.clientY - box.top } : d));
+      // Screen pixels into the graph's own (zoomed) pixels, or the drag line trails the pointer at 125%.
+      const z = pageZoom();
+      if (box) setDrag((d) => (d ? { ...d, x: (e.clientX - box.left) / z, y: (e.clientY - box.top) / z } : d));
     };
     const up = () => {
       setDrag((d) => {
@@ -120,7 +123,7 @@ export function DepGraph({ tasks, editable = true }: { tasks: GraphCard[]; edita
       {err ? (
         <div className="mx-6 mb-2 flex items-center justify-between rounded-md border border-rust/40 bg-rust/10 px-3 py-2 text-[12.5px] text-rust">
           {err}
-          <button className="cursor-pointer text-rust/70 hover:text-rust" onClick={() => setErr(null)}>×</button>
+          <button className="cursor-pointer text-rust/70 hover:text-rust" onClick={() => setErr(null)} aria-label="Dismiss">×</button>
         </div>
       ) : null}
       <div className="min-h-0 flex-1 overflow-auto px-6 pb-6">
@@ -206,8 +209,11 @@ export function DepGraph({ tasks, editable = true }: { tasks: GraphCard[]; edita
                 onMouseEnter={() => setOver(task.id)}
                 onMouseLeave={() => setOver((o) => (o === task.id ? null : o))}
                 onClick={() => !drag && navigate({ taskId: task.id })}
+                role="link"
+                tabIndex={0}
+                onKeyDown={(e) => e.key === "Enter" && navigate({ taskId: task.id })}
                 style={{ left: x0(col), top: y0(row), width: W, height: H }}
-                className={`group absolute cursor-pointer rounded-lg border bg-ink-850 px-2.5 py-2 transition-colors hover:border-ink-500 ${
+                className={`group absolute cursor-pointer rounded-lg border bg-ink-850 px-2.5 py-2 transition-colors hover:border-ink-500 focus-visible:border-amber focus-visible:outline-none ${
                   isTarget ? "border-amber bg-amber/10" : task.status === "approval" ? "border-rose/60" : g ? "border-dashed border-ink-600" : "border-ink-700"
                 } ${blocked ? "opacity-70" : ""}`}
                 title={blocked ? "Waiting on another task" : task.title}
@@ -231,7 +237,8 @@ export function DepGraph({ tasks, editable = true }: { tasks: GraphCard[]; edita
                     onMouseDown={(e) => {
                       e.stopPropagation();
                       const box = inner.current?.getBoundingClientRect();
-                      setDrag({ from: task.id, x: e.clientX - (box?.left ?? 0), y: e.clientY - (box?.top ?? 0) });
+                      const z = pageZoom();
+                      setDrag({ from: task.id, x: (e.clientX - (box?.left ?? 0)) / z, y: (e.clientY - (box?.top ?? 0)) / z });
                     }}
                     onClick={(e) => e.stopPropagation()}
                     title="Drag onto another task to make it wait for this one"

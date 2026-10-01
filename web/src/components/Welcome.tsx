@@ -1,11 +1,11 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { navigate } from "../lib/router.ts";
 import { closeWelcome, forecast } from "../lib/welcome.ts";
 import { ALL_FEATURES, HEADLINES } from "./tour/features.ts";
 import { DodgeButton } from "./tour/DodgeButton.tsx";
 import { MiniBoard } from "./tour/MiniBoard.tsx";
 import { TourStyles, tint, useDisplayFont } from "./tour/TourStyles.tsx";
-import { Button } from "./ui.tsx";
+import { Button, useEscape } from "./ui.tsx";
 
 /**
  * What a first-time user sees: the six things that make the board worth using, a demo card walking
@@ -16,11 +16,7 @@ export function Welcome({ hasProjects, onAddProject }: { hasProjects: boolean; o
   useDisplayFont();
   const [line] = useState(forecast);
 
-  useEffect(() => {
-    const k = (e: KeyboardEvent) => e.key === "Escape" && closeWelcome();
-    window.addEventListener("keydown", k);
-    return () => window.removeEventListener("keydown", k);
-  }, []);
+  useEscape(closeWelcome);
 
   const go = (then: () => void) => {
     closeWelcome();
@@ -69,8 +65,8 @@ export function Welcome({ hasProjects, onAddProject }: { hasProjects: boolean; o
               Your Claude, <em className="text-amber">running a whole board.</em>
             </h1>
             <p className="mt-3 max-w-[640px] text-[14.5px] leading-relaxed text-ink-300">
-              Write a card and walk away. Claude plans it, codes it, looks at the result in a browser, and asks before
-              anything risky. You approve what lands.
+              Write a card and walk away. Claude plans it, codes it, looks at the result in a browser, makes any picture it
+              needs, and asks before anything risky. You approve what lands.
             </p>
             <div className="mt-3 inline-flex items-center rounded-full border border-ink-700 bg-ink-950/60 px-3 py-1 text-[12px] text-ink-300">{line}</div>
           </section>

@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState, type ComponentType } from "react";
 import { api } from "./lib/api.ts";
 import { navigate, useRoute, type View } from "./lib/router.ts";
 import { useAppData } from "./lib/store.tsx";
-import { useWs, useWsConnected } from "./lib/ws.ts";
+import { useWs, useWsConnected, useWsReconnect } from "./lib/ws.ts";
 import { applyTheme, getViewPrefs, setViewPrefs, useViewPrefs, ZOOMS } from "./lib/view.ts";
 import { seedAlerts, watchAlerts } from "./lib/alerts.ts";
 import { armSounds } from "./lib/sounds.ts";
@@ -18,18 +18,35 @@ import { Board } from "./views/Board.tsx";
 import { TaskDrawer } from "./views/TaskDrawer.tsx";
 import { Roadmap } from "./views/Roadmap.tsx";
 import { Approvals } from "./views/Approvals.tsx";
-import { Dashboard } from "./views/Dashboard.tsx";
 import { Sessions } from "./views/Sessions.tsx";
 import { Skills } from "./views/Skills.tsx";
-import { Settings } from "./views/Settings.tsx";
-import { Tour } from "./views/Tour.tsx";
 import { Welcome } from "./components/Welcome.tsx";
 import { closeWelcome, useWelcomeOpen } from "./lib/welcome.ts";
-import { Setup, useSetupCount } from "./views/Setup.tsx";
+import { useSetupCount } from "./lib/setupCount.ts";
 import { ChatPanel } from "./components/chat/ChatPanel.tsx";
-import { TerminalDock } from "./components/TerminalDock.tsx";
 import { ErrorBoundary, StaleServerBanner } from "./components/ErrorBoundary.tsx";
 import { Button, Empty } from "./components/ui.tsx";
+
+/**
+ * Fetched when first shown, not with the page: the screens you may never open this session, and the
+ * terminal, whose emulator alone was a large share of the one file the board used to load.
+ * A rebuild replaces these files, so a page opened before it can no longer fetch them: say that in
+ * plain words instead of the browser's "failed to fetch dynamically imported module".
+ */
+function later<T extends ComponentType<any>>(load: () => Promise<{ default: T }>) {
+  return lazy<T>(async () => {
+    try {
+      return await load();
+    } catch {
+      throw new Error("The board was updated after this page was opened, so this screen has to be fetched again. Reload the page.");
+    }
+  });
+}
+const Dashboard = later(() => import("./views/Dashboard.tsx").then((m) => ({ default: m.Dashboard })));
+const Settings = later(() => import("./views/Settings.tsx").then((m) => ({ default: m.Settings })));
+const Tour = later(() => import("./views/Tour.tsx").then((m) => ({ default: m.Tour })));
+const Setup = later(() => import("./views/Setup.tsx").then((m) => ({ default: m.Setup })));
+const TerminalDock = later(() => import("./components/TerminalDock.tsx").then((m) => ({ default: m.TerminalDock })));
 
 const NAV: { view: View; label: string; key: string }[] = [
   { view: "board", label: "Board", key: "1" },
@@ -132,6 +149,8 @@ export function App() {
     void seedAlerts();
   }, []);
   useWs(watchAlerts);
+  // What changed while the socket was down is learned again, quietly: old news is not announced.
+  useWsReconnect(() => void seedAlerts());
 
   // A run waiting on you, or anything you missed, shows on the browser tab itself.
   useTabBadge(pending.length);
@@ -203,7 +222,7 @@ export function App() {
               ) : n.view === "approvals" && pending.length ? (
                 <span className="pulse-rose ml-1.5 rounded-full bg-rose px-1.5 font-mono text-[10px] text-ink-950">{pending.length}</span>
               ) : (
-                <span className="ml-1.5 font-mono text-[9.5px] text-ink-600">{n.key}</span>
+                <span className="ml-1.5 hidden font-mono text-[9.5px] text-ink-600 2xl:inline">{n.key}</span>
               )}
               {route.view === n.view ? <span className="absolute inset-x-2 -bottom-px h-0.5 rounded bg-amber" /> : null}
             </button>
@@ -244,6 +263,7 @@ export function App() {
         <StaleServerBanner />
         <main className="min-h-0 flex-1 overflow-hidden">
           <ErrorBoundary key={`${route.view}:${route.projectId ?? ""}`}>
+          <Suspense fallback={<div className="p-6 text-[13px] text-ink-400">Loading…</div>}>
           {needsProject && !project ? (
             <div className="mx-auto mt-24 max-w-md space-y-4 text-center">
               <Empty>
@@ -270,10 +290,14 @@ export function App() {
           ) : route.view === "tour" ? (
             <Tour hasProjects={projects.length > 0} onAddProject={() => setAdding(true)} />
           ) : null}
+          </Suspense>
           </ErrorBoundary>
         </main>
         <ErrorBoundary onClose={() => setTerminal(false)}>
-          <TerminalDock project={project} open={terminal} onClose={() => setTerminal(false)} />
+          {/* Mounted from the start, as before: it has to be listening when a task asks for "Terminal here". */}
+          <Suspense fallback={null}>
+            <TerminalDock project={project} open={terminal} onClose={() => setTerminal(false)} />
+          </Suspense>
         </ErrorBoundary>
       </div>
 

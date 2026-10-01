@@ -26,6 +26,7 @@ import { analyticsRoutes } from "./routes/analytics.ts";
 import { attachmentRoutes } from "./routes/attachments.ts";
 import { claudeMdRoutes } from "./routes/claudeMd.ts";
 import { providerRoutes } from "./routes/providers.ts";
+import { imageRoutes } from "./routes/images.ts";
 import { searchRoutes } from "./routes/search.ts";
 import { wsRoutes } from "./routes/ws.ts";
 import { scheduleRoutes } from "./routes/schedules.ts";
@@ -34,6 +35,7 @@ import { ChatService } from "./engine/chat.ts";
 import { chatRoutes } from "./routes/chats.ts";
 import { SpecWriter } from "./engine/specWriter.ts";
 import { specRoutes } from "./routes/specs.ts";
+import { recordRoutes } from "./routes/record.ts";
 import { TerminalManager } from "./terminal.ts";
 import { terminalRoutes } from "./routes/terminals.ts";
 import { browserLiveRoutes } from "./routes/browserLive.ts";
@@ -77,6 +79,14 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     if (origin !== undefined && !origins.has(origin)) return reply.code(403).send({ error: "Cross-origin request refused." });
   });
 
+  // The page shows text written by models, and the web side strips what could act from it. This is
+  // the second lock: even if something slips through, the browser loads no picture from another
+  // site (a way to send data out without an approval card) and posts no form to one. Only these two
+  // are named, so scripts, styles, fonts and the websocket are left exactly as they were.
+  app.addHook("onSend", async (_req, reply) => {
+    reply.header("content-security-policy", "img-src 'self' data: blob:; form-action 'self'");
+  });
+
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof ZodError) return reply.code(400).send({ error: "Invalid request", issues: err.issues });
     if (err instanceof PolicyError || err instanceof ConflictError || err instanceof ProviderError) return reply.code(409).send({ error: err.message });
@@ -100,6 +110,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     await milestoneRoutes(api, deps);
     await skillRoutes(api, deps);
     await settingsRoutes(api, deps);
+    await imageRoutes(api, deps);
     await healthRoutes(api, deps);
     await setupRoutes(api, setup);
     await systemRoutes(api, deps);
@@ -113,6 +124,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     await scheduleRoutes(api, { ...deps, scheduler });
     await chatRoutes(api, { ...deps, chat });
     await specRoutes(api, { ...deps, specs });
+    await recordRoutes(api, deps);
   }, { prefix: "/api" });
   await wsRoutes(app, deps);
   const terminals = deps.terminals ?? new TerminalManager();

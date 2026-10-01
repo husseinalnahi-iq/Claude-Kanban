@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -64,6 +64,16 @@ export function bundledClaude(): string | null {
     // SDK not resolvable: fall through to a global install.
   }
   return null;
+}
+
+/** The installed Agent SDK's version. It doesn't export ./package.json, so read it off the resolved entry point. */
+export function sdkVersion(): string {
+  try {
+    const pkg = join(dirname(require.resolve("@anthropic-ai/claude-agent-sdk")), "package.json");
+    return (JSON.parse(readFileSync(pkg, "utf8")) as { version: string }).version;
+  } catch {
+    return "unknown";
+  }
 }
 
 function run(command: string, args: string[], opts: { timeoutMs?: number } = {}): Promise<RunResult> {

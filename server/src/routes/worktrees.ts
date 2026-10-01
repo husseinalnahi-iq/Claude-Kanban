@@ -27,7 +27,7 @@ export async function worktreeRoutes(app: FastifyInstance, { repo, runner }: App
       });
   };
 
-  app.get("/worktrees", async (req) => survey((req.query as { project: string }).project));
+  app.get("/worktrees", async (req) => survey(z.object({ project: z.string().min(1) }).parse(req.query).project));
 
   app.post("/worktrees/prune", async (req) => {
     const body = z.object({ project_id: z.string() }).parse(req.body);

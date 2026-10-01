@@ -35,7 +35,9 @@ export function QuestionCard({ a, focused = false }: { a: Approval; focused?: bo
         const n = Number(e.key);
         const i = qs.findIndex((_, j) => !answerOf(j));
         if (n >= 1 && n <= 4 && qs[i === -1 ? 0 : i]?.options[n - 1]) toggle(i === -1 ? 0 : i, qs[i === -1 ? 0 : i].options[n - 1].label);
-        if (e.key === "Enter" && ready) void send();
+        // Not from a button: there Enter presses that button. Sending as well posted the answer as it
+        // stood before the press — Tab to another option, Enter, and the old choice went to Claude.
+        if (e.key === "Enter" && ready && !(e.target instanceof HTMLButtonElement)) void send();
       }}
     >
       <div className="mb-3 flex items-center gap-2">

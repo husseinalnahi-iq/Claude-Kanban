@@ -15,6 +15,11 @@ export interface RunQueueOptions {
    * Used to hold Claude work while a usage-limit window is open.
    */
   canStart?: (item: QueueItem) => boolean;
+  /**
+   * Called before and after each pump that has items to look at. The caps and the veto are asked once
+   * per waiting item, so an owner whose answers come from a database reads them once here instead.
+   */
+  onPump?: (phase: "begin" | "end") => void;
   /** Runs the task; the slot is held until the promise settles. */
   start: (item: QueueItem) => Promise<void>;
   onError?: (item: QueueItem, err: unknown) => void;
@@ -73,24 +78,30 @@ export class RunQueue {
 
   /** Public so the runner can retry held items when a usage-limit window reopens. */
   pump(): void {
-    for (let i = 0; i < this.waiting.length; ) {
-      const item = this.waiting[i];
-      if (!this.fits(item) || this.opts.canStart?.(item) === false) {
-        i++;
-        continue;
+    if (!this.waiting.length) return;
+    this.opts.onPump?.("begin");
+    try {
+      for (let i = 0; i < this.waiting.length; ) {
+        const item = this.waiting[i];
+        if (!this.fits(item) || this.opts.canStart?.(item) === false) {
+          i++;
+          continue;
+        }
+        this.waiting.splice(i, 1);
+        this.running.set(item.taskId, item);
+        let p: Promise<void>;
+        try {
+          p = this.opts.start(item);
+        } catch (err) {
+          p = Promise.reject(err);
+        }
+        p.catch((err) => this.opts.onError?.(item, err)).finally(() => {
+          this.running.delete(item.taskId);
+          this.pump();
+        });
       }
-      this.waiting.splice(i, 1);
-      this.running.set(item.taskId, item);
-      let p: Promise<void>;
-      try {
-        p = this.opts.start(item);
-      } catch (err) {
-        p = Promise.reject(err);
-      }
-      p.catch((err) => this.opts.onError?.(item, err)).finally(() => {
-        this.running.delete(item.taskId);
-        this.pump();
-      });
+    } finally {
+      this.opts.onPump?.("end");
     }
   }
 

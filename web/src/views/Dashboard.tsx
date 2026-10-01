@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Analytics } from "../../../server/src/routes/analytics.ts";
 import { api, type ProjectWithGit } from "../lib/api.ts";
-import { useWs } from "../lib/ws.ts";
+import { useWs, useWsReconnect } from "../lib/ws.ts";
 import { navigate } from "../lib/router.ts";
 import { cost, STATUS_META } from "../lib/format.ts";
 import { BarRows, CATEGORICAL, Donut, LineChart, MONEY, Panel, PRIORITY_RAMP, SERIES_A, SERIES_B, Stat, TableToggle } from "../components/charts.tsx";
@@ -17,14 +17,23 @@ export function Dashboard({ project }: { project: ProjectWithGit | null }) {
     void api.analytics(project?.id, days).then(setData, () => setData(null));
   }, [project?.id, days]);
   useEffect(load, [load]);
+  useWsReconnect(load);
+  // A stage that starts or ends sends several task updates within a moment, and each one used to
+  // recount every chart. They are gathered into one reload, half a second after the last of them.
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const soon = () => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(load, 500);
+  };
+  useEffect(() => () => void (timer.current && clearTimeout(timer.current)), []);
   useWs((m) => {
     // A task update in another project used to refetch this whole dashboard. Run and delete events
     // carry no project, so those still reload — they are rare, one per finished stage.
     if (m.type === "task.updated") {
-      if (!project || m.task.project_id === project.id) load();
+      if (!project || m.task.project_id === project.id) soon();
       return;
     }
-    if (m.type === "run.finished" || m.type === "task.deleted") load();
+    if (m.type === "run.finished" || m.type === "task.deleted") soon();
   });
 
   if (!data) return <div className="p-6 text-[13px] text-ink-400">Loading…</div>;
@@ -113,6 +122,46 @@ export function Dashboard({ project }: { project: ProjectWithGit | null }) {
               <div className="py-6 text-center text-[12px] text-ink-500">No runs yet.</div>
             )}
           </Panel>
+
+          {data.spend ? (
+            <Panel
+              title="Where the money goes"
+              hint="by job, and what the runs' tokens were"
+              right={<TableToggle headers={["Job", "Cost"]} rows={data.spend.byJob.map((j) => [j.key, `$${j.cost.toFixed(3)}`])} />}
+            >
+              {data.spend.byJob.length ? (
+                <div className="space-y-1.5">
+                  {data.spend.byJob.map((j) => {
+                    const max = Math.max(...data.spend.byJob.map((x) => x.cost), 0.0001);
+                    return (
+                      <div key={j.key} className="flex items-center gap-2" title={`${j.key}: ${cost(j.cost)}`}>
+                        <span className="w-44 shrink-0 truncate text-[11.5px] text-ink-300">{j.key}</span>
+                        <span className="h-3.5 flex-1 overflow-hidden rounded-sm bg-ink-850">
+                          <span className="block h-full rounded-r-[4px]" style={{ width: `${Math.max(2, (j.cost / max) * 100)}%`, background: MONEY }} />
+                        </span>
+                        <span className="w-14 text-right font-mono text-[11.5px] tabular-nums text-ink-300">{cost(j.cost)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="py-6 text-center text-[12px] text-ink-500">No spend yet.</div>
+              )}
+              {(() => {
+                const t = data.spend.tokens;
+                const all = t.output + t.fresh + t.cacheRead + t.cacheWrite;
+                if (!all) return null;
+                const pct = (n: number) => `${Math.round((n / all) * 100)}%`;
+                // A long session is mostly re-reading what it already has: cheap per token, but the bulk of the count.
+                return (
+                  <div className="mt-3 border-t border-ink-800 pt-2 text-[11.5px] text-ink-400">
+                    Tokens in runs: <span className="text-ink-200">{pct(t.cacheRead)}</span> re-read from cache (cheapest), {pct(t.cacheWrite)} written to
+                    cache, {pct(t.fresh)} new input, <span className="text-ink-200">{pct(t.output)}</span> written by the model (dearest per token).
+                  </div>
+                );
+              })()}
+            </Panel>
+          ) : null}
 
           {data.failuresByStage.length ? (
             <Panel title="Where runs fail" hint="failed runs by stage">

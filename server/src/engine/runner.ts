@@ -1,7 +1,7 @@
 import {
   query, type CanUseTool, type HookCallbackMatcher, type Options, type PermissionResult, type SDKMessage, type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, extname, isAbsolute, join } from "node:path";
 import * as gitOps from "../git/worktree.ts";
@@ -9,7 +9,7 @@ import { DEFAULT_VISION_MODEL, nowIso } from "../db.ts";
 import type { Repo } from "../repo.ts";
 import type { Bus } from "../bus.ts";
 import type {
-  Approval, ApprovalDecision, Blocked, Project, Provider, ProviderOut, ProviderUsage, Run, SessionTools, Stage, StageName, Task, TaskStatus, TierRef, UsageLimit, UsageTotals,
+  Approval, ApprovalDecision, Blocked, Project, Provider, ProviderOut, ProviderUsage, Run, SessionTools, Settings, Stage, StageName, Task, TaskStatus, TierRef, UsageLimit, UsageTotals,
 } from "../types.ts";
 
 type RateLimitInfo = {
@@ -32,6 +32,7 @@ import { applyOnboardingResult } from "./onboarding.ts";
 import { buildCriticPrompt, buildRevisionPrompt, extractRevisedPlan, parseCritique } from "./debate.ts";
 import { BROWSER_SERVER, PLAYWRIGHT_PLUGIN_TOOLS, browserCaption, browserDecision, browserServer } from "./browser.ts";
 import { BrowserWatch } from "./browserWatch.ts";
+import { CLOUDFLARE_TOKEN_REF, IMAGE_PREFIX, IMAGE_SERVER, POLLINATIONS_KEY_REF, claudeCodeCommand, createImageServer, generateImage, imageReadiness, type FetchFn, type ImageConfig, type ImageStatus } from "./images.ts";
 import { scanSkills } from "../skills.ts";
 import { freePort, readWorktreeInclude, runProjectCommand, seedWorktree, stopListeners } from "../git/bootstrap.ts";
 import { NOTES_IN_PROMPT } from "../repo.ts";
@@ -46,7 +47,10 @@ import type { Resolved, StageInvocation } from "./providers/types.ts";
 import { saveAttachment } from "../routes/attachments.ts";
 import { pickBrowser, realProbe } from "../setup/probe.ts";
 import { ANTHROPIC_PROVIDER_ID, ARTIFACT_EXTS, EFFORTS, usesWorktree, MAX_ATTACHMENT_BYTES, attachmentKind, supportsFastMode, type ClaudeModelsResult, type FastModeStatus } from "../types.ts";
-import { fromSdk, type SdkModelInfo } from "./claudeModels.ts";
+import { claudeUpgrades, fromSdk, type SdkModelInfo } from "./claudeModels.ts";
+import { BROWSER_AGENT, helperAgents, usesHelper } from "./helpers.ts";
+import { applyChecklistTool } from "./checklist.ts";
+import { outcomeLine } from "./record.ts";
 
 export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => AsyncIterable<SDKMessage>;
 
@@ -68,6 +72,8 @@ export interface RunnerDeps {
   catalog?: ModelCatalog;
   /** What each provider says is left of its plan. Defaults to one that asks the real providers. */
   quota?: QuotaReader;
+  /** How the image tool reaches its provider. Defaults to the real network (tests inject one). */
+  imageFetch?: FetchFn;
 }
 
 interface StartOpts {
@@ -89,6 +95,48 @@ interface Active {
 /** A pipeline from queue start to its last stage; `stopped` is honoured between stages too. */
 interface PipelineCtl {
   stopped: boolean;
+}
+
+/** What one session is started with: a pipeline stage, a debate turn, or a chat turn. */
+interface StageArgs {
+  task: Task;
+  project: Project;
+  run: Run;
+  cwd: string;
+  prompt: string;
+  ctl: PipelineCtl;
+  resume?: string;
+  stageStatus: TaskStatus;
+  disallowedTools?: string[];
+  accumulate?: boolean;
+  /** Record the prompt as a `user:prompt` event. Defaults to "unless accumulating" (chat writes its own). */
+  promptEvent?: boolean;
+  /** When set, the model can't end its turn while this command fails. */
+  verifyCommand?: string | null;
+}
+
+interface StageOutcome {
+  ok: boolean;
+  error: string | null;
+  providerId: string;
+  budgetStop: boolean;
+  turnLimit: boolean;
+  /** The verify command passed when the session last tried to end, and nothing ran after it. */
+  verifiedAtStop: boolean;
+}
+
+/** The session a failure came from — when it started, and on which model — to tell whether a usage window stopped it. */
+interface LimitContext {
+  since: number;
+  model: string;
+}
+
+/** What artifact capture remembers across one run's messages. */
+interface CaptureState {
+  /** Room left under MAX_ARTIFACTS_PER_RUN. */
+  left: number;
+  /** tool_use id → the tool, and for a write of an output file, where it goes. */
+  tools: Map<string, { name: string; file?: string }>;
 }
 
 const STAGE_STATUS: Record<StageName, TaskStatus> = { plan: "planning", code: "running", review: "review", custom: "running" };
@@ -131,6 +179,46 @@ const VISION_TIMEOUT_MS = 3 * 60_000;
 const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 /** Never keep a copy of something that is not the run's own output. */
 const IGNORED_DIRS = /(^|[\\/])(node_modules|\.git|\.kanban|dist|build|\.next|coverage|vendor)([\\/]|$)/i;
+
+/** Where a write tool is about to put an output file — a report, a chart — or undefined for source, vendored files and other tools. */
+function artifactPath(block: Record<string, unknown>, cwd: string): string | undefined {
+  if (typeof block.name !== "string" || !WRITE_TOOLS.has(block.name)) return undefined;
+  const file = (block.input as { file_path?: unknown } | undefined)?.file_path;
+  if (typeof file !== "string" || !ARTIFACT_EXTS.includes(extname(file).toLowerCase())) return undefined;
+  const abs = isAbsolute(file) ? file : join(cwd, file);
+  return IGNORED_DIRS.test(abs) ? undefined : abs;
+}
+
+/**
+ * A state folder of the task's own, handed to its sessions and to the setup and verify commands as
+ * KANBAN_STATE_DIR. A task that works on this very board and starts it inside its worktree would
+ * otherwise open the live board's database — the default folder, or the one this process inherited.
+ */
+export function taskStateDir(taskId: string): string {
+  return join(tmpdir(), "claude-kanban-task-state", taskId);
+}
+
+/**
+ * Says a worktree's setup has not finished. Beside the worktree rather than in it: inside, the
+ * board's own commit after a stage would pick it up.
+ */
+function setupMarker(worktreePath: string): string {
+  return `${worktreePath}.setup-pending`;
+}
+
+/** How often a run's growing context is written and broadcast while it streams. */
+const CONTEXT_UPDATE_MS = 1000;
+
+/**
+ * Does this usage window hold back a stage on `model`? The five-hour and weekly windows cover the
+ * whole account; `seven_day_opus` or `seven_day_model:Opus 5` only that family. A window the board
+ * cannot place is treated as account-wide, which is what it was before windows were told apart.
+ */
+export function limitCovers(type: string, model: string): boolean {
+  const scope = /^seven_day_(?:model:)?(.+)$/i.exec(type)?.[1].toLowerCase();
+  const family = scope && ["opus", "sonnet", "haiku", "fable"].find((f) => scope.includes(f));
+  return !family || model.toLowerCase().includes(family);
+}
 
 /** Image blocks inside a message: directly, or nested in a tool_result's content. */
 function imageBlocks(block: Record<string, unknown>): { media_type: string; data: string }[] {
@@ -196,6 +284,19 @@ export function sizedPipeline(sizing: Sizing | null, tiers: { cheap: TierRef; ba
 }
 
 export type Verdict = "APPROVE" | "CHANGES_NEEDED" | "BLOCKED";
+
+/** Files a person sees when they change: pages, styles, components. */
+const VISIBLE_FILE = /\.(html?|css|scss|sass|less|jsx|tsx|vue|svelte|astro)$/i;
+
+/**
+ * A review that passed a visible change without saying whether it looked at it. The review prompt
+ * asks for a `Browser: checked …` / `Browser: not needed …` line; a Sonnet review once approved a
+ * game it never opened, on the coding stage's word alone (D275).
+ */
+export function reviewSkippedBrowser(result: string | null | undefined, changed: string[]): boolean {
+  if (!changed.some((f) => VISIBLE_FILE.test(f))) return false;
+  return !/^\s*\**browser\**\s*:\s*\**\s*(checked|not needed)/im.test(result ?? "");
+}
 
 /**
  * Reads the `VERDICT: …` line a review stage is asked to end with. When a report carries more than
@@ -284,6 +385,7 @@ export class TaskRunner {
   private git: typeof gitOps;
   private logDir?: string;
   readonly secrets: SecretStore;
+  private imageFetch?: FetchFn;
   readonly providers: ProviderRegistry;
   readonly catalog: ModelCatalog;
   readonly quota: QuotaReader;
@@ -322,22 +424,34 @@ export class TaskRunner {
     this.git = deps.git ?? gitOps;
     this.logDir = deps.logDir;
     this.secrets = deps.secrets ?? new SecretStore(":memory:");
+    this.imageFetch = deps.imageFetch;
     this.providers = new ProviderRegistry(deps.repo, this.secrets);
     this.catalog = deps.catalog ?? new ModelCatalog();
     this.quota = deps.quota ?? new QuotaReader();
     setCliSecrets(this.secrets);
     this.queue = new RunQueue({
       // Serial mode overrides the number without overwriting it, so turning it off restores it.
-      globalCap: () => (this.repo.getSettings().serial ? 1 : this.repo.getSettings().globalCap),
-      projectCap: (pid) => this.repo.getProject(pid)?.policy.maxConcurrent || this.repo.getSettings().defaultMaxConcurrent,
-      forcedCap: () => this.repo.getSettings().maxForcedParallel,
+      globalCap: () => (this.queueSettings().serial ? 1 : this.queueSettings().globalCap),
+      projectCap: (pid) => this.repo.getProject(pid)?.policy.maxConcurrent || this.queueSettings().defaultMaxConcurrent,
+      forcedCap: () => this.queueSettings().maxForcedParallel,
       canStart: (item) => this.mayStartNow(item.taskId),
+      onPump: (phase) => (this.pumpView = phase === "begin" ? { settings: this.repo.getSettings() } : null),
       start: (item) => this.runPipeline(item.taskId),
       onError: (item, err) => this.failTask(item.taskId, err instanceof Error ? err.message : String(err)),
     });
   }
 
   // ---------------------------------------------------------------- helpers
+
+  /**
+   * What the queue asks about every waiting item, read once per pump: with fifty tasks waiting, the
+   * settings and the usage gate were otherwise read fifty times each. Null outside a pump.
+   */
+  private pumpView: { settings: Settings; limitedUntil?: number | null } | null = null;
+
+  private queueSettings(): Settings {
+    return this.pumpView?.settings ?? this.repo.getSettings();
+  }
 
   isBusy(taskId: string): boolean {
     return (
@@ -405,6 +519,16 @@ export class TaskRunner {
     this.sentBack.delete(taskId);
     this.checkoutStamps.delete(taskId);
     this.handovers.delete(taskId);
+    this.dropTaskState(taskId);
+  }
+
+  /** The task's scratch state folder is only of use while its work is; a locked file is left to the OS. */
+  private dropTaskState(taskId: string): void {
+    try {
+      rmSync(taskStateDir(taskId), { recursive: true, force: true });
+    } catch {
+      // still open in something the task started; it is in the temp folder either way
+    }
   }
 
   /** Your answer to a `board_ask` question: kept on the card and handed to the next stage as a message (D203). */
@@ -513,7 +637,12 @@ export class TaskRunner {
 
   private async ensureCwd(task: Task, project: Project): Promise<string> {
     if (!usesWorktree(task)) return project.path;
-    if (task.worktree_path && existsSync(task.worktree_path)) return task.worktree_path;
+    if (task.worktree_path && existsSync(task.worktree_path)) {
+      // Its setup never finished — the command failed, or the board was closed part-way. A retry that
+      // skipped it would start the stage in a checkout with nothing installed.
+      if (existsSync(setupMarker(task.worktree_path))) await this.prepareWorkspace(task, project, task.worktree_path);
+      return task.worktree_path;
+    }
     if (!(await this.git.isGitRepo(project.path))) {
       // isGitRepo cannot tell "no git" from "not a repository"; the fix for each is different.
       const installed = (await realProbe.run("git", ["--version"])).code === 0;
@@ -522,7 +651,7 @@ export class TaskRunner {
       );
     }
     // A checkout of a big repository takes a minute — measured 61 s for 40k files, and 47 s outside
-    // CloudSync, so it is the size, not the sync. Say so instead of sitting silently in Queued (D192).
+    // OneDrive, so it is the size, not the sync. Say so instead of sitting silently in Queued (D192).
     this.setTask(task.id, { summary: "Preparing its worktree — a fresh checkout of the repository, up to a minute on a big one" });
     const wt = await this.git.addWorktree(project.path, task.id);
     // baseSha is null when an existing branch was re-attached: keep the stored base so the diff stays right.
@@ -542,6 +671,16 @@ export class TaskRunner {
       this.log(task.id, `${text}\n`);
       this.pendingNotes.set(task.id, [...(this.pendingNotes.get(task.id) ?? []), text]);
     };
+    // Left behind if anything below fails, so the next attempt prepares again (see ensureCwd).
+    const marker = setupMarker(cwd);
+    const tracked = Boolean(patterns.length || project.env.setupCommand);
+    if (tracked) {
+      try {
+        writeFileSync(marker, "");
+      } catch {
+        // Without the marker a retry skips setup, as it always did; not a reason to stop the task.
+      }
+    }
     if (patterns.length) {
       const report = await seedWorktree(project.path, cwd, patterns);
       const parts = [`Copied ${report.copied.length} gitignored file(s) into the worktree`];
@@ -552,9 +691,30 @@ export class TaskRunner {
     }
     if (project.env.setupCommand) {
       const port = await this.portFor(task.id);
-      const res = await runProjectCommand(project.env.setupCommand, cwd, { env: { KANBAN_PORT: String(port), KANBAN_PROJECT_PATH: project.path } });
+      const res = await runProjectCommand(project.env.setupCommand, cwd, {
+        env: { KANBAN_PORT: String(port), KANBAN_PROJECT_PATH: project.path, KANBAN_STATE_DIR: taskStateDir(task.id) },
+      });
       note(`Setup command \`${project.env.setupCommand}\` ${res.ok ? "succeeded" : `FAILED (exit ${res.code})`}\n${res.output.slice(-2000)}`);
       if (!res.ok) throw new PolicyError(`The project's setup command failed in the new worktree:\n${res.output.slice(-1500)}`);
+    }
+    if (tracked) {
+      try {
+        rmSync(marker, { force: true });
+      } catch {
+        // Left in place, the next start prepares once more: slower, never wrong.
+      }
+    }
+  }
+
+  /** What the board keeps for a task's workspace outside the workspace itself, once that is gone. */
+  private forgetWorkspace(task: Task): void {
+    this.ports.delete(task.id);
+    this.dropTaskState(task.id);
+    if (!task.worktree_path) return;
+    try {
+      rmSync(setupMarker(task.worktree_path), { force: true });
+    } catch {
+      // an empty file beside a folder that no longer exists
     }
   }
 
@@ -575,6 +735,7 @@ export class TaskRunner {
       this.startOpts.delete(taskId);
       let { task, project } = this.load(taskId);
       this.assertRunnable(task, project);
+      if (this.reraisePlanGate(task, opts.fromStage)) return;
       const cwd = await this.ensureCwd(task, project);
       if (task.mode === "supervised") await this.snapshotCheckout(taskId, cwd);
       // Reserved before the first prompt is written, so the prompt can name it.
@@ -606,6 +767,14 @@ export class TaskRunner {
           if (i === opts.fromStage) opts.resume = undefined;
         }
         const stage = this.stageAt(task, i);
+        const resume = i === opts.fromStage ? opts.resume : undefined;
+        // "Carry on where you stopped" only means something inside the session that stopped. Moved to
+        // another model there is no such session, so the stage gets its whole prompt, with the handover.
+        if (!resume) continuing = false;
+        const gated = stage.stage === "code" || stage.stage === "custom";
+        // Written before the run row exists: if this throws, no run is left behind marked "running".
+        const prompt = continuing ? CONTINUE_PROMPT : await this.stagePromptFor(task, i, project, cwd);
+        continuing = false;
         const run = this.repo.createRun({
           task_id: taskId, stage: stage.stage, stage_index: i, model: stage.model, effort: stage.effort,
           provider: stage.provider && stage.provider !== ANTHROPIC_PROVIDER_ID ? stage.provider : null,
@@ -613,16 +782,13 @@ export class TaskRunner {
         this.bus.publish({ type: "run.updated", run });
         this.setTask(taskId, { status: STAGE_STATUS[stage.stage], error: null });
 
-        const gated = stage.stage === "code" || stage.stage === "custom";
-        const prompt = continuing ? CONTINUE_PROMPT : await this.stagePromptFor(task, i, project, cwd);
-        continuing = false;
         // What stopped the last attempt is for the stage that picks up from it, not for every one after.
         this.priorBlocks.delete(taskId);
         this.handovers.delete(taskId);
         const outcome = await this.runQuery({
           task, project, run, cwd, ctl,
           prompt,
-          resume: i === opts.fromStage ? opts.resume : undefined,
+          resume,
           stageStatus: STAGE_STATUS[stage.stage],
           disallowedTools: stage.stage === "plan" ? PLAN_DISALLOWED : undefined,
           verifyCommand: gated ? project.env.verifyCommand : null,
@@ -702,7 +868,7 @@ export class TaskRunner {
         if (outcome.providerId !== ANTHROPIC_PROVIDER_ID) this.providerBack(outcome.providerId);
         // "Done" means the project's own check passes — not that the model said it was done.
         if (gated && project.env.verifyCommand) {
-          const verdict = await this.verifyWorkspace(project, task, cwd, run.id);
+          const verdict = await this.verifyWorkspace(project, task, cwd, run.id, outcome.verifiedAtStop);
           if (verdict && !verdict.ok) {
             this.verifyFailures.set(taskId, verdict.output);
             if (usesWorktree(task)) await this.commitWorktree(task, `kanban(${stage.stage}) [verify failed]: ${task.title}`);
@@ -725,12 +891,14 @@ export class TaskRunner {
           // Plan approval (D231): nothing is written until the human has read the plan.
           const plan = this.repo.getRun(run.id)?.result_md ?? "";
           if (i + 1 < task.pipeline.length && plan.trim() && this.needsPlanApproval(this.repo.getTask(taskId)!)) {
-            this.setTask(taskId, {
-              status: "approval",
-              note: "Read the plan, then approve it, edit it, or send the task back.",
-              plan_gate: { kind: "approval", stage_index: i, created_at: nowIso(), original: plan },
-            });
+            this.raisePlanGate(taskId, i, plan);
             return;
+          }
+        }
+        if (stage.stage === "review" && verdict !== "CHANGES_NEEDED" && this.repo.getSettings().browserChecks) {
+          const changed = await this.diff(taskId).then((d) => d.map((f) => f.file), () => []);
+          if (reviewSkippedBrowser(this.repo.getRun(run.id)?.result_md, changed)) {
+            this.setTask(taskId, { note: "The review did not say whether it looked at this change in a browser. Open it yourself before you approve." });
           }
         }
         // A review stage that asked for changes must not look like a pass.
@@ -770,6 +938,33 @@ export class TaskRunner {
   private needsPlanApproval(task: Task): boolean {
     if (task.live) return true;
     return task.plan_approval ?? this.repo.getSettings().planApproval;
+  }
+
+  private raisePlanGate(taskId: string, stageIndex: number, plan: string): void {
+    this.setTask(taskId, {
+      status: "approval",
+      note: "Read the plan, then approve it, edit it, or send the task back.",
+      plan_gate: { kind: "approval", stage_index: stageIndex, created_at: nowIso(), original: plan },
+    });
+  }
+
+  /**
+   * A run that starts just past the plan must not slip by the plan's approval. The gate used to be
+   * raised only in the moment after the plan stage ran, so Stop at the gate and then Retry went
+   * straight to code — on a live task too. Returns true when the task was put back at the gate.
+   */
+  private reraisePlanGate(task: Task, fromStage: number): boolean {
+    const planIndex = fromStage - 1;
+    if (planIndex < 0 || task.pipeline[planIndex]?.stage !== "plan" || !this.needsPlanApproval(task)) return false;
+    const planRun = this.latestByStage(task.id).get(planIndex);
+    const plan = planRun?.status === "success" ? planRun.result_md ?? "" : "";
+    if (!planRun || !plan.trim()) return false;
+    const events = this.repo.eventsAfter(planRun.id, 0, 20_000);
+    // The decision is an event on the plan's own run. No transcript at all means it was pruned with
+    // age: a plan that old has been acted on, and asking again would only be noise.
+    if (!events.length || events.some((e) => e.type === "plan:approved" || e.type === "debate:decision")) return false;
+    this.raisePlanGate(task.id, planIndex, plan);
+    return true;
   }
 
   /** The stage prompt, with what a tool-less model needs inlined (the diff, the file list). */
@@ -875,6 +1070,10 @@ export class TaskRunner {
   private promptCtx(task: Task, stageIndex: number, project: Project) {
     const stage = task.pipeline[stageIndex];
     const settings = this.repo.getSettings();
+    // Helpers are named Claude models: on another provider's stage the stage does the work itself.
+    const claudeStage = !stage.provider || stage.provider === ANTHROPIC_PROVIDER_ID;
+    // The model the stage really runs on (a live task's review is moved to the live review model).
+    const effective = this.stageAt(task, stageIndex);
     const parent = task.parent_id ? this.repo.getTask(task.parent_id) : undefined;
     const byStage = this.latestByStage(task.id);
     const prevRun = byStage.get(stageIndex - 1)?.status === "success" ? byStage.get(stageIndex - 1) : undefined;
@@ -904,6 +1103,7 @@ export class TaskRunner {
       previousResult: stageIndex > 0 ? prevRun?.result_md ?? null : null,
       previousStage: stageIndex > 0 ? task.pipeline[stageIndex - 1]?.stage ?? null : null,
       live: task.live,
+      imageTool: settings.imageProvider !== "off" && stage.stage !== "plan" && stage.stage !== "review",
       previousFrom: prevRun?.provider ? { provider: prevRun.provider, model: prevRun.model } : null,
       earlierResults,
       skills: task.skills,
@@ -915,7 +1115,11 @@ export class TaskRunner {
       handover: this.handovers.get(task.id) ?? null,
       verifyCommand: project.env.verifyCommand,
       browser: settings.browserChecks
-        ? { port: this.ports.get(task.id) ?? null, chrome: settings.chromeInSupervised && task.mode !== "autonomous" }
+        ? {
+            port: this.ports.get(task.id) ?? null,
+            chrome: settings.chromeInSupervised && task.mode !== "autonomous",
+            helper: claudeStage && usesHelper(settings.browserCheckModel, effective.model),
+          }
         : null,
       memory: this.repo.notes(project.id, NOTES_IN_PROMPT).map((n) => n.text),
       // Images the user attached, by absolute path: Claude reads them with the Read tool, which
@@ -992,22 +1196,35 @@ export class TaskRunner {
 
   // ---------------------------------------------------------------- one query() call
 
-  private async runQuery(a: {
-    task: Task;
-    project: Project;
-    run: Run;
-    cwd: string;
-    prompt: string;
-    ctl: PipelineCtl;
-    resume?: string;
-    stageStatus: TaskStatus;
-    disallowedTools?: string[];
-    accumulate?: boolean;
-    /** Record the prompt as a `user:prompt` event. Defaults to "unless accumulating" (chat writes its own). */
-    promptEvent?: boolean;
-    /** When set, the model can't end its turn while this command fails. */
-    verifyCommand?: string | null;
-  }): Promise<{ ok: boolean; error: string | null; providerId: string; budgetStop: boolean; turnLimit: boolean }> {
+  /**
+   * One session, start to finish. Whatever goes wrong — before the session exists as much as inside
+   * it — the run row is closed and the task is free again. A throw while setting a stage up used to
+   * leave the run "running" for good and the task busy until the board was restarted.
+   */
+  private async runQuery(a: StageArgs): Promise<StageOutcome> {
+    try {
+      return await this.streamStage(a);
+    } catch (err) {
+      const { task, run } = a;
+      if (this.active.get(task.id)?.runId === run.id) this.active.delete(task.id);
+      this.browserWatch.end(task.id, run.id);
+      for (const ap of this.repo.pendingApprovals(task.id)) this.resolvers.get(ap.id)?.({ decision: "expired", note: "run ended" });
+      try {
+        rmSync(join(tmpdir(), "claude-kanban-browser", run.id), { recursive: true, force: true });
+      } catch {
+        // in the temp folder either way
+      }
+      const error = a.ctl.stopped ? "stopped by user" : err instanceof Error ? err.message : String(err);
+      this.log(run.id, `\n[board] the stage could not run: ${error}\n`);
+      if (this.repo.getRun(run.id)) {
+        const finished = this.repo.updateRun(run.id, { status: "failed", ended_at: nowIso(), error });
+        this.bus.publish({ type: "run.finished", run: finished });
+      }
+      return { ok: false, error, providerId: run.provider ?? ANTHROPIC_PROVIDER_ID, budgetStop: false, turnLimit: false, verifiedAtStop: false };
+    }
+  }
+
+  private async streamStage(a: StageArgs): Promise<StageOutcome> {
     const { task, run } = a;
     const abort = new AbortController();
     // Who runs this: Claude through your login, or one of the providers in Settings (D121).
@@ -1031,6 +1248,8 @@ export class TaskRunner {
     // hunt for a way round it (D186).
     let refusals = 0;
     let blockedByBoard: string | null = null;
+    // The Stop hook's verify passed and no tool has run since: the board need not run it again (D108).
+    let verifiedAtStop = false;
     const refuse = (message: string): { behavior: "deny"; message: string } => {
       refusals++;
       this.log(run.id, `\n[board] sandbox refusal ${refusals}: ${message}\n`);
@@ -1045,8 +1264,26 @@ export class TaskRunner {
       return { behavior: "deny", message: message + escalationHint(refusals) };
     };
     // The live view: the browser also opens a debugging port the board watches (browserWatch.ts).
-    const watchPort = settings.browserChecks && settings.liveView ? await freePort().catch(() => undefined) : undefined;
+    // A plan only reads, and a critic only argues with it: neither is told to look at anything, so
+    // neither carries the browser or the image tool (D271).
+    const critic = run.role === "critic";
+    const visual = !critic && run.stage !== "plan";
+    const watchPort = visual && settings.browserChecks && settings.liveView ? await freePort().catch(() => undefined) : undefined;
     if (watchPort) this.browserWatch.begin(task.id, run.id, watchPort);
+    // Why a command is refused outright — the blocked list, or a kill by name — or null when it is not.
+    const refusedOutright = (command: string): string | null => {
+      if (!command) return null;
+      const rule = blockedCommand(command, settings.blockedCommands);
+      const killer = rule ? null : killsByName(command);
+      const note = rule
+        ? `Refused: "${rule}" is on the board's blocked-command list (Settings → Runs & limits). Nothing was run.`
+        : killer
+          ? `Refused: ${killer} kills every process with that name — including the board running this task and anything else on this computer. ` +
+            "Stop only the process you started: stop its background shell, or kill its PID (`kill <pid>`, `taskkill /PID <pid> /T /F`). Nothing was run."
+          : null;
+      if (note) this.log(run.id, `\n[board] ${note}\n  ${command}\n`);
+      return note;
+    };
     // Board tools are always allowed; handled here rather than via allowedTools so nothing shadows this callback.
     const canUseTool: CanUseTool = async (toolName, input, o) => {
       if (toolName.startsWith("mcp__board__")) return { behavior: "allow", updatedInput: input };
@@ -1060,25 +1297,11 @@ export class TaskRunner {
       // The blocklist comes first, in both modes: these are the commands where an approval card
       // would just be a chance to click the wrong button.
       const command = String((input as { command?: unknown }).command ?? "");
-      if (command) {
-        const rule = blockedCommand(command, settings.blockedCommands);
-        if (rule) {
-          const note = `Refused: "${rule}" is on the board's blocked-command list (Settings → Runs & limits). Nothing was run.`;
-          this.log(run.id, `
-[board] ${note}
-  ${command}
-`);
-          return { behavior: "deny", message: note };
-        }
-        const killer = killsByName(command);
-        if (killer) {
-          const note =
-            `Refused: ${killer} kills every process with that name — including the board running this task and anything else on this computer. ` +
-            "Stop only the process you started: stop its background shell, or kill its PID (`kill <pid>`, `taskkill /PID <pid> /T /F`). Nothing was run.";
-          this.log(run.id, `\n[board] ${note}\n  ${command}\n`);
-          return { behavior: "deny", message: note };
-        }
-      }
+      const outright = refusedOutright(command);
+      if (outright) return { behavior: "deny", message: outright };
+      // An image from the board's own tool lands inside the task's folder (the tool refuses any other
+      // path): a card in a supervised run, like any new file; free in an autonomous one (D262).
+      if (toolName.startsWith(IMAGE_PREFIX)) return autonomous ? { behavior: "allow", updatedInput: input } : this.askApproval(run, task.id, toolName, input, o);
       // Browser tools have their own rules: looking at a local page is not a write (docs/DECISIONS.md D128).
       const browser = browserDecision(toolName, input, autonomous, a.cwd, browserDir);
       if (browser?.behavior === "allow") return { behavior: "allow", updatedInput: browser.input };
@@ -1102,17 +1325,30 @@ export class TaskRunner {
       if (decision.behavior === "deny" && toolName !== "AskUserQuestion") return refuse(decision.message);
       return decision;
     };
-    // Reads can be allowed before canUseTool is ever asked, so the read rule is also a hook: hooks
-    // run for every tool call, whatever the permission mode decided (D187).
-    const readGuard: HookCallbackMatcher[] = [
+    // An autonomous run's whole gate, as a hook too. canUseTool is only asked about a call nothing has
+    // allowed yet: a read, an edit under acceptEdits, or anything a settings file pre-allows — the
+    // project's own `.claude/settings.json` saying `Bash(git:*)` — goes ahead without it, and with
+    // that went the sandbox and the blocked list. Hooks run for every tool call, whatever decided the
+    // permission (D187, and D20 for the same trap in supervised runs).
+    const autonomousGuard: HookCallbackMatcher[] = [
       {
         hooks: [
           async (hookInput) => {
             const h = hookInput as { tool_name?: string; tool_input?: Record<string, unknown> };
-            const why = readViolation(h.tool_name ?? "", h.tool_input ?? {}, a.cwd, readRoots);
-            if (!why) return {};
-            const { message } = refuse(why);
-            return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: message } };
+            const name = h.tool_name ?? "";
+            const input = h.tool_input ?? {};
+            const deny = (message: string) => ({
+              hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: message },
+            });
+            // The board's own tools are always allowed, and a question is answered in canUseTool's own words.
+            if (name.startsWith("mcp__board__") || name === QUESTION_TOOL) return {};
+            const outright = refusedOutright(String(input.command ?? ""));
+            if (outright) return deny(outright);
+            const browser = browserDecision(name, input, true, a.cwd, browserDir);
+            if (browser?.behavior === "allow") return {};
+            if (browser?.behavior === "deny") return deny(refuse(browser.message).message);
+            const decision = autonomousGate(name, input, a.cwd, readRoots);
+            return decision.behavior === "deny" ? deny(refuse(decision.message).message) : {};
           },
         ],
       },
@@ -1123,6 +1359,14 @@ export class TaskRunner {
     // Claude's fast mode, per stage. Only Opus 5 / 4.8 support it; on anything else the flag is not
     // sent at all, so a stage moved to a cheaper model does not start failing.
     const fast = Boolean(task.pipeline[run.stage_index]?.fast) && supportsFastMode(run.model);
+    const browserConfig = visual && settings.browserChecks ? browserServer(browserDir, pickBrowser(realProbe)?.browser, watchPort) : null;
+    // Helpers are Claude models picked by name; another provider's endpoint would not know them.
+    const helpers = foreign ? {} : helperAgents({ browser: browserConfig, browserModel: settings.browserCheckModel, stageModel: run.model });
+    const browserByHelper = BROWSER_AGENT in helpers;
+    // Measured before deciding (D272): leaving connectors and plugin servers out of autonomous stages
+    // saved under 1% of a stage's start, because Claude Code only loads a tool when it is searched
+    // for. A critique still gets nothing but the project: it reads a plan, it does not do the work.
+    const lean = critic;
     const baseOptions: Options = {
       model: run.model,
       effort: run.effort,
@@ -1130,33 +1374,45 @@ export class TaskRunner {
       ...(fast ? { settings: { fastMode: true } } : {}),
       // "project" always loads (CLAUDE.md and project skills are part of the repo). "user" pulls in
       // your global plugins and hooks — measured at ~5,400 extra input tokens on every single stage.
-      settingSources: settings.loadUserPlugins ? ["user", "project"] : ["project"],
-      skills: this.enabledSkills(a.project, task),
+      // A critique reads the plan and the code; your plugins and skills are for doing the work.
+      settingSources: settings.loadUserPlugins && !critic ? ["user", "project"] : ["project"],
+      skills: critic ? [] : this.enabledSkills(a.project, task),
+      ...(lean ? { strictMcpConfig: true } : {}),
+      ...(Object.keys(helpers).length ? { agents: helpers } : {}),
 
       permissionMode: autonomous ? "acceptEdits" : "default",
       canUseTool,
       hooks: {
-        PreToolUse: autonomous ? readGuard : forceAsk(settings.autoAllowReadOnly, a.cwd),
+        PreToolUse: autonomous ? autonomousGuard : forceAsk(settings.autoAllowReadOnly, a.cwd),
         // A message typed while the stage runs is handed over at the next tool call (D215).
         PostToolUse: steer.PostToolUse,
         // A waiting message holds the turn open first; then the deterministic gate: a code stage
         // can't end while the project's own check fails.
-        Stop: [...steer.Stop, ...(a.verifyCommand ? this.verifyStopHook(a.verifyCommand, a.cwd, run.id, task.id) : [])],
+        Stop: [...steer.Stop, ...(a.verifyCommand ? this.verifyStopHook(a.verifyCommand, a.cwd, run.id, task.id, (ok) => (verifiedAtStop = ok)) : [])],
       },
       env: {
         ...process.env,
         KANBAN_PORT: String(await this.portFor(task.id)),
         KANBAN_TASK_ID: task.id,
+        // Never the board's own: see taskStateDir.
+        KANBAN_STATE_DIR: taskStateDir(task.id),
         // Opus 5 delegates to subagents readily; bound the blast radius of an unattended run.
         CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: String(settings.maxSubagentDepth),
         CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: String(settings.maxConcurrentSubagents),
+        // Newer models ship with their to-do tools switched off; the card's checklist is read from them.
+        CLAUDE_CODE_ENABLE_TODO_TOOLS: "1",
+        ...(lean ? { ENABLE_CLAUDEAI_MCP_SERVERS: "false" } : {}),
       },
       // Keeps the system prompt static so it can be cached across sessions; the stripped
       // dynamic parts (cwd, git status) are re-injected as the first user message.
       systemPrompt: settings.cacheableSystemPrompt ? { type: "preset", preset: "claude_code", excludeDynamicSections: true } : undefined,
       mcpServers: {
         board: createBoardServer(this.repo, this.bus, { taskId: task.id, runId: run.id }, (parent) => this.promoteReady(parent.project_id)),
-        ...(settings.browserChecks ? { [BROWSER_SERVER]: browserServer(browserDir, pickBrowser(realProbe)?.browser, watchPort) } : {}),
+        ...(browserConfig && !browserByHelper ? { [BROWSER_SERVER]: browserConfig } : {}),
+        // Pictures are made while building; a plan, a review or a critique has no use for them.
+        ...(visual && run.stage !== "review" && settings.imageProvider !== "off"
+          ? { [IMAGE_SERVER]: createImageServer({ cwd: a.cwd, config: () => this.imageConfig(), fetchFn: this.imageFetch, onImage: (i) => this.keepImage(task.id, run.id, i) }) }
+          : {}),
       },
       // Claude in Chrome is switched on per run, and explicitly off otherwise: an unattended run must
       // never drive the browser you are signed in with.
@@ -1166,8 +1422,8 @@ export class TaskRunner {
       resume: res.adapter.canResume ? a.resume : undefined,
       abortController: abort,
       // Ceilings so an unattended run can't loop forever or burn the budget (docs/DECISIONS.md D25).
-      maxTurns: settings.maxTurnsPerStage,
-      maxBudgetUsd: settings.maxCostPerStageUsd,
+      maxTurns: critic ? Math.min(20, settings.maxTurnsPerStage) : settings.maxTurnsPerStage,
+      maxBudgetUsd: critic ? Math.min(1, settings.maxCostPerStageUsd) : settings.maxCostPerStageUsd,
       stderr: (d) => this.log(run.id, d),
     };
     const options: Options = res.adapter.applyOptions && res.provider ? res.adapter.applyOptions(baseOptions, { provider: res.provider, model: run.model, secret: res.secret }) : baseOptions;
@@ -1195,43 +1451,97 @@ export class TaskRunner {
       this.bus.publish({ type: "event", runId: run.id, taskId: task.id, event: sent });
     }
 
+    // The run as it stands now, read once: the loop below keeps its own copy of what it changes, so a
+    // streamed message costs one insert rather than an insert and three or four reads.
+    const row = this.repo.getRun(run.id) ?? run;
     // The subscription window is what actually runs out, so note where it stood before this stage.
     const before = foreign ? null : this.fiveHourUtilization();
-    if (before !== null && this.repo.getRun(run.id)?.limit_before === null) this.setRun(run.id, { limit_before: before });
+    let limitBefore = row.limit_before;
+    if (before !== null && limitBefore === null) {
+      limitBefore = before;
+      this.setRun(run.id, { limit_before: before });
+    }
+    let sessionId = row.session_id;
+    let contextTokens = row.context_tokens ?? 0;
+    let contextWrittenAt = 0;
+    const capture: CaptureState = { left: MAX_ARTIFACTS_PER_RUN - this.repo.countAttachments(task.id, run.id), tools: new Map() };
     // The SDK cannot price a foreign model id (it guesses a Claude price), so its budget ceiling is
     // switched off for those; the board meters a foreign stage itself from the usage each turn reports (D124).
+    // The same sums stand in for the run's cost and tokens when it ends with no result to read them from.
     let metered = 0;
+    let meteredSource: Run["cost_source"] | null = null;
+    let meteredIn = 0;
+    let meteredOut = 0;
+    // One reply arrives as several messages, one per block, each repeating the reply's whole usage.
+    const countedReplies = new Set<string>();
+
+    // Claude's own to-do list for this stage, shown on the card. A continued session keeps its list
+    // (its task numbers carry on); a fresh one starts with none.
+    const listed = this.repo.getTask(task.id)?.checklist ?? [];
+    let checklist = a.resume ? listed : [];
+    if (!a.resume && listed.length) this.setTask(task.id, { checklist });
 
     // A stage that calls the same tool with the same arguments over and over is stuck, not working.
     const repeats = { key: "", count: 0 };
     let loopStopped = false;
 
-    let result: { ok: boolean; text: string | null; error: string | null; cost: number; inTok: number; outTok: number } | null = null;
+    let result: { ok: boolean; text: string | null; error: string | null; cost: number; inTok: number; outTok: number; cacheRead: number; cacheWrite: number; otherUsd: number } | null = null;
     let thrown: string | null = null;
     let budgetStop = false;
     let turnLimit = false;
     try {
       for await (const msg of stream) {
         const sid = (msg as { session_id?: string }).session_id;
-        if (sid && this.repo.getRun(run.id)!.session_id !== sid) this.setRun(run.id, { session_id: sid });
+        if (sid && sessionId !== sid) {
+          sessionId = sid;
+          this.setRun(run.id, { session_id: sid });
+        }
         const event = this.repo.insertEvent(run.id, eventType(msg), msg);
         this.bus.publish({ type: "event", runId: run.id, taskId: task.id, event });
 
         // How full the session's context is right now (what Claude Code shows as the context bar).
         if (msg.type === "assistant") {
           for (const block of (msg.message?.content ?? []) as { type: string; name?: string; input?: Record<string, unknown> }[]) {
+            // Anything it does after the check passed may have undone it.
+            if (block.type === "tool_use") verifiedAtStop = false;
+            // A subagent keeps a list of its own; only the stage's list belongs on the card.
+            if (block.type === "tool_use" && block.name && !(msg as { parent_tool_use_id?: string | null }).parent_tool_use_id) {
+              const next = applyChecklistTool(checklist, block.name, block.input);
+              if (next) {
+                checklist = next;
+                this.setTask(task.id, { checklist });
+              }
+            }
             const caption = block.type === "tool_use" && block.name ? browserCaption(block.name, block.input ?? {}) : null;
             if (caption) this.browserWatch.action(task.id, caption, typeof block.input?.url === "string" ? block.input.url : undefined);
           }
           const u = msg.message?.usage;
           if (u) {
-            const held = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.output_tokens ?? 0);
-            if (held > (this.repo.getRun(run.id)?.context_tokens ?? 0)) this.setRun(run.id, { context_tokens: held });
-            if (foreign && res.provider) {
-              metered += estimateCost(res.provider, run.model, {
+            const inTok = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+            const held = inTok + (u.output_tokens ?? 0);
+            if (held > contextTokens) {
+              contextTokens = held;
+              // It grows with nearly every message, and each write is broadcast to every open board:
+              // about once a second is as often as anyone can read it. The last value goes out with the run.
+              if (Date.now() - contextWrittenAt >= CONTEXT_UPDATE_MS) {
+                contextWrittenAt = Date.now();
+                this.setRun(run.id, { context_tokens: held });
+              }
+            }
+            const replyId = (msg.message as { id?: unknown }).id;
+            const counted = typeof replyId === "string" && countedReplies.has(replyId);
+            if (typeof replyId === "string") countedReplies.add(replyId);
+            if (!counted) {
+              meteredIn += inTok;
+              meteredOut += u.output_tokens ?? 0;
+            }
+            if (!counted && foreign && res.provider) {
+              const priced = estimateCost(res.provider, run.model, {
                 inputTokens: u.input_tokens ?? 0, cacheReadInputTokens: u.cache_read_input_tokens ?? 0,
                 cacheCreationInputTokens: u.cache_creation_input_tokens ?? 0, outputTokens: u.output_tokens ?? 0,
-              }, this.catalog.priceOf(res.provider, run.model)).usd;
+              }, this.catalog.priceOf(res.provider, run.model));
+              metered += priced.usd;
+              meteredSource = priced.source;
               if (metered > settings.maxCostPerStageUsd) {
                 thrown = `the estimated cost passed the per-stage ceiling of $${settings.maxCostPerStageUsd.toFixed(2)} — the SDK cannot price ${run.model} itself, so the board metered it from your price table`;
                 budgetStop = true;
@@ -1242,7 +1552,7 @@ export class TaskRunner {
             }
           }
         }
-        if (!loopStopped && this.countRepeats(msg, repeats)) {
+        if (!loopStopped && this.countRepeats(msg, repeats, settings.maxRepeatedToolCalls)) {
           loopStopped = true;
           this.log(run.id, `
 [board] stopped: the same tool call was repeated ${repeats.count} times.
@@ -1252,20 +1562,30 @@ export class TaskRunner {
           // Stop consuming immediately: a session that ignores the abort would otherwise keep going.
           break;
         }
-        this.captureImages(msg, task.id, run.id, a.cwd);
+        this.captureImages(msg, task.id, run.id, a.cwd, capture);
         // Usage windows are Claude's subscription; a foreign endpoint's numbers mean nothing here.
         if (msg.type === "rate_limit_event" && !foreign) {
           this.recordRateLimit(msg as unknown as { rate_limit_info?: RateLimitInfo });
           const after = this.fiveHourUtilization();
-          if (after !== null) this.setRun(run.id, { limit_after: after, ...(this.repo.getRun(run.id)?.limit_before === null ? { limit_before: after } : {}) });
+          if (after !== null) {
+            this.setRun(run.id, { limit_after: after, ...(limitBefore === null ? { limit_before: after } : {}) });
+            limitBefore ??= after;
+          }
         }
         if (msg.type === "result") {
           const r = msg as Extract<SDKMessage, { type: "result" }>;
           let inTok = 0;
           let outTok = 0;
-          for (const u of Object.values(r.modelUsage ?? {})) {
+          let cacheRead = 0;
+          let cacheWrite = 0;
+          // Anything not billed to the stage's own model: its helpers, and Claude Code's small calls.
+          let otherUsd = 0;
+          for (const [model, u] of Object.entries(r.modelUsage ?? {})) {
             inTok += (u.inputTokens ?? 0) + (u.cacheReadInputTokens ?? 0) + (u.cacheCreationInputTokens ?? 0);
             outTok += u.outputTokens ?? 0;
+            cacheRead += u.cacheReadInputTokens ?? 0;
+            cacheWrite += u.cacheCreationInputTokens ?? 0;
+            if (model.replace(/\[1m\]$/i, "") !== run.model) otherUsd += u.costUSD ?? 0;
           }
           const window = Math.max(0, ...Object.values(r.modelUsage ?? {}).map((u) => u.contextWindow ?? 0));
           if (window) this.setRun(run.id, { context_window: window });
@@ -1289,6 +1609,9 @@ export class TaskRunner {
             cost,
             inTok,
             outTok,
+            cacheRead,
+            cacheWrite,
+            otherUsd: foreign ? 0 : otherUsd,
           };
         }
       }
@@ -1318,18 +1641,30 @@ export class TaskRunner {
         ? `blocked: ${blockedByBoard}`
         : result && !result.ok ? result.error : result ? null : thrown ?? "run ended without a result";
     const prev = this.repo.getRun(run.id)!;
-    const add = a.accumulate ? prev : { cost_usd: 0, input_tokens: 0, output_tokens: 0 };
+    const add = a.accumulate ? prev : { cost_usd: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, other_models_usd: 0 };
+    // A run stopped part-way — by the board's own meter, a Stop, the loop guard — ends with no result
+    // to read its cost from. Recording $0 hid exactly the spend the task ceiling exists to catch, so
+    // what was metered on the way stands in. (Claude's own runs have no price table here: tokens only.)
+    const unpriced = !result && foreign && meteredSource;
     const finished = this.repo.updateRun(run.id, {
       status: error ? "failed" : "success",
       ended_at: nowIso(),
-      cost_usd: add.cost_usd + (result?.cost ?? 0),
-      input_tokens: add.input_tokens + (result?.inTok ?? 0),
-      output_tokens: add.output_tokens + (result?.outTok ?? 0),
+      cost_usd: add.cost_usd + (result?.cost ?? (foreign ? metered : 0)),
+      input_tokens: add.input_tokens + (result?.inTok ?? meteredIn),
+      output_tokens: add.output_tokens + (result?.outTok ?? meteredOut),
+      cache_read_tokens: add.cache_read_tokens + (result?.cacheRead ?? 0),
+      cache_write_tokens: add.cache_write_tokens + (result?.cacheWrite ?? 0),
+      other_models_usd: add.other_models_usd + (result?.otherUsd ?? 0),
       result_md: result?.text ?? prev.result_md,
+      context_tokens: contextTokens,
+      ...(unpriced ? { cost_source: unpriced } : {}),
       error,
     });
     this.bus.publish({ type: "run.finished", run: finished });
-    return { ok: !error, error, providerId: res.id, budgetStop: budgetStop && !a.ctl.stopped, turnLimit: turnLimit && !a.ctl.stopped };
+    return {
+      ok: !error, error, providerId: res.id, budgetStop: budgetStop && !a.ctl.stopped, turnLimit: turnLimit && !a.ctl.stopped,
+      verifiedAtStop: verifiedAtStop && !error,
+    };
   }
 
   /**
@@ -1363,12 +1698,13 @@ export class TaskRunner {
    * the stop while it fails, so the agent fixes it in-session instead of the board failing the task cold.
    * Claude Code stops honouring the block after 8 consecutive attempts, so this cannot loop forever.
    */
-  private verifyStopHook(command: string, cwd: string, runId: string, taskId: string): HookCallbackMatcher[] {
+  private verifyStopHook(command: string, cwd: string, runId: string, taskId: string, onResult: (ok: boolean) => void): HookCallbackMatcher[] {
     return [
       {
         hooks: [
           async () => {
-            const res = await runProjectCommand(command, cwd, { env: { KANBAN_PORT: String(this.ports.get(taskId) ?? 0) }, timeoutMs: 10 * 60_000 });
+            const res = await runProjectCommand(command, cwd, { env: this.commandEnv(taskId), timeoutMs: 10 * 60_000 });
+            onResult(res.ok);
             const event = this.repo.insertEvent(runId, res.ok ? "verify:passed" : "verify:failed", { type: "verify", command, ok: res.ok, output: res.output });
             this.bus.publish({ type: "event", runId, taskId, event });
             if (res.ok) return {};
@@ -1471,8 +1807,13 @@ export class TaskRunner {
     });
   }
 
+  /** What the project's verify command runs with: the task's port, and a state folder that is not the board's. */
+  private commandEnv(taskId: string): Record<string, string> {
+    return { KANBAN_PORT: String(this.ports.get(taskId) ?? 0), KANBAN_STATE_DIR: taskStateDir(taskId) };
+  }
+
   /** Board-side verification after a stage: the record of record for whether the work is good. */
-  private async verifyWorkspace(project: Project, task: Task, cwd: string, runId: string): Promise<{ ok: boolean; output: string } | null> {
+  private async verifyWorkspace(project: Project, task: Task, cwd: string, runId: string, passedAtStop = false): Promise<{ ok: boolean; output: string } | null> {
     const command = project.env.verifyCommand?.trim();
     if (!command) return null;
     // The same command can be asked for three times for one unchanged tree — by the Stop hook, by
@@ -1483,7 +1824,14 @@ export class TaskRunner {
       return { ok: true, output: `$ ${command}
 (unchanged since it last passed — not re-run)` };
     }
-    const res = await runProjectCommand(command, cwd, { env: { KANBAN_PORT: String(this.ports.get(task.id) ?? 0) }, timeoutMs: 10 * 60_000 });
+    // The session's own Stop hook ran this very command as the stage ended, and no tool has run
+    // since. That pass never reached the cache above (the tree was not committed yet), so the board
+    // used to run the whole suite again seconds later. It counts, and is remembered for landing.
+    if (passedAtStop) {
+      if (fingerprint) this.verified.set(task.id, fingerprint);
+      return { ok: true, output: `$ ${command}\n(passed as the stage ended — not run a second time)` };
+    }
+    const res = await runProjectCommand(command, cwd, { env: this.commandEnv(task.id), timeoutMs: 10 * 60_000 });
     if (fingerprint) {
       if (res.ok) this.verified.set(task.id, fingerprint);
       else this.verified.delete(task.id);
@@ -1516,55 +1864,101 @@ export class TaskRunner {
    * writes that are output rather than source — a report, a spreadsheet, a page, a diagram. They are
    * copied into the board's own storage, so they survive the worktree being removed at approval.
    */
-  /** tool_use id → tool name, so a tool result can be told apart by the tool that produced it. */
-  private toolNames = new Map<string, string>();
+  /** Settings → Images as the tool reads them: the provider, and its keys from the secret store. */
+  imageConfig(): ImageConfig {
+    const s = this.repo.getSettings();
+    return {
+      provider: s.imageProvider,
+      pollinationsKey: this.secrets.get(POLLINATIONS_KEY_REF),
+      cloudflareAccountId: s.cloudflareAccountId,
+      cloudflareToken: this.secrets.get(CLOUDFLARE_TOKEN_REF),
+    };
+  }
 
-  private captureImages(msg: SDKMessage, taskId: string, runId: string, cwd: string): void {
-    if (this.repo.countAttachments(taskId, runId) >= MAX_ARTIFACTS_PER_RUN) return;
+  /** What Settings → Images shows: which keys are set (never their values) and whether an image would come. */
+  imageStatus(): ImageStatus {
+    const cfg = this.imageConfig();
+    return {
+      provider: cfg.provider, cloudflareAccountId: cfg.cloudflareAccountId,
+      hasPollinationsKey: Boolean(cfg.pollinationsKey), hasCloudflareToken: Boolean(cfg.cloudflareToken),
+      ...imageReadiness(cfg), claudeCodeCommand: claudeCodeCommand(),
+    };
+  }
+
+  /** Settings → Images → Try it: one small image from exactly what is set, handed back inline. */
+  async testImage(prompt: string): Promise<{ ok: boolean; dataUrl: string | null; provider: string; latencyMs: number; error: string | null }> {
+    const t0 = Date.now();
+    const cfg = this.imageConfig();
+    try {
+      const img = await generateImage({ prompt, width: 512, height: 512 }, cfg, { fetchFn: this.imageFetch });
+      return { ok: true, dataUrl: `data:image/${img.format};base64,${Buffer.from(img.bytes).toString("base64")}`, provider: img.provider, latencyMs: Date.now() - t0, error: null };
+    } catch (e) {
+      return { ok: false, dataUrl: null, provider: cfg.provider, latencyMs: Date.now() - t0, error: (e as Error).message };
+    }
+  }
+
+  /** A generated image is kept on the card too, so you see it without opening the folder. */
+  private keepImage(taskId: string, runId: string, info: { path: string; prompt: string; provider: string; bytes: number }): void {
+    this.log(runId, `\n[board] generate_image → ${info.path} (${Math.round(info.bytes / 1024)} KB, ${info.provider})\n`);
+    try {
+      if (info.bytes > MAX_ATTACHMENT_BYTES) return;
+      const stage = this.repo.getRun(runId)?.stage ?? "code";
+      const at = saveAttachment(this.repo, { task_id: taskId, run_id: runId, source: "run", name: basename(info.path), data: readFileSync(info.path), note: `made with generate_image during the ${stage} stage: ${info.prompt.slice(0, 200)}` });
+      this.bus.publish({ type: "attachment.added", attachment: at });
+    } catch {
+      // The file is in the project either way; the copy on the card is a convenience.
+    }
+  }
+
+  private captureImages(msg: SDKMessage, taskId: string, runId: string, cwd: string, state: CaptureState): void {
     const content = (msg as { message?: { content?: unknown } }).message?.content;
     if (!Array.isArray(content)) return;
+    const stage = () => this.repo.getRun(runId)?.stage ?? "code";
     for (const block of content as Record<string, unknown>[]) {
       try {
-        if (block.type === "tool_use" && typeof block.id === "string" && typeof block.name === "string") this.toolNames.set(block.id, block.name);
+        // A tool call is only announced here: nothing has run yet, and a supervised write is still
+        // waiting on its card. Note what it is, and look at its file once its result comes back.
+        if (block.type === "tool_use") {
+          if (typeof block.id === "string" && typeof block.name === "string") state.tools.set(block.id, { name: block.name, file: artifactPath(block, cwd) });
+          continue;
+        }
+        const use = block.type === "tool_result" ? state.tools.get(String(block.tool_use_id)) : undefined;
+        if (block.type === "tool_result") state.tools.delete(String(block.tool_use_id));
         // Opening an image with Read is looking at a file that already exists (often one you attached),
         // not producing one: keeping it would file a copy of your own image as a "screenshot".
-        const opened = block.type === "tool_result" && this.toolNames.get(String(block.tool_use_id)) === "Read";
-        if (block.type === "tool_result") this.toolNames.delete(String(block.tool_use_id));
-        if (opened) continue;
+        if (use?.name === "Read") continue;
         // A screenshot handed back by a tool (browser MCP, image generation, …).
         for (const img of imageBlocks(block)) {
+          if (state.left <= 0) break;
           const data = Buffer.from(img.data, "base64");
           if (!data.byteLength || data.byteLength > MAX_ATTACHMENT_BYTES) continue;
           const at = saveAttachment(this.repo, {
             task_id: taskId, run_id: runId, source: "run", name: `screenshot-${new Date().toISOString().slice(11, 19).replace(/:/g, "")}.png`,
-            media_type: img.media_type, data, note: `screenshot from the ${this.repo.getRun(runId)?.stage ?? "code"} stage`,
+            media_type: img.media_type, data, note: `screenshot from the ${stage()} stage`,
           });
+          state.left--;
           this.bus.publish({ type: "attachment.added", attachment: at });
         }
         // A file the session produced: a report, a spreadsheet, a page, a diagram. Source files are
         // deliberately not kept — they are already in the diff; these are the things that are not.
-        if (block.type === "tool_use" && typeof block.name === "string" && WRITE_TOOLS.has(block.name)) {
-          const file = (block.input as { file_path?: string } | undefined)?.file_path;
-          if (!file || !ARTIFACT_EXTS.includes(extname(file).toLowerCase())) continue;
-          const abs = isAbsolute(file) ? file : join(cwd, file);
-          if (IGNORED_DIRS.test(abs) || !existsSync(abs)) continue;
-          // Check the size before reading it: a huge generated file would otherwise be pulled into
-          // memory in full, on the event loop, only to be thrown away.
-          const size = statSync(abs).size;
-          if (!size || size > MAX_ATTACHMENT_BYTES) continue;
-          const data = readFileSync(abs);
-          // One entry per path: a file written three times should not appear three times.
-          for (const old of this.repo.listAttachments(taskId)) {
-            if (old.source === "run" && old.name === basename(abs)) {
-              if (existsSync(old.path)) rmSync(old.path, { force: true });
-              this.repo.deleteAttachment(old.id);
-            }
+        const abs = use?.file;
+        if (!abs || block.is_error === true || state.left <= 0 || !existsSync(abs)) continue;
+        // Check the size before reading it: a huge generated file would otherwise be pulled into
+        // memory in full, on the event loop, only to be thrown away.
+        const size = statSync(abs).size;
+        if (!size || size > MAX_ATTACHMENT_BYTES) continue;
+        const data = readFileSync(abs);
+        // One entry per path: a file written three times should not appear three times.
+        for (const old of this.repo.listAttachments(taskId)) {
+          if (old.source === "run" && old.name === basename(abs)) {
+            if (existsSync(old.path)) rmSync(old.path, { force: true });
+            this.repo.deleteAttachment(old.id);
+            if (old.run_id === runId) state.left++;
           }
-          const at = saveAttachment(this.repo, {
-            task_id: taskId, run_id: runId, source: "run", name: basename(abs), data, note: `written during the ${this.repo.getRun(runId)?.stage ?? "code"} stage`,
-          });
-          this.bus.publish({ type: "attachment.added", attachment: at });
         }
+        const at = saveAttachment(this.repo, { task_id: taskId, run_id: runId, source: "run", name: basename(abs), data, note: `written during the ${stage()} stage` });
+        state.left--;
+        this.bus.publish({ type: "attachment.added", attachment: at });
       } catch {
         // An image is a nice-to-have; never let it break the run.
       }
@@ -1575,7 +1969,7 @@ export class TaskRunner {
    * Counts identical consecutive tool calls. Documented runaway agents spend hours (and real money)
    * retrying one failing call; a bounded repeat count turns that into a clean, explained failure.
    */
-  private countRepeats(msg: SDKMessage, state: { key: string; count: number }): boolean {
+  private countRepeats(msg: SDKMessage, state: { key: string; count: number }, limit: number): boolean {
     const content = (msg as { message?: { content?: unknown } }).message?.content;
     if (!Array.isArray(content)) return false;
     let hit = false;
@@ -1587,7 +1981,7 @@ export class TaskRunner {
         state.key = key;
         state.count = 1;
       }
-      if (state.count >= this.repo.getSettings().maxRepeatedToolCalls) hit = true;
+      if (state.count >= limit) hit = true;
     }
     return hit;
   }
@@ -1633,9 +2027,17 @@ export class TaskRunner {
    */
   async fastModeStatus(force = false): Promise<FastModeStatus> {
     if (this.fastStatus && !force && Date.now() - Date.parse(this.fastStatus.checked_at) < 15 * 60_000) return this.fastStatus;
+    // Two screens asking at once share one session instead of starting one each.
+    return (this.fastChecking ??= this.checkFastMode().finally(() => (this.fastChecking = null)));
+  }
+
+  private fastChecking: Promise<FastModeStatus> | null = null;
+
+  private async checkFastMode(): Promise<FastModeStatus> {
     const abort = new AbortController();
     const options: Options = {
-      model: "claude-opus-5", cwd: process.cwd(), maxTurns: 1, permissionMode: "dontAsk", ...LEAN,
+      // Any Claude model answers the question; "opus" is whichever Opus is current.
+      model: "opus", cwd: process.cwd(), maxTurns: 1, permissionMode: "dontAsk", ...LEAN,
       settings: { fastMode: true }, abortController: abort,
     };
     let state: FastModeStatus["state"] = "off";
@@ -1669,8 +2071,29 @@ export class TaskRunner {
     const c = this.claudeList;
     const fresh = c && Date.now() - Date.parse(c.checked_at) < (c.source === "live" ? 30 * 60_000 : 30_000);
     if (c && fresh && !force) return c;
-    this.claudeListing ??= this.listClaudeModels().finally(() => (this.claudeListing = null));
+    this.claudeListing ??= this.listClaudeModels()
+      .then((r) => (this.followLatestModels(r), r))
+      .finally(() => (this.claudeListing = null));
     return (this.claudeList = await this.claudeListing);
+  }
+
+  /**
+   * A newer model of a family your settings name (Opus 5 → Opus 5.5) replaces the older one in every
+   * pick, as soon as your login lists it. Tasks already on the board keep the models they were given.
+   */
+  private followLatestModels(list: ClaudeModelsResult): void {
+    try {
+      const settings = this.repo.getSettings();
+      if (!settings.followLatestModels || list.source !== "live") return;
+      const { moves, patch } = claudeUpgrades(settings, list);
+      if (!moves.length) return;
+      this.bus.publish({ type: "settings.updated", settings: this.repo.updateSettings({ ...patch, lastModelMove: { at: nowIso(), moves } }) });
+      const names = [...new Set(moves.map((m) => `${m.from} → ${m.to}`))].join(", ");
+      console.log(`Newer Claude models on your login: ${names} (${moves.length} setting${moves.length === 1 ? "" : "s"} moved).`);
+    } catch (err) {
+      // The list itself is still good; the settings simply stay as they were.
+      console.error("Could not move settings to newer Claude models:", err);
+    }
   }
 
   private async listClaudeModels(): Promise<ClaudeModelsResult> {
@@ -1679,12 +2102,12 @@ export class TaskRunner {
     const silent = (async function* (): AsyncGenerator<SDKUserMessage> {
       await new Promise((r) => abort.signal.addEventListener("abort", r, { once: true }));
     })();
-    const q = this.queryFn({ prompt: silent, options: { cwd: process.cwd(), ...LEAN, abortController: abort } }) as AsyncIterable<SDKMessage> & {
-      supportedModels?: () => Promise<SdkModelInfo[]>;
-      close?: () => void;
-    };
+    let q: (AsyncIterable<SDKMessage> & { supportedModels?: () => Promise<SdkModelInfo[]>; close?: () => void }) | undefined;
     let timer: NodeJS.Timeout | undefined;
     try {
+      // Inside the try: this runs unawaited at boot, where a session that cannot even start would
+      // otherwise be an unhandled rejection — and that ends the whole board.
+      q = this.queryFn({ prompt: silent, options: { cwd: process.cwd(), ...LEAN, abortController: abort } });
       if (typeof q.supportedModels !== "function") throw new Error("this Claude Code version cannot list its models");
       const infos = await Promise.race([
         q.supportedModels(),
@@ -1699,7 +2122,7 @@ export class TaskRunner {
       clearTimeout(timer);
       abort.abort();
       try {
-        q.close?.();
+        q?.close?.();
       } catch {
         // already closed
       }
@@ -1707,6 +2130,7 @@ export class TaskRunner {
   }
 
   private toolsStatus: (SessionTools & { key: string }) | null = null;
+  private toolsChecking: { key: string; pending: Promise<SessionTools> } | null = null;
 
   /**
    * The plugins, MCP servers, skills and commands a run gets, with the board's rule for each server.
@@ -1719,6 +2143,16 @@ export class TaskRunner {
     const key = `${settings.loadUserPlugins}|${settings.browserChecks}|${settings.chromeInSupervised}`;
     const cached = this.toolsStatus;
     if (cached && !force && cached.key === key && Date.now() - Date.parse(cached.checked_at) < 10 * 60_000) return cached;
+    // The check starts every tool server once; a second caller waits for the one already under way.
+    if (this.toolsChecking?.key === key) return this.toolsChecking.pending;
+    const pending = this.checkSessionTools(settings, key).finally(() => {
+      if (this.toolsChecking?.pending === pending) this.toolsChecking = null;
+    });
+    this.toolsChecking = { key, pending };
+    return pending;
+  }
+
+  private async checkSessionTools(settings: Settings, key: string): Promise<SessionTools> {
     const abort = new AbortController();
     const dir = join(tmpdir(), "claude-kanban-browser", "probe");
     const options: Options = {
@@ -1845,7 +2279,10 @@ export class TaskRunner {
     const options: Options = {
       model, effort: "low", cwd: process.cwd(), maxTurns: 1, maxBudgetUsd: 0.05,
       permissionMode: "dontAsk", ...LEAN,
-      systemPrompt: { type: "preset", preset: "claude_code", excludeDynamicSections: true },
+      // The answer is the usage report that comes with any reply; Claude Code's whole system prompt
+      // only made the one-word call cost more. Triage runs the same way with none.
+      systemPrompt: "",
+      tools: [],
     };
     for await (const msg of this.queryFn({ prompt: userMessage("Reply with: ok"), options })) {
       if (msg.type === "rate_limit_event") this.recordRateLimit(msg as unknown as { rate_limit_info?: RateLimitInfo });
@@ -1859,17 +2296,22 @@ export class TaskRunner {
    * Was this failure the subscription running out, rather than the work going wrong? Either the CLI
    * said so in a rate-limit event during the run (status "rejected"), or the error says it.
    */
-  private hitLimit(error: string | null): boolean {
-    if (this.repo.usageLimits().some((l) => l.status === "rejected")) return true;
+  private hitLimit(error: string | null, session: LimitContext): boolean {
+    // Only a window that was reported shut while this session ran, and that covers its model. Any
+    // "rejected" row used to count: with the weekly Opus window full, a Sonnet stage that failed for
+    // an ordinary reason was paused for days as "your usage limit" — and held the whole queue with it (D116).
+    const shut = this.repo.usageLimits().some((l) => l.status === "rejected" && limitCovers(l.type, session.model) && Date.parse(l.updated_at) >= session.since);
+    if (shut) return true;
     return /usage limit|rate[ _-]?limit|limit (reached|exceeded)|out of (usage|credits)|quota|resets? (at|in)|429/i.test(error ?? "");
   }
 
-  /** When the blocking window opens again: the latest reset among rejected windows, plus a margin. */
-  private resumeTime(): Date {
+  /** When the blocking window opens again: the latest reset among the rejected windows that cover this model, plus a margin. */
+  private resumeTime(model: string): Date {
     const MARGIN_MS = 90_000; // resets are not instant to the second; do not retry into the same wall
     const now = Date.now();
-    const blocking = this.repo.usageLimits().filter((l) => l.status === "rejected" && l.resets_at);
-    const known = (blocking.length ? blocking : this.repo.usageLimits().filter((l) => l.resets_at && l.resets_at * 1000 > now))
+    const windows = this.repo.usageLimits().filter((l) => limitCovers(l.type, model));
+    const blocking = windows.filter((l) => l.status === "rejected" && l.resets_at);
+    const known = (blocking.length ? blocking : windows.filter((l) => l.resets_at && l.resets_at * 1000 > now))
       .map((l) => l.resets_at! * 1000);
     // With no reset time at all, try again in half an hour rather than guessing wrong in either direction.
     const at = known.length ? Math.max(...known) + MARGIN_MS : now + 30 * 60_000;
@@ -1881,9 +2323,9 @@ export class TaskRunner {
    * itself. Returns false when this was not a limit, or auto-resume is off — the caller then fails
    * the task as it always has.
    */
-  private pauseForLimit(taskId: string, error: string | null): boolean {
-    if (!this.repo.getSettings().autoResume || !this.hitLimit(error)) return false;
-    const at = this.resumeTime();
+  private pauseForLimit(taskId: string, error: string | null, session: LimitContext): boolean {
+    if (!this.repo.getSettings().autoResume || !this.hitLimit(error, session)) return false;
+    const at = this.resumeTime(session.model);
     this.setTask(taskId, {
       status: "paused",
       pause_reason: "limit",
@@ -1958,15 +2400,18 @@ export class TaskRunner {
     return out;
   }
 
-  /** Is Claude's own window shut right now? */
-  private claudeOut(now = Date.now()): boolean {
-    return this.limitedUntil(now) !== null || this.repo.usageLimits().some((l) => l.status === "rejected" && l.resets_at !== null && l.resets_at * 1000 > now);
+  /** Is Claude's own window shut right now, for a stage on this model? A window for another model family is not. */
+  private claudeOut(model: string, now = Date.now()): boolean {
+    return (
+      this.limitedUntil(now) !== null ||
+      this.repo.usageLimits().some((l) => l.status === "rejected" && l.resets_at !== null && l.resets_at * 1000 > now && limitCovers(l.type, model))
+    );
   }
 
   /** Can this stage carry on at `to`: it exists, is switched on, may run this kind of stage, and is not out itself. */
   private fallbackUsable(to: TierRef, stage: Stage, mode: Task["mode"]): boolean {
     const onClaude = !to.provider || to.provider === ANTHROPIC_PROVIDER_ID;
-    if (onClaude ? this.claudeOut() : this.activeOut(to.provider)) return false;
+    if (onClaude ? this.claudeOut(to.model) : this.activeOut(to.provider)) return false;
     try {
       return this.providers.allowedOn(this.providers.resolve(to.provider), stage.stage, mode) === null;
     } catch {
@@ -2076,7 +2521,7 @@ export class TaskRunner {
     const pid = stage.provider && stage.provider !== ANTHROPIC_PROVIDER_ID ? stage.provider : ANTHROPIC_PROVIDER_ID;
     const fb = this.fallbackFor(pid);
     if (pid === ANTHROPIC_PROVIDER_ID) {
-      if (fb && this.claudeOut() && this.fallbackUsable(fb, stage, task.mode)) {
+      if (fb && this.claudeOut(stage.model) && this.fallbackUsable(fb, stage, task.mode)) {
         this.moveStage(task, i, fb, "Claude's usage limit is reached");
         return "switched";
       }
@@ -2097,14 +2542,16 @@ export class TaskRunner {
 
   /** A Claude stage stopped by the usage limit: carry on at the fallback if there is one, else pause as ever. */
   private afterClaudeLimit(taskId: string, i: number, error: string | null, runId: string, mayMove: boolean): "switched" | "paused" | "failed" {
-    if (!this.hitLimit(error)) return "failed";
+    const run = this.repo.getRun(runId);
     const task = this.repo.getTask(taskId)!;
+    const session: LimitContext = { since: run ? Date.parse(run.started_at) : Date.now(), model: run?.model ?? task.pipeline[i].model };
+    if (!this.hitLimit(error, session)) return "failed";
     const fb = this.repo.getSettings().claudeFallback;
     if (mayMove && fb && this.fallbackUsable(fb, task.pipeline[i], task.mode)) {
       this.moveStage(task, i, fb, "Claude's usage limit is reached", runId);
       return "switched";
     }
-    return this.pauseForLimit(taskId, error) ? "paused" : "failed";
+    return this.pauseForLimit(taskId, error, session) ? "paused" : "failed";
   }
 
   /**
@@ -2237,13 +2684,12 @@ export class TaskRunner {
     return task.pipeline[this.startOpts.get(task.id)?.fromStage ?? this.defaultStart(task).fromStage];
   }
 
-  private nextStageNeedsClaude(task: Task): boolean {
-    const stage = this.nextStage(task);
+  private stageNeedsClaude(stage: Stage | undefined, settings: Settings): boolean {
     if (!stage) return true;
     const onClaude = (id: string | null | undefined) => !id || id === ANTHROPIC_PROVIDER_ID;
     if (onClaude(stage.provider)) return true;
     // A delegated plan stage still needs the window when its critic argues on Claude.
-    const critic = this.providers.debateFor(stage, this.repo.getSettings());
+    const critic = this.providers.debateFor(stage, settings);
     return critic ? onClaude(critic.provider) : false;
   }
 
@@ -2256,8 +2702,12 @@ export class TaskRunner {
   private mayStartNow(taskId: string): boolean {
     const task = this.repo.getTask(taskId);
     if (!task) return true;
-    if (this.limitedUntil() !== null && this.nextStageNeedsClaude(task) && !this.repo.getSettings().claudeFallback) return false;
+    // Inside a pump the settings and the usage gate are the same for every waiting item: read once.
+    const view = this.pumpView;
+    const settings = view?.settings ?? this.repo.getSettings();
+    const limited = !view ? this.limitedUntil() : view.limitedUntil !== undefined ? view.limitedUntil : (view.limitedUntil = this.limitedUntil());
     const stage = this.nextStage(task);
+    if (limited !== null && this.stageNeedsClaude(stage, settings) && !settings.claudeFallback) return false;
     if (stage?.provider && stage.provider !== ANTHROPIC_PROVIDER_ID) {
       const out = this.activeOut(stage.provider);
       if (out && out.kind !== "credit" && out.resets_at && !this.fallbackFor(stage.provider)) return false;
@@ -2317,11 +2767,18 @@ export class TaskRunner {
     if (task.pause_reason === "cost") throw new ConflictError("This task is waiting on Continue, not on a usage window.");
     // "Try again" after topping up: forget what was recorded against its provider, or the stage would
     // pause again before it asks.
+    const due = new Date(0).toISOString();
     if (task.pause_reason === "provider") {
       const stage = task.pipeline[this.defaultStart(task).fromStage];
       if (stage?.provider) this.providerBack(stage.provider);
+    } else {
+      // Claude's window is the account's, not this task's. Releasing one task alone left it sitting in
+      // Queued: the queue holds Claude work for as long as any other task is still paused by the limit.
+      for (const t of this.repo.tasksInStatus(["paused"])) {
+        if (t.resume_at && t.pause_reason !== "provider" && t.pause_reason !== "cost") this.repo.updateTask(t.id, { resume_at: due });
+      }
     }
-    this.repo.updateTask(taskId, { resume_at: new Date(0).toISOString() });
+    this.repo.updateTask(taskId, { resume_at: due });
     this.resumeDue();
   }
 
@@ -2428,6 +2885,18 @@ export class TaskRunner {
       return run;
     }
     if (this.isBusy(taskId)) throw new ConflictError("Task is busy; wait for the current run to finish.");
+    // A task waiting on a decision is not waiting for a message. A chat turn here ran in the plan's
+    // session with nothing held back, overwrote the plan with its reply, and left the task "failed" —
+    // from where Retry walked past the approval. A paused task lost its automatic resume the same way.
+    if (task.plan_gate) throw new ConflictError("This task is waiting for you to choose a plan — decide that first, then message it.");
+    if (task.status === "paused") {
+      throw new ConflictError(
+        task.pause_reason === "cost"
+          ? "This task is paused at its cost ceiling — press Continue or Stop first, then message it."
+          : "This task is paused until it can run again — press Try now or Stop first, then message it.",
+      );
+    }
+    if (task.status === "approval") throw new ConflictError("This task is waiting for your decision — answer that first, then message it.");
     const last = this.repo.latestRun(taskId);
     if (!last?.session_id) throw new ConflictError("No session to continue yet — queue the task first.");
     if (!this.providers.resolve(last.provider).adapter.canResume) {
@@ -2447,13 +2916,16 @@ export class TaskRunner {
 
     const ctl: PipelineCtl = { stopped: false };
     this.pipelines.set(taskId, ctl); // chat counts as a (one-step) pipeline so Stop works
+    // The run row is the stage's, started long ago: what counts for the usage limit is this turn.
+    const session: LimitContext = { since: Date.now(), model: run.model };
     void (async () => {
       try {
         const outcome = await this.runQuery({ task, project, run, cwd, ctl, prompt: text, resume: last.session_id!, stageStatus: "running", accumulate: true, verifyCommand: null });
         if (usesWorktree(task)) await this.commitWorktree(task, `kanban(chat): ${task.title}`);
         if (!outcome.ok) {
           this.setRun(run.id, before); // the chat turn failed; the stage result it belonged to stands
-          if (outcome.providerId === ANTHROPIC_PROVIDER_ID && this.pauseForLimit(taskId, outcome.error)) return;
+          // A turn you stopped yourself is stopped, not "paused by your usage limit".
+          if (outcome.providerId === ANTHROPIC_PROVIDER_ID && !ctl.stopped && this.pauseForLimit(taskId, outcome.error, session)) return;
           if (outcome.providerId !== ANTHROPIC_PROVIDER_ID && !ctl.stopped && (await this.afterProviderOut(taskId, run.stage_index, outcome.providerId, outcome.error, run.id, false)) === "paused") return;
           this.setTask(taskId, { status: "failed", error: outcome.error });
           return;
@@ -2465,6 +2937,11 @@ export class TaskRunner {
           const next = this.defaultStart(fresh).fromStage + 1;
           this.setTask(taskId, { status: "failed", error: `Chat done, but the pipeline is incomplete — Retry continues from stage #${next}.` });
         }
+      } catch (err) {
+        // Nothing awaits this turn, so a throw here would be an unhandled rejection — which ends the
+        // whole board, and every task running on it. It fails this task instead.
+        if (this.repo.getRun(run.id)) this.setRun(run.id, before);
+        this.failTask(taskId, `The message could not be handled: ${err instanceof Error ? err.message : String(err)}`);
       } finally {
         this.pipelines.delete(taskId);
       }
@@ -2477,7 +2954,7 @@ export class TaskRunner {
       const { task, project } = this.load(taskId);
       if (task.status !== "review") throw new ConflictError(`Only tasks in review can be approved (status is "${task.status}").`);
       // Approved work is worth remembering: one line, so later tasks in this project inherit it.
-      const summary = task.summary?.trim() || this.repo.latestRun(task.id)?.result_md?.split(/\r?\n/).find((l) => l.trim())?.trim();
+      const summary = outcomeLine(this.repo.runsForTask(task.id), task.summary);
       if (summary) this.repo.addNote({ project_id: project.id, task_id: task.id, text: `${task.title}: ${summary}`, source: "board" });
 
       // Merge whenever a branch exists — even if the mode was switched after the worktree was made.
@@ -2485,11 +2962,24 @@ export class TaskRunner {
       if (task.branch) {
         if (task.worktree_path && existsSync(task.worktree_path)) await this.git.commitAll(task.worktree_path, `kanban: ${task.title}`);
         await this.landBranch(project, task);
-        await this.git.removeWorktree(project.path, task.id, { deleteBranch: "safe" });
-        this.ports.delete(taskId);
+        // The work is merged: from here the task is done whatever happens to the tidying-up. Marking it
+        // only after the worktree and branch were gone left a merged task in Review whenever that
+        // failed — always, for a squash, whose branch git never counts as merged — and approving
+        // again could not succeed.
         done = this.setTask(taskId, { status: "done", branch: null, worktree_path: null, note: null });
+        try {
+          // A squash leaves the branch "unmerged" as far as git can tell; its content has just landed.
+          await this.git.removeWorktree(project.path, task.id, { deleteBranch: project.merge.strategy === "squash" ? "force" : "safe" });
+        } catch (err) {
+          this.log(this.repo.latestRun(taskId)?.id ?? taskId, `[board] cleanup after merging failed: ${String(err)}\n`);
+          done = this.setTask(taskId, {
+            note: `Merged. The board could not remove the task's worktree or its branch (${task.branch}) afterwards — nothing is lost. Settings → Worktrees can clear it once nothing is using the folder.`,
+          });
+        }
+        this.forgetWorkspace(task);
       } else {
         done = this.setTask(taskId, { status: "done", note: null });
+        this.forgetWorkspace(task);
       }
       setImmediate(() => this.promoteReady(project.id)); // anything waiting on this task can start now
       // An approved /init or bootstrap can give the project its verify command. Off the approval
@@ -2513,7 +3003,7 @@ export class TaskRunner {
     return this.hold(taskId, async () => {
       const { task, project } = this.load(taskId);
       if (!task.worktree_path || !existsSync(task.worktree_path)) throw new ConflictError("This task has no worktree to update.");
-      if (this.isBusy(taskId)) throw new ConflictError("Wait for the task to finish before updating its workspace.");
+      // No busy check here: `hold` made it on the way in, and from inside the hold it is always true.
       const base = project.merge.baseBranch?.trim() || (await this.git.currentBranch(project.path));
       await this.git.commitAll(task.worktree_path, `kanban: work in progress on ${task.title}`);
       const res = await this.git.updateFromBase(task.worktree_path, base, project.merge.strategy === "rebase" ? "rebase" : "merge");
@@ -2536,7 +3026,7 @@ export class TaskRunner {
       if (task.branch || task.worktree_path) {
         await this.git.removeWorktree(project.path, task.id, { deleteBranch: "force" });
       }
-      this.ports.delete(taskId);
+      this.forgetWorkspace(task);
       // Discarding after a Reject must not erase why it was rejected: the note is the only record of it.
       const note = task.note?.trim() && task.note !== "work discarded" ? `${task.note.trim()} — work discarded` : "work discarded";
       return this.setTask(taskId, { status: "backlog", branch: null, worktree_path: null, base_sha: null, note, plan_gate: null, blocked: null });
@@ -2555,7 +3045,7 @@ export class TaskRunner {
       if (!["failed", "review", "backlog"].includes(task.status)) throw new ConflictError(`Cannot switch a task in status "${task.status}".`);
       if (task.mode === "supervised") throw new ConflictError("This task is already supervised.");
       if (task.branch || task.worktree_path) await this.git.removeWorktree(project.path, task.id, { deleteBranch: "force" });
-      this.ports.delete(taskId);
+      this.forgetWorkspace(task);
       this.setTask(taskId, { mode: "supervised", branch: null, worktree_path: null, base_sha: null, plan_gate: null });
     });
     const task = this.repo.getTask(taskId)!;
@@ -2593,6 +3083,7 @@ export class TaskRunner {
       this.queryFn as never,
     );
     if (!result) return null;
+    this.repo.addIntakeCost({ task_id: taskId, kind: "triage", model: settings.triageModel, cost_usd: result.cost_usd });
     if (mode === "classify" && (opts.apply ?? true)) {
       const fresh = this.repo.getTask(taskId);
       if (fresh && !fresh.triaged_at) {
@@ -2665,6 +3156,7 @@ export class TaskRunner {
     if (!at || at.description) return at?.description ?? null;
     const settings = this.repo.getSettings();
     const r = await this.describeWithFallback(at.path, settings.visionProvider, settings.visionModel);
+    if (at.task_id) this.repo.addIntakeCost({ task_id: at.task_id, kind: "vision", model: r.by, cost_usd: r.described?.cost_usd ?? 0 });
     const updated = this.repo.describeAttachment(at.id, r.described?.text ?? null, r.described ? r.by : null);
     if (updated && r.described) this.bus.publish({ type: "attachment.added", attachment: updated });
     return r.described?.text ?? null;
@@ -2674,10 +3166,10 @@ export class TaskRunner {
    * The chosen vision provider first; if it is missing, switched off, or cannot see (not every model
    * can), Claude's default vision model does it instead, and the attachment says so.
    */
-  private async describeWithFallback(path: string, providerId: string, model: string): Promise<{ described: { text: string } | null; by: string }> {
+  private async describeWithFallback(path: string, providerId: string, model: string): Promise<{ described: { text: string; cost_usd?: number } | null; by: string }> {
     const label = (id: string, m: string) => `${id === ANTHROPIC_PROVIDER_ID ? "claude" : id} · ${m}`;
     const onClaudeDefault = (providerId || ANTHROPIC_PROVIDER_ID) === ANTHROPIC_PROVIDER_ID;
-    let described: { text: string } | null = null;
+    let described: { text: string; cost_usd?: number } | null = null;
     try {
       const res = this.providers.resolve(providerId);
       described = await describeImageVia(res, model, path, { queryFn: this.queryFn as never, timeoutMs: VISION_TIMEOUT_MS });
@@ -2840,7 +3332,10 @@ export class TaskRunner {
       this.repo.updateTask(t.id, { status: "failed", error: "interrupted (server restarted)" });
     }
     for (const t of this.repo.tasksInStatus(["queued"])) {
-      this.startOpts.set(t.id, this.defaultStart(t));
+      // Where it was queued from lived in memory. A task with every stage already done can only have
+      // been queued to run again — sent back from Review — so it starts over; "the first stage
+      // without a success" would have re-run its last stage alone, in the old session.
+      this.startOpts.set(t.id, this.pipelineComplete(t) ? { fromStage: 0 } : this.defaultStart(t));
       this.queue.enqueue({ taskId: t.id, projectId: t.project_id });
     }
   }

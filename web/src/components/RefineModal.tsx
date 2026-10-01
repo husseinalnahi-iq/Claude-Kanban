@@ -1,9 +1,10 @@
+import { PRIORITY_META } from "../lib/format.ts";
 import { useEffect, useState } from "react";
 import type { TaskType } from "../../../server/src/types.ts";
 import { TASK_TYPES, PRIORITIES } from "../../../server/src/types.ts";
 import { api, type TriageProposal } from "../lib/api.ts";
 import { Markdown } from "../lib/markdown.tsx";
-import { Button, ErrorLine, Field, inputCls, Modal, useAction } from "./ui.tsx";
+import { Button, ErrorLine, Field, inputCls, Modal, Select, useAction } from "./ui.tsx";
 
 /**
  * "Improve this request": Claude rewrites a rough ask into a spec with checkable outcomes and,
@@ -56,14 +57,14 @@ export function RefineModal({ taskId, onClose, onApplied }: { taskId: string; on
 
           <div className="grid grid-cols-[1fr_1fr_auto] gap-2">
             <Field label="Type">
-              <select className={`${inputCls} font-mono`} value={proposal.type} onChange={(e) => setProposal({ ...proposal, type: e.target.value as TaskType })}>
+              <Select wide className="font-mono" value={proposal.type} onChange={(e) => setProposal({ ...proposal, type: e.target.value as TaskType })}>
                 {TASK_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-              </select>
+              </Select>
             </Field>
             <Field label="Priority" hint="Claude's suggestion — you decide.">
-              <select className={`${inputCls} font-mono`} value={proposal.priority} onChange={(e) => setProposal({ ...proposal, priority: e.target.value as typeof proposal.priority })}>
-                {PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
-              </select>
+              <Select wide className="font-mono" value={proposal.priority} onChange={(e) => setProposal({ ...proposal, priority: e.target.value as typeof proposal.priority })}>
+                {PRIORITIES.map((p) => <option key={p} value={p}>{PRIORITY_META[p].short}</option>)}
+              </Select>
             </Field>
             <Field label="Confidence">
               <div className="px-2 py-1.5 font-mono text-[13px] text-ink-300">{Math.round((proposal.confidence ?? 0) * 100)}%</div>

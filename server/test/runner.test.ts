@@ -354,6 +354,35 @@ test("approve holds the task busy while git works; double approve is refused", a
   }
 });
 
+test("Approve marks the task done once the merge lands; a clean-up that fails is a note, not a task stuck in Review", async () => {
+  const asked: unknown[] = [];
+  const g = fakeGit({}, {
+    removeWorktree: async (_p: string, _id: string, opts: unknown) => {
+      asked.push(opts);
+      throw new Error("git worktree remove failed: Permission denied");
+    },
+  });
+  const s = setup(fakeQuery().fn);
+  const runner = new TaskRunner({ repo: s.repo, bus: s.bus, queryFn: fakeQuery().fn, git: g.git });
+  try {
+    const review = (title: string) => {
+      const task = s.repo.createTask({ project_id: s.project.id, title, mode: "autonomous", pipeline: ONE_STAGE });
+      return s.repo.updateTask(task.id, { status: "review", branch: `kanban/${task.id}`, base_sha: "a".repeat(40) });
+    };
+    const done = await runner.approveTask(review("merge").id);
+    assert.equal(done.status, "done", "the work is merged, so the task is done");
+    assert.equal(done.branch, null);
+    assert.match(done.note ?? "", /^Merged\. The board could not remove the task's worktree or its branch/);
+    await assert.rejects(runner.approveTask(done.id), /Only tasks in review/, "nothing invites a second merge");
+
+    s.repo.updateProject(s.project.id, { merge: { ...s.project.merge, strategy: "squash" } });
+    await runner.approveTask(review("squash").id);
+    assert.deepEqual(asked, [{ deleteBranch: "safe" }, { deleteBranch: "force" }], "only a squash, whose branch git never counts as merged, is deleted by force");
+  } finally {
+    s.cleanup();
+  }
+});
+
 test("a supervised task on its own branch gets a worktree, still asks for every write, and lands on Approve (D234)", async () => {
   const f = fakeQuery({ askWrite: true });
   const g = fakeGit();

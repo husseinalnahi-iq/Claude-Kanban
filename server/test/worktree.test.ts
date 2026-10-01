@@ -112,3 +112,24 @@ test("isGitRepo is false for a plain folder", async () => {
   assert.equal(await isGitRepo(dir), false);
   rmSync(dir, { recursive: true, force: true });
 });
+
+test("a worktree folder something else is still using does not stop its merged branch from going", async () => {
+  const repo = makeRepo();
+  const { spawn } = await import("node:child_process");
+  const wt = await addWorktree(repo, "t_held");
+  writeFileSync(join(wt.path, "game.js"), "play()\n");
+  await commitAll(wt.path, "kanban: game");
+  await mergeTask(repo, wt.branch, "Merge kanban/t_held");
+  // A program whose working folder is the worktree: on Windows git can then empty the folder but not delete it.
+  const holder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 20000)"], { cwd: wt.path, stdio: "ignore" });
+  await new Promise((r) => setTimeout(r, 300));
+  try {
+    await removeWorktree(repo, "t_held", { deleteBranch: "safe" });
+    assert.equal(git(repo, "branch", "--format=%(refname:short)"), "main", "the merged branch is gone");
+    assert.equal((await listWorktrees(repo)).length, 1, "git no longer lists the worktree");
+  } finally {
+    holder.kill();
+    await new Promise((r) => setTimeout(r, 200));
+    rmSync(repo, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});

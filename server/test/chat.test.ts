@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { setup } from "./helpers.ts";
-import { ChatService, CHAT_DISALLOWED, chatPrompt, describeTool } from "../src/engine/chat.ts";
+import { fakeQuery, setup } from "./helpers.ts";
+import { cardsLine, ChatService, CHAT_DISALLOWED, chatPrompt, describeTool, turnContext } from "../src/engine/chat.ts";
 import { chatBoardHandlers } from "../src/engine/chatBoard.ts";
 import { Scheduler } from "../src/engine/scheduler.ts";
 import type { QueryFn } from "../src/engine/runner.ts";
@@ -44,7 +44,7 @@ test("a chat reply streams, is stored with its tool lines, costs what it cost, a
   try {
     const c = chat.create(s.project.id);
     assert.equal(c.title, "New chat");
-    assert.equal(c.model, "claude-sonnet-5", "the balanced default");
+    assert.equal(c.model, "claude-sonnet-5-5", "the balanced default");
     assert.equal(c.effort, "medium");
 
     chat.send(c.id, "How does the board store tasks?");
@@ -159,8 +159,128 @@ test("chat board tools: cards land in Backlog under the project's rules; queue a
 test("tool lines and the chat's instructions read plainly", () => {
   assert.equal(describeTool("Grep", { pattern: "useWs" }, "/p"), "searched the code for “useWs”");
   assert.equal(describeTool("mcp__board__board_create_task", { title: "Dark mode" }, "/p"), "created the card “Dark mode”");
-  const p = chatPrompt({ name: "Shop", path: "/p" } as any, new Date(2026, 8, 14, 22, 0));
+  const p = chatPrompt({ name: "Shop", path: "/p" } as any);
   assert.match(p, /cannot edit files/);
   assert.match(p, /Never queue or schedule a card the user did not ask to run/);
-  assert.match(p, /UTC[+-]\d{2}:\d{2}/, "the local offset, so 'tonight at 3' can be scheduled correctly");
+  assert.doesNotMatch(p, /UTC[+-]\d{2}/, "no clock in the system prompt: it would re-bill the whole conversation every minute");
+  assert.match(turnContext(new Date(2026, 8, 14, 22, 0)), /^\[Local time: .*22:00 \(UTC[+-]\d{2}:\d{2}\)\]$/, "the local offset rides on each message, so 'tonight at 3' can be scheduled correctly");
+});
+
+test("chat board tools: the chat can follow a card, tell it something, answer its question, and re-run a failed one", async () => {
+  const q = fakeQuery({ byCall: (i) => (i === 2 ? { fail: true } : undefined) });
+  const s = setup(q.fn);
+  const cards: any[] = [];
+  const h = chatBoardHandlers({ repo: s.repo, bus: s.bus, runner: s.runner }, s.project.id, (c) => cards.push(c));
+  const read = (r: { content: { text: string }[] }) => JSON.parse(r.content[0].text);
+  try {
+    const t = s.repo.createTask({ project_id: s.project.id, title: "Add a dark mode", mode: "supervised", pipeline: ONE });
+    assert.equal((h.messageTask({ task_id: t.id, text: "use blue" }) as any).isError, true, "a card that never ran has no session to talk to");
+    assert.match(h.messageTask({ task_id: t.id, text: "use blue" }).content[0].text, /has not run yet/);
+
+    s.runner.queueTask(t.id);
+    await until(() => s.repo.getTask(t.id)!.status === "review");
+    const p = read(h.taskProgress({ task_id: t.id }));
+    assert.equal(p.status, "review");
+    assert.equal(p.stages[0].status, "success");
+    assert.match(p.stages[0].stage, /^1\. code · m · low$/);
+    assert.equal(p.stages[0].result, "DONE");
+    assert.equal(p.cost_usd, 0.01);
+    assert.deepEqual(p.recent_activity.slice(-2), ["Claude: working", "Stage finished: DONE"], "its steps as plain lines, newest last");
+
+    assert.equal(read(h.messageTask({ task_id: t.id, text: "Also make the buttons blue." })).sent, true);
+    await until(() => q.calls.length === 2 && !s.runner.isBusy(t.id));
+    assert.equal(q.calls[1].prompt, "Also make the buttons blue.", "the card's own session gets the user's words");
+    assert.equal(q.calls[1].options.resume, "s1", "and continues where it was");
+    assert.ok(read(h.taskProgress({ task_id: t.id })).recent_activity.includes("Message to the task: Also make the buttons blue."));
+
+    s.repo.updateTask(t.id, { questions: [{ id: "q1", stage_index: 0, text: "Which blue?", options: ["navy", "sky"], default: "navy", answer: null, created_at: new Date().toISOString(), answered_at: null }] });
+    assert.equal(read(h.listTasks({})).tasks[0].open_questions, 1, "the list says which cards are waiting on the user");
+    assert.deepEqual(read(h.taskProgress({ task_id: t.id })).open_questions, [{ question_id: "q1", text: "Which blue?", options: ["navy", "sky"] }]);
+    assert.equal(read(h.answerQuestion({ task_id: t.id, answer: "sky" })).with, "sky");
+    assert.equal(s.repo.getTask(t.id)!.questions[0].answer, "sky");
+    assert.equal((h.answerQuestion({ task_id: t.id, answer: "navy" }) as any).isError, true, "nothing left to answer");
+
+    assert.equal((h.stopTask({ task_id: t.id }) as any).isError, true, "a card that is not queued or running cannot be stopped");
+    assert.equal((h.retryTask({ task_id: t.id }) as any).isError, true, "only a failed card is retried");
+
+    const bad = s.repo.createTask({ project_id: s.project.id, title: "Breaks", mode: "supervised", pipeline: ONE });
+    s.runner.queueTask(bad.id);
+    await until(() => s.repo.getTask(bad.id)!.status === "failed");
+    assert.equal(read(h.taskProgress({ task_id: bad.id })).stages[0].status, "failed");
+    assert.equal(read(h.retryTask({ task_id: bad.id })).retried.id, bad.id);
+    await until(() => s.repo.getTask(bad.id)!.status === "review");
+    assert.deepEqual(cards.map((c) => c.action), ["messaged", "answered", "retried"]);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("the chat's own words for its new tools, and what it must leave to the user", () => {
+  assert.equal(describeTool("mcp__board__board_task_progress", {}, "/p"), "checked how a card is going");
+  assert.equal(describeTool("mcp__board__board_message_task", { text: "use blue" }, "/p"), "told a card: “use blue”");
+  const p = chatPrompt({ name: "Shop", path: "/p" } as any);
+  assert.match(p, /board_task_progress/);
+  assert.match(p, /Approving, landing or discarding a card's work is the user's own decision/);
+});
+
+test("the chat reads only inside its project, and never a file that holds keys", async () => {
+  const q = replying();
+  const s = setup(q.fn);
+  const chat = new ChatService({ repo: s.repo, bus: s.bus, runner: s.runner });
+  try {
+    const c = chat.create(s.project.id);
+    chat.send(c.id, "hello");
+    await until(() => !chat.isBusy(c.id));
+    const can = (name: string, input: Record<string, unknown>) =>
+      q.calls[0].options.canUseTool(name, input, { signal: new AbortController().signal, toolUseID: "t", requestId: "r" });
+    assert.equal((await can("Read", { file_path: `${s.dir}/src/app.ts` })).behavior, "allow");
+    assert.equal((await can("Grep", { pattern: "useWs" })).behavior, "allow", "a search with no path runs in the project");
+    const outside = await can("Read", { file_path: `${s.dir}-elsewhere/notes.txt` });
+    assert.equal(outside.behavior, "deny");
+    assert.match(outside.message, /only reads files inside this project/);
+    const keys = await can("Read", { file_path: `${s.dir}/.env` });
+    assert.equal(keys.behavior, "deny", "a page it read could ask for your keys, and no card would show it");
+    assert.match(keys.message, /passwords or keys/);
+    assert.match(q.calls[0].prompt, /^\[Local time: .*\]\n\nhello$/, "the clock rides on the message, not the cached system prompt");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("chat board tools: the list counts every status and hides Done; queueing never restarts reviewed or failed work", async () => {
+  const q = fakeQuery({ byCall: (i) => (i === 1 ? { fail: true } : undefined) });
+  const s = setup(q.fn);
+  const h = chatBoardHandlers({ repo: s.repo, bus: s.bus, runner: s.runner }, s.project.id, () => {});
+  const read = (r: { content: { text: string }[] }) => JSON.parse(r.content[0].text);
+  try {
+    assert.equal(read(h.listTasks({})).note, "No cards on this board yet.");
+    const reviewed = s.repo.createTask({ project_id: s.project.id, title: "Reviewed", mode: "supervised", pipeline: ONE });
+    s.runner.queueTask(reviewed.id);
+    await until(() => s.repo.getTask(reviewed.id)!.status === "review");
+    const failed = s.repo.createTask({ project_id: s.project.id, title: "Failed", mode: "supervised", pipeline: ONE });
+    s.runner.queueTask(failed.id);
+    await until(() => s.repo.getTask(failed.id)!.status === "failed");
+    const done = s.repo.createTask({ project_id: s.project.id, title: "Old work", pipeline: ONE });
+    s.repo.updateTask(done.id, { status: "done" });
+
+    const list = read(h.listTasks({}));
+    assert.deepEqual(list.counts, { review: 1, failed: 1, done: 1 });
+    assert.deepEqual(list.tasks.map((t: any) => t.title).sort(), ["Failed", "Reviewed"], "finished cards are counted, not listed");
+    assert.match(list.note, /1 done card/);
+    assert.deepEqual(read(h.listTasks({ status: "done" })).tasks.map((t: any) => t.title), ["Old work"]);
+    assert.equal(read(h.listTasks({ status: "running" })).note, "No card is running right now.", "an empty filter is not an empty board");
+
+    const again = h.queueTask({ task_id: reviewed.id }) as any;
+    assert.equal(again.isError, true, "queueing would redo work that is waiting for review");
+    assert.match((h.queueTask({ task_id: failed.id }) as any).content[0].text, /board_retry_task/);
+    assert.equal(s.repo.getTask(reviewed.id)!.status, "review");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("a card the chat made and started is counted once under the reply", () => {
+  const made = { id: "t_1", title: "Game", action: "created" as const };
+  assert.equal(cardsLine([made, { ...made, action: "queued" }]), "1 card");
+  assert.equal(cardsLine([made, { id: "t_2", title: "Docs", action: "created" }]), "2 cards");
 });

@@ -161,12 +161,15 @@ const firstLine = (s: string | null | undefined) => (s ?? "").split(/\r?\n/).fin
 export async function seedAlerts() {
   try {
     const projects = await api.projects();
-    for (const p of projects) {
-      for (const t of await api.tasks(p.id)) {
-        known.set(t.id, { status: t.status, title: t.title, project: t.project_id, stages: t.pipeline.length });
-        askedQuestions.set(t.id, new Set((t.questions ?? []).map((q) => q.id)));
-        if (t.status === "review" && t.stage_states.includes("running")) reviewing.add(t.id);
-      }
+    const cards = (await Promise.all(projects.map((p) => api.tasks(p.id)))).flat();
+    // Replaced in one go, after the requests: this also runs when the socket comes back, and a task
+    // deleted during the gap must not stay "running" here and hold back the all-clear for ever.
+    known.clear();
+    reviewing.clear();
+    for (const t of cards) {
+      known.set(t.id, { status: t.status, title: t.title, project: t.project_id, stages: t.pipeline.length });
+      askedQuestions.set(t.id, new Set((t.questions ?? []).map((q) => q.id)));
+      if (t.status === "review" && t.stage_states.includes("running")) reviewing.add(t.id);
     }
     for (const l of await api.limits()) usage.set(l.type, l.utilization ?? 0);
   } catch {

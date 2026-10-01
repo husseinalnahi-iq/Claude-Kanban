@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { FastifyInstance } from "fastify";
 import type { AppDeps } from "../app.ts";
 import { pickFolder } from "../folderPicker.ts";
+import { busyItems } from "./busy.ts";
 
 const SERVER_SRC = join(dirname(fileURLToPath(import.meta.url)), "..");
 const STARTED_AT = Date.now();
@@ -23,6 +24,22 @@ export async function systemRoutes(app: FastifyInstance, { repo, runner }: AppDe
    * left running across an update serves a page that asks it for things it does not have yet.
    */
   app.get("/version", async () => ({ startedAt: new Date(STARTED_AT).toISOString(), stale: newestChange() > STARTED_AT }));
+
+  /**
+   * Is the board in the middle of anything that stopping it would lose? The launcher asks before it
+   * restarts an older server. It used to look at the queue alone, and so restarted over a follow-up
+   * chat, a merge in progress, a side-chat reply, a spec rewrite, an install from Setup or an open terminal.
+   */
+  app.get("/busy", async () => {
+    const q = runner.queue.snapshot();
+    const waiting = new Set(q.waiting);
+    // A card waiting its turn is picked up again after a restart; one being worked on is not.
+    const tasks = new Set([...q.running, ...repo.taskIds().filter((id) => runner.isBusy(id) && !waiting.has(id))]);
+    const other = busyItems(runner);
+    const count = (what: string) => other.filter((i) => i.what === what).length;
+    const counts = { tasks: tasks.size, chats: count("chat"), specRewrites: count("spec"), setupFixes: count("setup"), terminals: count("terminal") };
+    return { busy: Object.values(counts).some((n) => n > 0), ...counts };
+  });
 
   /** Opens the folder picker on this machine (the board is local-only) and returns what was chosen. */
   app.post("/pick-folder", async (req) => {

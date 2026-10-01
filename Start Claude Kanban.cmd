@@ -31,6 +31,10 @@ echo Installing its parts - a minute or two, first run only...
 call npm install --no-audit --no-fund || goto :fail
 
 :build
+REM Claude's engine: get the newest one, so a new Claude model shows up without waiting for a board
+REM update. Checks each start (D266), and never stops the board from starting.
+node --disable-warning=ExperimentalWarning scripts\update-engine.mjs
+
 echo Building the UI...
 call npm run build || goto :fail
 

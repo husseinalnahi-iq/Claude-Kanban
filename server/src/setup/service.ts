@@ -60,6 +60,16 @@ export class SetupService {
     return this.deps.repo.getSettings();
   }
 
+  /** The board this service belongs to. */
+  get runner(): TaskRunner {
+    return this.deps.runner;
+  }
+
+  /** Checks a built-in fix is running for right now: an install or a download that stopping the server would cut off. */
+  fixing(): string[] {
+    return [...this.running];
+  }
+
   private ctx(): CheckCtx {
     return {
       probe: this.probe,
@@ -94,13 +104,17 @@ export class SetupService {
     return c.id !== "node" && !c.login && !c.form && Boolean(c.claude || c.run);
   }
 
-  private openTask(id: string): Task | undefined {
+  /** Every "Fix with Claude" task still open, read once however many checks are being answered. */
+  private openTasks(): Task[] {
     const p = this.deps.repo.findSetupProject();
-    if (!p) return undefined;
-    return this.deps.repo.listTasks({ project_id: p.id }).filter((t) => t.labels.includes(LABEL + id) && !CLOSED.includes(t.status)).at(-1);
+    return p ? this.deps.repo.listTasks({ project_id: p.id }).filter((t) => !CLOSED.includes(t.status)) : [];
   }
 
-  private result(c: SetupCheck, d: Detected): SetupCheckResult {
+  private openTask(id: string, open: Task[] = this.openTasks()): Task | undefined {
+    return open.filter((t) => t.labels.includes(LABEL + id)).at(-1);
+  }
+
+  private result(c: SetupCheck, d: Detected, open?: Task[]): SetupCheckResult {
     const fixes: SetupCheckResult["fixes"] = [];
     if (!d.ok && !d.blockedBy) {
       if (c.login) fixes.push("login");
@@ -120,13 +134,15 @@ export class SetupService {
       manual: c.manual?.[this.probe.platform] ?? null,
       link: c.link ?? null,
       running: this.running.has(c.id),
-      taskId: this.openTask(c.id)?.id ?? null,
+      taskId: this.openTask(c.id, open)?.id ?? null,
     };
   }
 
   async all(fresh = false): Promise<SetupCheckResult[]> {
     const checks = buildChecks(this.deps.repo.getSettings());
-    return Promise.all(checks.map(async (c) => this.result(c, await this.detect(c, fresh))));
+    const detected = await Promise.all(checks.map((c) => this.detect(c, fresh)));
+    const open = this.openTasks();
+    return checks.map((c, i) => this.result(c, detected[i], open));
   }
 
   async recheck(id: string): Promise<SetupCheckResult> {
@@ -183,7 +199,7 @@ export class SetupService {
       mode: "supervised",
       labels: [LABEL + id],
       // It runs installers, which only a real Claude Code session can: always Claude, like /init.
-      pipeline: [{ stage: "custom", model: settings.tiers.balanced.provider === "anthropic" ? settings.tiers.balanced.model : "claude-sonnet-5", effort: "medium", prompt: "Do the task below. Every command you run is shown to the user for approval first." }],
+      pipeline: [{ stage: "custom", model: settings.tiers.balanced.provider === "anthropic" ? settings.tiers.balanced.model : "sonnet", effort: "medium", prompt: "Do the task below. Every command you run is shown to the user for approval first." }],
     });
     bus.publish({ type: "task.updated", task });
     // "Run now": you clicked it and are watching it, so it must not wait behind board work (serial mode).

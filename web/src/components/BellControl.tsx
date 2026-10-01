@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ALERT_KINDS, kindInfo, raise, setAlertPrefs, setKindChannel, useAlertPrefs, useUnseen, type AlertKind } from "../lib/alerts.ts";
 import { disableNotifications, enableNotifications, notifyState } from "../lib/notify.ts";
 import { THEMES, playSound, type SoundTheme } from "../lib/sounds.ts";
+import { useEscape } from "./ui.tsx";
 
 /** What a preview says, so trying a sound also shows what its pop-up looks like. */
 const SAMPLE: Record<AlertKind, [string, string]> = {
@@ -56,14 +57,10 @@ export function BellControl() {
   useEffect(() => {
     if (!open) return;
     const close = (e: MouseEvent) => !box.current?.contains(e.target as Node) && setOpen(false);
-    const esc = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
     window.addEventListener("mousedown", close);
-    window.addEventListener("keydown", esc);
-    return () => {
-      window.removeEventListener("mousedown", close);
-      window.removeEventListener("keydown", esc);
-    };
+    return () => window.removeEventListener("mousedown", close);
   }, [open]);
+  useEscape(() => setOpen(false), open);
 
   const sample = (theme: SoundTheme = prefs.theme, volume = prefs.volume) => playSound("review", theme, volume);
 

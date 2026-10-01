@@ -9,11 +9,12 @@ export interface ViewPrefs {
   zoom: number;
   /** Column width in pixels, or "fill" to share the window evenly with no dead space on the right. */
   columns: number | "fill";
-  /** Dark, light, or whatever this computer is set to. */
+  /** Dark, light, navy, or whatever this computer is set to. */
   theme: Theme;
 }
 
-export type Theme = "system" | "light" | "dark";
+export type Theme = "system" | "light" | "dark" | "navy";
+const THEME_VALUES: readonly Theme[] = ["system", "light", "dark", "navy"];
 
 export const ZOOMS = [85, 100, 115, 125, 150];
 export const COLUMN_SIZES: { label: string; value: number | "fill" }[] = [
@@ -27,6 +28,7 @@ export const THEMES: { label: string; value: Theme; hint: string }[] = [
   { label: "Auto", value: "system", hint: "Follows this computer's light/dark setting" },
   { label: "Light", value: "light", hint: "Always light" },
   { label: "Dark", value: "dark", hint: "Always dark" },
+  { label: "Navy", value: "navy", hint: "Deep blue, with Inter and JetBrains Mono as its typefaces" },
 ];
 
 export const KEY = "kanban.view";
@@ -40,7 +42,7 @@ function read(): ViewPrefs {
     return {
       zoom: ZOOMS.includes(Number(v.zoom)) ? Number(v.zoom) : DEFAULTS.zoom,
       columns: v.columns === "fill" || typeof v.columns === "number" ? v.columns : DEFAULTS.columns,
-      theme: v.theme === "light" || v.theme === "dark" || v.theme === "system" ? v.theme : DEFAULTS.theme,
+      theme: THEME_VALUES.includes(v.theme as Theme) ? (v.theme as Theme) : DEFAULTS.theme,
     };
   } catch {
     return DEFAULTS;
@@ -77,7 +79,8 @@ export function useViewPrefs(): ViewPrefs {
 }
 
 /**
- * Paints the chosen theme onto <html>, and keeps following the computer while the choice is "system".
+ * Paints the chosen theme onto <html>, and keeps following the computer while the choice is "system"
+ * (which only ever picks light or dark; navy is always a choice).
  * The same attribute is set by a tiny script in index.html before first paint, so this only ever
  * confirms what is already on screen — there is no flash of the wrong theme on load.
  */
@@ -91,3 +94,10 @@ export function applyTheme(theme: Theme): () => void {
   media.addEventListener("change", paint);
   return () => media.removeEventListener("change", paint);
 }
+
+/**
+ * The whole-UI scale as the browser applies it (App sets `zoom` on <html>). A box measured with
+ * getBoundingClientRect is in real screen pixels, but a `position: fixed` element inside the zoomed
+ * page is placed in zoomed ones, so anything that puts a panel next to a measured box divides by this.
+ */
+export const pageZoom = (): number => (typeof document === "undefined" ? 1 : Number(document.documentElement.style.zoom) || 1);

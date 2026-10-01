@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Provider, ProviderModel, ProviderTestResult } from "../../../../server/src/types.ts";
 import { api, type ProviderPreset, type ProviderRow } from "../../lib/api.ts";
-import { Button, ErrorLine, Field, inputCls, useAction } from "../../components/ui.tsx";
+import { Button, ErrorLine, Field, inputCls, Select, useAction } from "../../components/ui.tsx";
 import { useCatalog } from "../../lib/catalog.ts";
 import { useAppData } from "../../lib/store.tsx";
 import { isLocal } from "../../../../server/src/engine/providers/catalog.ts";
@@ -165,9 +165,9 @@ function ProviderCard({ p, hasSecret, onChange, onRemove, onSecretChanged }: { p
           </Field>
         ) : (
           <Field label="CLI preset">
-            <select className={`${inputCls} font-mono`} value={p.cli?.preset ?? "custom"} onChange={(e) => onChange({ ...p, cli: { ...(p.cli ?? {}), preset: e.target.value as NonNullable<Provider["cli"]>["preset"] } })}>
+            <Select wide className="font-mono" value={p.cli?.preset ?? "custom"} onChange={(e) => onChange({ ...p, cli: { ...(p.cli ?? {}), preset: e.target.value as NonNullable<Provider["cli"]>["preset"] } })}>
               {["codex", "gemini", "kimi", "opencode", "custom"].map((k) => <option key={k} value={k}>{k}</option>)}
-            </select>
+            </Select>
           </Field>
         )}
         <Field label="Secret name" hint="The name the key is stored under (and the env var that can supply it).">
@@ -207,10 +207,10 @@ function ProviderCard({ p, hasSecret, onChange, onRemove, onSecretChanged }: { p
         {p.kind === "anthropic-compatible" && !isLocal(p) ? (
           <label className="mt-1.5 flex items-center gap-2 text-[11.5px] text-ink-400">
             Sent as
-            <select className={`${inputCls} h-7 w-auto! py-0 text-[11.5px]`} value={p.authStyle ?? "bearer"} onChange={(e) => onChange({ ...p, authStyle: e.target.value as Provider["authStyle"] })}>
+            <Select className="h-7 py-0 text-[11.5px]" value={p.authStyle ?? "bearer"} onChange={(e) => onChange({ ...p, authStyle: e.target.value as Provider["authStyle"] })}>
               <option value="bearer">a bearer token (most providers)</option>
               <option value="api-key">an API key (Kimi Code)</option>
-            </select>
+            </Select>
           </label>
         ) : null}
       </div>
@@ -253,10 +253,10 @@ function ProviderCard({ p, hasSecret, onChange, onRemove, onSecretChanged }: { p
       </div>
 
       <div className="mt-3 flex items-center gap-2">
-        <select className={`${inputCls} max-w-[220px] font-mono`} value={testModel} onChange={(e) => setTestModel(e.target.value)}>
+        <Select wide wrapClassName="max-w-[220px]" className="font-mono" value={testModel} onChange={(e) => setTestModel(e.target.value)}>
           {testIds.length ? null : <option value="">first model it reports</option>}
           {testIds.map((id) => <option key={id} value={id}>{id}</option>)}
-        </select>
+        </Select>
         <Button
           size="sm"
           busy={testing}
@@ -322,10 +322,10 @@ export function ProviderSettings({ providers, onChange }: { providers: Provider[
       >
         <LocalModelsGuide providers={providers} presets={presets} />
         <div className="flex items-center gap-2">
-          <select className={`${inputCls} max-w-[320px]`} value={pick} onChange={(e) => setPick(e.target.value)}>
+          <Select wide wrapClassName="max-w-[320px]" value={pick} onChange={(e) => setPick(e.target.value)}>
             <option value="">Add from a preset…</option>
             {presets.map((p) => <option key={p.id} value={p.id}>{p.label} — {p.kind}</option>)}
-          </select>
+          </Select>
           <Button size="sm" disabled={!pick} onClick={() => void add()}>Add</Button>
         </div>
         {pick ? <p className="mt-2 text-[11.5px] text-ink-400">{presets.find((p) => p.id === pick)?.blurb} <span className="text-ink-500">{presets.find((p) => p.id === pick)?.help}</span></p> : null}

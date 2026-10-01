@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Approval, Mode, Stage } from "../../../server/src/types.ts";
+import { IMAGE_TOOL } from "../../../server/src/types.ts";
 import { api, type TaskDetail } from "../lib/api.ts";
-import { useWs, watchTask } from "../lib/ws.ts";
+import { useWs, useWsReconnect, watchTask } from "../lib/ws.ts";
 import { navigate } from "../lib/router.ts";
 import { ScheduleModal, startLabel } from "../components/SchedulesPanel.tsx";
 import { QuestionCard, QuestionHistory } from "../components/QuestionCard.tsx";
 import { isQuestion } from "../lib/questions.ts";
-import { openTerminal } from "../components/TerminalDock.tsx";
+import { openTerminal } from "../lib/terminal.ts";
 import { LiveBrowser } from "../components/LiveBrowser.tsx";
 import { useAppData } from "../lib/store.tsx";
 import { Markdown } from "../lib/markdown.tsx";
@@ -15,8 +16,8 @@ import type { Stage as PipelineStage } from "../../../server/src/types.ts";
 import { PRIORITIES, TASK_TYPES } from "../../../server/src/types.ts";
 import { RefineModal } from "../components/RefineModal.tsx";
 import { SpecSection } from "../components/SpecSection.tsx";
-import { Button, Chip, Empty, ErrorLine, inputCls, ModeChip, ModeHelp, useAction } from "../components/ui.tsx";
-import { PipelineEditor } from "../components/PipelineEditor.tsx";
+import { Button, Chip, Empty, ErrorLine, inputCls, ModeChip, ModeHelp, Select, useAction, useEscape, useFocusTrap } from "../components/ui.tsx";
+import { PipelineEditor, pipelineLine } from "../components/PipelineEditor.tsx";
 import { Transcript } from "../components/Transcript.tsx";
 import { DiffView } from "../components/DiffView.tsx";
 import { DepGraph } from "../components/DepGraph.tsx";
@@ -29,6 +30,8 @@ import { autonomousBlocked, branchBlocked, NewTaskForm } from "../components/for
 import { useAsk } from "../components/Ask.tsx";
 import { BlockedPanel, CheckoutNote, QuestionsPanel, ResultPanel } from "../components/Outcome.tsx";
 import { CredentialWarning } from "../components/CredentialWarning.tsx";
+import { ChecklistPanel } from "../components/Checklist.tsx";
+import { effortsFor, useClaudeModels } from "../lib/claudeModels.ts";
 
 type Tab = "spec" | "plan" | "pipeline" | "transcript" | "approvals" | "browser" | "diff" | "subtasks" | "files" | "messages" | "chat";
 const TABS: Tab[] = ["spec", "plan", "pipeline", "transcript", "approvals", "browser", "diff", "subtasks", "files", "messages", "chat"];
@@ -74,7 +77,17 @@ function useTaskDetail(taskId: string) {
     watchTask(taskId);
     return () => watchTask(null);
   }, [load, taskId]);
+  useWsReconnect(load);
+  const shown = useRef(detail);
+  shown.current = detail;
   useWs((m) => {
+    // A running stage reports its context size on nearly every message. That is one number on one
+    // run, so it is put in place here; asking for the whole task again each time also ran git twice
+    // on the server, several times a second. A change of status still reloads: it moves other things.
+    if (m.type === "run.updated" && m.run.task_id === taskId && shown.current?.runs.find((r) => r.id === m.run.id)?.status === m.run.status) {
+      setDetail((d) => d && { ...d, runs: d.runs.map((r) => (r.id === m.run.id ? m.run : r)) });
+      return;
+    }
     const related =
       (m.type === "task.updated" && (m.task.id === taskId || m.task.parent_id === taskId)) ||
       ((m.type === "run.updated" || m.type === "run.finished") && m.run.task_id === taskId) ||
@@ -89,6 +102,16 @@ function useTaskDetail(taskId: string) {
 
 function ApprovalInput({ a }: { a: Approval }) {
   const input = (a.input ?? {}) as Record<string, any>;
+  if (a.tool_name === IMAGE_TOOL)
+    return (
+      <div className="rounded bg-ink-950 px-2.5 py-2 text-[12px] text-ink-200">
+        <div className="mb-0.5 text-[11px] uppercase tracking-wide text-ink-500">Make an image with the free image model</div>
+        <div className="whitespace-pre-wrap">{String(input.prompt ?? "")}</div>
+        <div className="mt-1 font-mono text-[11.5px] text-ink-400">
+          → {String(input.file ?? "generated-images/…")}{input.width || input.height ? ` · ${input.width ?? 1024}×${input.height ?? 1024}` : ""}
+        </div>
+      </div>
+    );
   if (a.tool_name === "Bash") return <pre className="rounded bg-ink-950 px-2.5 py-2 font-mono text-[12px] text-amber whitespace-pre-wrap">$ {input.command}</pre>;
   if (a.tool_name === "Write")
     return (
@@ -137,7 +160,10 @@ function PendingToolApproval({ a }: { a: Approval }) {
 }
 
 function SpecTab({ d }: { d: TaskDetail }) {
-  const { projects } = useAppData();
+  const { projects, settings } = useAppData();
+  // The suggested pipeline, being changed before it is used: model and effort per stage.
+  const [adjusting, setAdjusting] = useState<Stage[] | null>(null);
+  const claude = useClaudeModels();
   const project = projects.find((p) => p.id === d.task.project_id);
   const { busy, error, run } = useAction();
   const blocked = project ? autonomousBlocked(project) : null;
@@ -150,16 +176,16 @@ function SpecTab({ d }: { d: TaskDetail }) {
       {["review", "done"].includes(t.status) ? <ResultPanel d={d} /> : null}
       <CheckoutNote d={d} />
       <div className="flex flex-wrap items-center gap-2">
-        <select className={`${inputCls} w-auto! font-mono text-[12px]`} value={t.type} onChange={(e) => run(() => api.patchTask(t.id, { type: e.target.value as typeof t.type }))}>
+        <Select className="font-mono text-[12px]" aria-label="Type" value={t.type} onChange={(e) => run(() => api.patchTask(t.id, { type: e.target.value as typeof t.type }))}>
           {TASK_TYPES.map((x) => <option key={x} value={x}>{x}</option>)}
-        </select>
-        <select className={`${inputCls} w-auto! font-mono text-[12px]`} value={t.priority} onChange={(e) => run(() => api.patchTask(t.id, { priority: e.target.value as typeof t.priority }))}>
-          {PRIORITIES.map((p) => <option key={p} value={p}>{PRIORITY_META[p].title}</option>)}
-        </select>
+        </Select>
+        <Select className="font-mono text-[12px]" aria-label="Priority" title={PRIORITY_META[t.priority].title} value={t.priority} onChange={(e) => run(() => api.patchTask(t.id, { priority: e.target.value as typeof t.priority }))}>
+          {PRIORITIES.map((p) => <option key={p} value={p}>{PRIORITY_META[p].short}</option>)}
+        </Select>
         {t.labels.map((l) => (
           <Chip key={l} className="border-ink-600 text-ink-200 normal-case">
             {l}
-            <button className="ml-1 cursor-pointer text-ink-500 hover:text-rust" onClick={() => run(() => api.patchTask(t.id, { labels: t.labels.filter((x) => x !== l) }))}>×</button>
+            <button className="ml-1 cursor-pointer text-ink-500 hover:text-rust" onClick={() => run(() => api.patchTask(t.id, { labels: t.labels.filter((x) => x !== l) }))} aria-label={`Remove the label ${l}`}>×</button>
           </Chip>
         ))}
         <Button size="sm" onClick={() => setRefining(true)} title="Quick intake: a cheap model tidies the request, suggests type and priority, and proposes subtasks. For a deeper spec that reads the code, use ✦ Rewrite on the Spec below.">✧ Improve</Button>
@@ -203,20 +229,53 @@ function SpecTab({ d }: { d: TaskDetail }) {
           Only before it runs: a sizing shown under a finished run is noise (D191). */}
       {sug?.pipeline?.length && !samePipeline(sug.pipeline, t.pipeline) && t.status === "backlog" && !d.busy ? (
         <div className="rounded-lg border border-amber/40 bg-amber/5 px-3 py-2 text-[12.5px]">
-          <div className="mb-1 flex flex-wrap items-center gap-2">
-            <span className="text-amber">Claude sized this task</span>
-            <span className="font-mono text-[11.5px] text-ink-200">
-              {sug.pipeline.map((st) => `${st.stage} ${modelLabel(st)}/${st.effort}`).join("  →  ")}
-            </span>
+          <div className="mb-1.5 text-amber">Claude sized this task — the model and effort it suggests for each stage:</div>
+          <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
+            {sug.pipeline.map((st, i) => (
+              <span key={i} className="flex items-center gap-1.5">
+                {i ? <span className="text-ink-500">→</span> : null}
+                <span className="rounded-md border border-amber/40 bg-ink-900/60 px-2 py-0.5 font-mono text-[11.5px] text-ink-100">
+                  {st.stage} · {modelLabel(st)} ·{" "}
+                  {/* Haiku has no effort setting: the level sizing picked would not be sent, so it is not shown as if it were. */}
+                  <span className="text-amber">{st.provider || !effortsFor(st.model, claude.result).none ? `${st.effort} effort` : "no effort setting"}</span>
+                </span>
+              </span>
+            ))}
           </div>
           {sug.sizing_reason ? <div className="mb-1.5 text-ink-300">{sug.sizing_reason}</div> : null}
+          {adjusting ? (
+            <div className="mb-2">
+              <PipelineEditor value={adjusting} onChange={setAdjusting} models={settings?.models ?? []} />
+            </div>
+          ) : null}
           <div className="flex flex-wrap items-center gap-2">
-            <span className="font-mono text-[11px] text-ink-500">
-              now: {t.pipeline.map((st) => `${st.stage} ${modelLabel(st)}/${st.effort}`).join(" → ")}
-            </span>
+            <span className="font-mono text-[11px] text-ink-500">now: {pipelineLine(t.pipeline, modelLabel)}</span>
             <span className="ml-auto flex gap-2">
-              <Button size="sm" variant="go" busy={d.busy} onClick={() => run(() => api.acceptSuggestion(t.id, { pipeline: true }))}>Use it</Button>
-              <Button size="sm" variant="ghost" onClick={() => run(() => api.dismissSuggestion(t.id, { pipeline: true }))}>Keep default</Button>
+              {adjusting ? (
+                <>
+                  <Button
+                    size="sm"
+                    variant="go"
+                    disabled={!adjusting.length}
+                    onClick={() =>
+                      run(async () => {
+                        await api.patchTask(t.id, { pipeline: adjusting });
+                        await api.dismissSuggestion(t.id, { pipeline: true });
+                        setAdjusting(null);
+                      })
+                    }
+                  >
+                    Use these
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setAdjusting(null)}>Cancel</Button>
+                </>
+              ) : (
+                <>
+                  <Button size="sm" variant="go" busy={d.busy} onClick={() => run(() => api.acceptSuggestion(t.id, { pipeline: true }))}>Use it</Button>
+                  <Button size="sm" variant="ghost" title="Change a model or effort before using it" onClick={() => setAdjusting(sug.pipeline!.map((s) => ({ ...s })))}>Adjust</Button>
+                  <Button size="sm" variant="ghost" onClick={() => run(() => api.dismissSuggestion(t.id, { pipeline: true }))}>Keep default</Button>
+                </>
+              )}
             </span>
           </div>
         </div>
@@ -329,7 +388,7 @@ function SpecTab({ d }: { d: TaskDetail }) {
             {t.skills.map((s) => (
               <Chip key={s} className="border-ink-600 text-ink-200 normal-case">
                 {s}
-                <button className="ml-1 text-ink-500 hover:text-rust cursor-pointer" onClick={() => run(() => api.patchTask(t.id, { skills: t.skills.filter((x) => x !== s) }))}>×</button>
+                <button className="ml-1 text-ink-500 hover:text-rust cursor-pointer" onClick={() => run(() => api.patchTask(t.id, { skills: t.skills.filter((x) => x !== s) }))} aria-label={`Remove the skill ${s}`}>×</button>
               </Chip>
             ))}
           </div>
@@ -345,8 +404,12 @@ function PipelineTab({ d }: { d: TaskDetail }) {
   const { settings } = useAppData();
   const [value, setValue] = useState<Stage[]>(d.task.pipeline);
   const { busy, error, run } = useAction();
-  useEffect(() => setValue(d.task.pipeline), [d.task.pipeline]);
-  const dirty = JSON.stringify(value) !== JSON.stringify(d.task.pipeline);
+  // Keyed on what the pipeline says, not on the object: every reload of the task brings a new object
+  // with the same stages, and that wiped an edit in progress (a suggestion arriving, or ticking a
+  // Safety box below, which saves straight away).
+  const saved = JSON.stringify(d.task.pipeline);
+  useEffect(() => setValue(d.task.pipeline), [saved]); // eslint-disable-line react-hooks/exhaustive-deps
+  const dirty = JSON.stringify(value) !== saved;
   return (
     <div className="space-y-3">
       <p className="text-[12px] text-ink-400">
@@ -368,7 +431,7 @@ function PipelineTab({ d }: { d: TaskDetail }) {
           live={d.task.live}
           planApproval={d.task.plan_approval}
           settingOn={settings?.planApproval ?? false}
-          liveModel={settings?.liveReviewModel ?? "claude-opus-5"}
+          liveModel={settings?.liveReviewModel ?? "opus"}
           onChange={(v) => void run(() => api.patchTask(d.task.id, v))}
         />
         {d.busy ? <p className="mt-1.5 text-[11.5px] text-ink-500">Changes apply from the next stage that starts.</p> : null}
@@ -677,12 +740,12 @@ function Actions({ d }: { d: TaskDetail }) {
         ) : null}
         {(t.status === "failed" || t.status === "review") && !live ? (
           <div className="flex items-center gap-1">
-            <select className={`${inputCls} h-8 w-auto! py-0 font-mono text-[12px]`} value={stageIdx} onChange={(e) => setStageIdx(e.target.value === "" ? "" : Number(e.target.value))}>
+            <Select className="h-8 py-0 font-mono text-[12px]" aria-label="Retry from which stage" value={stageIdx} onChange={(e) => setStageIdx(e.target.value === "" ? "" : Number(e.target.value))}>
               <option value="">{t.status === "failed" ? "failed stage" : "stage…"}</option>
               {t.pipeline.map((s, i) => (
                 <option key={i} value={i}>from #{i + 1} {s.stage}</option>
               ))}
-            </select>
+            </Select>
             <Button busy={busy} onClick={retry}>↻ Retry</Button>
           </div>
         ) : null}
@@ -693,6 +756,15 @@ function Actions({ d }: { d: TaskDetail }) {
           </Button>
         ) : null}
         <div className="ml-auto flex gap-2">
+          {d.runs.length ? (
+            <a
+              className="inline-flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md px-3 text-[13px] text-ink-300 transition-colors hover:bg-ink-800 hover:text-ink-100"
+              href={`/api/tasks/${t.id}/record?download=1`}
+              title="Save this task's whole story as one file: what was asked, every stage and step, what it cost and which files changed"
+            >
+              ⤓ Record
+            </a>
+          ) : null}
           <Button
             variant="ghost"
             onClick={() => openTerminal({ projectId: t.project_id, taskId: t.id })}
@@ -723,7 +795,7 @@ function Actions({ d }: { d: TaskDetail }) {
       {error ? (
         <div className="mt-2 flex items-start gap-2 rounded-md border border-rust/40 bg-rust/10 px-3 py-2 text-[12.5px] text-rust">
           <span className="flex-1">{error}</span>
-          <button className="cursor-pointer" onClick={() => setError(null)}>×</button>
+          <button className="cursor-pointer" onClick={() => setError(null)} aria-label="Dismiss">×</button>
         </div>
       ) : null}
     </div>
@@ -732,15 +804,21 @@ function Actions({ d }: { d: TaskDetail }) {
 
 function TitleEditor({ d }: { d: TaskDetail }) {
   const [title, setTitle] = useState(d.task.title);
+  const { error, run } = useAction();
   useEffect(() => setTitle(d.task.title), [d.task.title]);
   return (
-    <input
-      className="w-full bg-transparent text-[17px] font-semibold tracking-tight text-ink-100 focus:outline-none"
-      value={title}
-      onChange={(e) => setTitle(e.target.value)}
-      onBlur={() => title.trim() && title !== d.task.title && void api.patchTask(d.task.id, { title })}
-      onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
-    />
+    <>
+      <input
+        className="w-full bg-transparent text-[17px] font-semibold tracking-tight text-ink-100 focus:outline-none"
+        aria-label="Task title"
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        onBlur={() => title.trim() && title !== d.task.title && void run(() => api.patchTask(d.task.id, { title }))}
+        onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+      />
+      {/* Without this the box kept showing a title that was never saved. */}
+      {error ? <div className="mt-1 text-[12px] text-rust">The new title was not saved: {error}</div> : null}
+    </>
   );
 }
 
@@ -758,11 +836,9 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
     shownTask.current = taskId;
     setTab(takeRequested(taskId));
   }, [taskId]);
-  useEffect(() => {
-    const k = (e: KeyboardEvent) => e.key === "Escape" && !(e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement) && onClose();
-    window.addEventListener("keydown", k);
-    return () => window.removeEventListener("keydown", k);
-  }, [onClose]);
+  // Escape in a text box is "stop typing", not "close the task and lose what I wrote".
+  useEscape((e) => !(e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement) && onClose());
+  const box = useFocusTrap<HTMLElement>();
 
   const totalCost = d?.runs.reduce((s, r) => s + r.cost_usd, 0) ?? 0;
   const creditOut = d?.task.status === "paused" && d.task.pause_reason === "provider" && !d.task.resume_at;
@@ -772,7 +848,15 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
 
   return (
     <div className="fixed inset-0 z-40 flex justify-end bg-[var(--kb-scrim-soft)]" onMouseDown={onClose}>
-      <aside className="slide-in flex h-full w-[min(780px,100vw)] flex-col border-l border-ink-700 bg-ink-900 kb-raise" onMouseDown={(e) => e.stopPropagation()}>
+      <aside
+        ref={box}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-label={d ? `Task: ${d.task.title}` : "Task"}
+        className="slide-in flex h-full w-[min(780px,100vw)] flex-col border-l border-ink-700 bg-ink-900 kb-raise focus:outline-none"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
         {!d ? (
           <div className="p-6 text-[13px] text-ink-400">{missing ? "This task no longer exists." : "Loading…"}</div>
         ) : (
@@ -813,6 +897,8 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
             {d.task.plan_gate ? <PlanGate d={d} /> : null}
             {d.task.blocked && !d.busy ? <BlockedPanel d={d} /> : null}
             <QuestionsPanel d={d} />
+            {/* While it works, and after a stop or failure: where it got to. A finished task's list is only noise. */}
+            {d.task.checklist?.length && !["done", "review", "backlog"].includes(d.task.status) ? <ChecklistPanel list={d.task.checklist} live={d.busy} /> : null}
             <Actions d={d} />
             <nav className="flex shrink-0 gap-0.5 overflow-x-auto overflow-y-hidden border-b border-ink-800 px-3">
               {TABS.map((t) => {
@@ -857,7 +943,7 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
                   ))}
                 </div>
               ) : null}
-              {current === "diff" ? <DiffView taskId={d.task.id} refreshKey={`${d.runs.length}-${d.task.status}-${d.task.updated_at}`} /> : null}
+              {current === "diff" ? <DiffView taskId={d.task.id} refreshKey={`${d.runs.length}-${d.task.status}-${d.task.updated_at}`} canComment={d.task.status !== "done"} /> : null}
               {current === "subtasks" ? <SubtasksTab d={d} /> : null}
               {current === "files" ? <Gallery taskId={d.task.id} attachments={d.attachments} onChange={reload} /> : null}
               {current === "browser" ? <LiveBrowser taskId={d.task.id} running={d.busy} onShowFiles={() => setTab("files")} /> : null}

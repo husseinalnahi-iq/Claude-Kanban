@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { SkillInfo, TaskCard } from "../../../server/src/types.ts";
 import { api, type ProjectWithGit } from "../lib/api.ts";
 import { useAppData } from "../lib/store.tsx";
@@ -56,14 +56,30 @@ export function Skills({ project }: { project: ProjectWithGit | null }) {
   const [q, setQ] = useState("");
   const [attach, setAttach] = useState<SkillInfo | null>(null);
   const [openError, setOpenError] = useState<string | null>(null);
-  useEffect(() => void api.skills(project?.id).then(setSkills), [project?.id]);
+  useEffect(
+    () => void api.skills(project?.id).then(setSkills, (e: Error) => (setSkills([]), setOpenError(`The skills could not be listed: ${e.message}`))),
+    [project?.id],
+  );
 
+  // The list of switched-off skills as of the last click, not the last answer from the server: two
+  // quick clicks both started from the saved list, and the second one put the first back.
+  const off = useRef<Set<string> | null>(null);
   const toggle = async (s: SkillInfo, on: boolean) => {
-    const off = new Set(settings?.disabledSkills ?? []);
-    if (on) off.delete(s.name);
-    else off.add(s.name);
-    setSkills((prev) => prev?.map((x) => (x.name === s.name ? { ...x, enabled: on } : x)) ?? prev);
-    setSettings(await api.patchSettings({ disabledSkills: [...off] }));
+    const next = new Set(off.current ?? settings?.disabledSkills ?? []);
+    if (on) next.delete(s.name);
+    else next.add(s.name);
+    off.current = next;
+    const show = (enabled: boolean) => setSkills((prev) => prev?.map((x) => (x.name === s.name ? { ...x, enabled } : x)) ?? prev);
+    show(on);
+    setOpenError(null);
+    try {
+      setSettings(await api.patchSettings({ disabledSkills: [...next] }));
+    } catch (e) {
+      // Not saved: put the switch back, so it never shows something the runs will not get.
+      off.current = null;
+      show(!on);
+      setOpenError(`${s.name} was not changed: ${e instanceof Error ? e.message : String(e)}`);
+    }
   };
   const offCount = (settings?.disabledSkills ?? []).length;
   const filtered = useMemo(

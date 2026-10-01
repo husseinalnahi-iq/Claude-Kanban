@@ -6,6 +6,8 @@ import type { Chat, ChatMessage, Project } from "../types.ts";
 import { ConflictError, NotFoundError, type QueryFn, type TaskRunner } from "./runner.ts";
 import type { Scheduler } from "./scheduler.ts";
 import { createChatBoardServer } from "./chatBoard.ts";
+import { readViolation } from "./gate.ts";
+import { credentialRisk } from "./credentials.ts";
 
 /** Looking only. Anything else is refused: changing code is what a card is for. */
 export const CHAT_READ_TOOLS = ["Read", "Glob", "Grep", "WebSearch", "WebFetch", "TodoWrite"];
@@ -14,6 +16,12 @@ export const CHAT_DISALLOWED = ["Edit", "Write", "MultiEdit", "NotebookEdit", "B
 const NEW_CHAT = "New chat";
 
 type Card = NonNullable<ChatMessage["meta"]["cards"]>[number];
+
+/** Counted by card, not by action: creating a card and queueing it is still one card. */
+export function cardsLine(cards: Card[]): string {
+  const n = new Set(cards.map((c) => c.id)).size;
+  return `${n} card${n === 1 ? "" : "s"}`;
+}
 
 /** "read server/src/db.ts", "searched for “useWs”": one quiet line per tool call. */
 export function describeTool(name: string, input: Record<string, unknown>, cwd: string): string {
@@ -36,6 +44,11 @@ export function describeTool(name: string, input: Record<string, unknown>, cwd: 
     case "mcp__board__board_update_task": return "edited a card";
     case "mcp__board__board_queue_task": return "queued a card";
     case "mcp__board__board_schedule_task": return "scheduled a card";
+    case "mcp__board__board_task_progress": return "checked how a card is going";
+    case "mcp__board__board_message_task": return `told a card: ${q(input.text)}`;
+    case "mcp__board__board_answer_question": return "answered a card's question";
+    case "mcp__board__board_stop_task": return "stopped a card";
+    case "mcp__board__board_retry_task": return "ran a failed card again";
     case "mcp__board__board_memory": return "read the project's memory";
     default: return name.replace(/^mcp__[^_]+__/, "");
   }
@@ -50,17 +63,30 @@ function localNow(now = new Date()): string {
   return `${now.toLocaleString("en-GB", { weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" })} (UTC${sign}${hh}:${mm})`;
 }
 
-export function chatPrompt(project: Project, now = new Date()): string {
+/**
+ * Goes in front of each message, not in the system prompt: the system prompt sits before the whole
+ * conversation in the prompt cache, so a clock in it made every new minute re-bill the history.
+ */
+export function turnContext(now = new Date()): string {
+  return `[Local time: ${localNow(now)}]`;
+}
+
+export function chatPrompt(project: Project): string {
   return [
     `You are the side chat of Claude Kanban, talking with the user about the project "${project.name}" (${project.path}).`,
     "Many users are not programmers: answer plainly and briefly, and explain any technical word you have to use.",
     "You can read the code (Read, Grep, Glob) and the web, but you cannot edit files or run commands, and should not offer to.",
     "Work gets done by task cards on the board. When the user wants something built, fixed or changed:",
     "1. Make sure you understand what they want; ask one short question if it is unclear.",
-    "2. Create a card with board_create_task: a short title, and a spec with the problem and what done looks like.",
+    "2. Create a card with board_create_task: a short title, and a spec with the problem and what done looks like — from what the user asked, nothing more. Extras you think would help (a pause button, a README) go in your reply as suggestions they can say yes to; they never go into the spec on their own, because every line in it is paid for.",
     "3. Say what you created, then offer to queue it now (board_queue_task) or schedule it (board_schedule_task).",
     "Never queue or schedule a card the user did not ask to run.",
-    `Current local time: ${localNow(now)}. Scheduled times are ISO 8601 with that offset, or "reset" for when the user's Claude usage window resets.`,
+    "You can also follow and talk to the cards themselves:",
+    "- board_list_tasks and board_task_progress tell you what each card is doing, what it did, what it cost and what it is waiting for. Look before you answer a question about a task; do not guess.",
+    "- board_message_task passes the user's words to a card's own Claude session: a running card takes them in at its next step, a card in review or failed picks its session up again with them. Pass on what the user said; do not invent instructions.",
+    "- board_answer_question answers a question a card asked, with the answer the user gave. board_stop_task and board_retry_task stop or re-run a card when the user asks.",
+    "Approving, landing or discarding a card's work is the user's own decision on the board: say where the button is, never promise to do it.",
+    'Each message starts with the user\'s local time in brackets. Scheduled times are ISO 8601 with that offset, or "reset" for when the user\'s Claude usage window resets.',
   ].join("\n");
 }
 
@@ -163,11 +189,14 @@ export class ChatService {
     const ctl = new AbortController();
     this.live.set(id, ctl);
     this.publish(this.deps.repo.getChat(id)!);
-    void this.reply(this.deps.repo.getChat(id)!, project, text, ctl).finally(() => {
-      this.live.delete(id);
-      const after = this.deps.repo.getChat(id);
-      if (after) this.publish(after);
-    });
+    void this.reply(this.deps.repo.getChat(id)!, project, text, ctl)
+      // reply() reports its own failures in the chat; this only keeps a surprise from ending the board.
+      .catch((err) => console.error("Side chat reply failed:", err))
+      .finally(() => {
+        this.live.delete(id);
+        const after = this.deps.repo.getChat(id);
+        if (after) this.publish(after);
+      });
     return mine;
   }
 
@@ -175,8 +204,16 @@ export class ChatService {
     const { repo, bus } = this.deps;
     const cards: Card[] = [];
     const canUseTool: CanUseTool = async (name, input) => {
+      // A page or file the chat reads could tell it to fetch your keys and send them somewhere; nobody
+      // sees a card here, so reading stays inside the project and away from credential files.
+      if (readViolation(name, input, project.path)) {
+        return { behavior: "deny", message: `The side chat only reads files inside this project (${project.path}). Tell the user you cannot open that file from here.` };
+      }
+      if (credentialRisk(name, input)) {
+        return { behavior: "deny", message: "That file holds passwords or keys, and the side chat does not open those. Tell the user, and carry on without it." };
+      }
       if (name.startsWith("mcp__board__") || CHAT_READ_TOOLS.includes(name)) return { behavior: "allow", updatedInput: input };
-      return { behavior: "deny", message: "The side chat only reads and makes cards. To change code, create a card with board_create_task and offer to queue it." };
+      return { behavior: "deny", message: "The side chat only reads, makes cards and talks to them. To change code, create a card with board_create_task and offer to queue it." };
     };
     const options: Options = {
       model: chat.model,
@@ -196,18 +233,25 @@ export class ChatService {
       canUseTool,
       systemPrompt: { type: "preset", preset: "claude_code", append: chatPrompt(project) },
       maxTurns: 40,
+      // Every other call the board makes has a ceiling; a chat that went off reading the whole repo
+      // or the web had none. Enough for a long, careful answer.
+      maxBudgetUsd: 1.5,
       abortController: ctl,
     };
 
     let streamed = "";
+    const resumed = chat.session_id;
+    /** Claude Code no longer has the session this chat was continuing (its history was cleaned up, or the folder moved). */
+    const lostSession = (why: string) => Boolean(resumed) && /no conversation found|session.*not found/i.test(why);
+    const startFresh = () => {
+      repo.updateChat(chat.id, { session_id: null });
+      this.message({ chat_id: chat.id, role: "error", text: "Claude no longer has the earlier part of this chat, so it cannot continue it. Send your message again: it starts fresh, without what was said before." });
+    };
     try {
-      for await (const raw of this.queryFn({ prompt: userMessage(text), options })) {
+      for await (const raw of this.queryFn({ prompt: userMessage(`${turnContext()}\n\n${text}`), options })) {
         const msg = raw as any;
-        if (!repo.getChat(chat.id)) break;
-        if (msg.session_id && msg.session_id !== chat.session_id) {
-          chat = repo.updateChat(chat.id, { session_id: msg.session_id });
-        }
         if (msg.type === "stream_event") {
+          // Word-by-word deltas are the hot path: nothing here touches the database.
           const e = msg.event;
           if (e?.type === "content_block_delta" && e.delta?.type === "text_delta" && e.delta.text) {
             streamed += e.delta.text;
@@ -215,11 +259,17 @@ export class ChatService {
           }
           continue;
         }
+        if (!repo.getChat(chat.id)) break;
+        if (msg.session_id && msg.session_id !== chat.session_id) {
+          chat = repo.updateChat(chat.id, { session_id: msg.session_id });
+        }
         if (msg.type === "assistant" && !msg.parent_tool_use_id) {
           for (const block of msg.message?.content ?? []) {
             if (block.type === "text" && block.text?.trim()) {
               this.message({ chat_id: chat.id, role: "assistant", text: block.text });
               streamed = "";
+              // The stored message replaces the streamed words; without this both show until the reply ends.
+              bus.publish({ type: "chat.delta", chatId: chat.id, text: "" });
             } else if (block.type === "tool_use") {
               this.message({ chat_id: chat.id, role: "tool", text: describeTool(block.name, block.input ?? {}, project.path) });
             }
@@ -231,15 +281,18 @@ export class ChatService {
           chat = repo.updateChat(chat.id, { cost_usd: (repo.getChat(chat.id)?.cost_usd ?? 0) + cost });
           if (msg.is_error && !ctl.signal.aborted) {
             const why = (msg.errors ?? []).join("; ") || msg.subtype || "the reply failed";
-            this.message({ chat_id: chat.id, role: "error", text: `Something went wrong: ${why}` });
+            if (lostSession(why)) startFresh();
+            else this.message({ chat_id: chat.id, role: "error", text: `Something went wrong: ${why}` });
           }
           // The cards it touched ride on a final line, so they show as chips under the reply.
-          if (cards.length) this.message({ chat_id: chat.id, role: "tool", text: `${cards.length} card${cards.length > 1 ? "s" : ""}`, meta: { cards, cost_usd: cost } });
+          if (cards.length) this.message({ chat_id: chat.id, role: "tool", text: cardsLine(cards), meta: { cards, cost_usd: cost } });
         }
       }
     } catch (err) {
+      const why = err instanceof Error ? err.message : String(err);
       if (!ctl.signal.aborted) {
-        this.message({ chat_id: chat.id, role: "error", text: `Something went wrong: ${err instanceof Error ? err.message : String(err)}` });
+        if (lostSession(why) && repo.getChat(chat.id)?.session_id === resumed) startFresh();
+        else this.message({ chat_id: chat.id, role: "error", text: `Something went wrong: ${why}` });
       }
     } finally {
       // A reply cut short by Stop keeps what was written so far.

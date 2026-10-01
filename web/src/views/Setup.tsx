@@ -12,17 +12,6 @@ const GROUPS = [
   { level: "info", title: "Good to know", hint: "" },
 ] as const;
 
-/** Required + recommended items still failing, for the nav badge. */
-export function useSetupCount(): number {
-  const [n, setN] = useState(0);
-  const load = () => void api.setup().then((r) => setN(r.summary.required + r.summary.recommended), () => {});
-  useEffect(load, []);
-  useWs((m) => {
-    if (m.type === "setup.updated" || m.type === "health.updated" || m.type === "settings.updated") load();
-  });
-  return n;
-}
-
 function Shell({ ok, level, title, detail, why, actions, children }: { ok: boolean; level: string; title: string; detail: string; why: string; actions?: ReactNode; children?: ReactNode }) {
   const dot = ok ? "bg-moss" : level === "required" ? "bg-rust" : level === "recommended" ? "bg-amber" : "bg-ink-500";
   return (

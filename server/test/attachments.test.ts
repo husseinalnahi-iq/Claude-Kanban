@@ -109,9 +109,11 @@ test("images a session produces are captured: a screenshot in a tool result, and
           type: "user", session_id: "s1",
           message: { role: "user", content: [{ type: "tool_result", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: PNG } }] }] },
         } as any;
+        // The order a real session has: the write is announced, then it happens, then its result comes back.
+        yield { type: "assistant", session_id: "s1", message: { content: [{ type: "tool_use", id: "w1", name: "Write", input: { file_path: chart } }] } } as any;
         const { writeFileSync } = await import("node:fs");
         writeFileSync(chart, Buffer.from(PNG, "base64"));
-        yield { type: "assistant", session_id: "s1", message: { content: [{ type: "tool_use", name: "Write", input: { file_path: chart } }] } } as any;
+        yield { type: "user", session_id: "s1", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "w1", content: "File created" }] } } as any;
         yield { type: "result", subtype: "success", is_error: false, result: "done", total_cost_usd: 0, session_id: "s1", modelUsage: {} } as any;
       })();
     const runner = new TaskRunner({ repo: s.repo, bus: s.bus, queryFn: withImages });
@@ -189,20 +191,31 @@ test("a run's output files are kept as artifacts; source files and vendored file
     const vendored = join(s.project.path, "node_modules", "pkg", "page.html");
     mkdirSync(join(s.project.path, "node_modules", "pkg"), { recursive: true });
 
+    const refused = join(s.project.path, "refused.html");
+    const done = (id: string, extra: Record<string, unknown> = {}) => ({ type: "tool_result", tool_use_id: id, content: "ok", ...extra });
+    // The order a real session has: each write is announced, then it happens, then its result comes
+    // back. Nothing exists on disk when the announcement arrives — in a supervised run the write is
+    // still waiting on its approval card.
     const writes: QueryFn = () =>
       (async function* () {
-        writeFileSync(report, "<h1>Totals</h1>");
-        writeFileSync(source, "export const x = 1;");
-        writeFileSync(vendored, "<p>not ours</p>");
         yield {
           type: "assistant", session_id: "s1",
           message: { content: [
-            { type: "tool_use", name: "Write", input: { file_path: report } },
-            { type: "tool_use", name: "Write", input: { file_path: source } },
-            { type: "tool_use", name: "Write", input: { file_path: vendored } },
-            { type: "tool_use", name: "Write", input: { file_path: report } },
+            { type: "tool_use", id: "w1", name: "Write", input: { file_path: report } },
+            { type: "tool_use", id: "w2", name: "Write", input: { file_path: source } },
+            { type: "tool_use", id: "w3", name: "Write", input: { file_path: vendored } },
+            { type: "tool_use", id: "w4", name: "Write", input: { file_path: refused } },
           ] },
         } as any;
+        writeFileSync(report, "<h1>Draft</h1>");
+        writeFileSync(source, "export const x = 1;");
+        writeFileSync(vendored, "<p>not ours</p>");
+        // An older copy of a file whose write is then refused: it must not be kept as this run's output.
+        writeFileSync(refused, "<p>from before</p>");
+        yield { type: "user", session_id: "s1", message: { role: "user", content: [done("w1"), done("w2"), done("w3"), done("w4", { is_error: true, content: "The user denied this action." })] } } as any;
+        yield { type: "assistant", session_id: "s1", message: { content: [{ type: "tool_use", id: "w5", name: "Write", input: { file_path: report } }] } } as any;
+        writeFileSync(report, "<h1>Totals</h1>");
+        yield { type: "user", session_id: "s1", message: { role: "user", content: [done("w5")] } } as any;
         yield { type: "result", subtype: "success", is_error: false, result: "done", total_cost_usd: 0, session_id: "s1", modelUsage: {} } as any;
       })();
     const runner = new TaskRunner({ repo: s.repo, bus: s.bus, queryFn: writes });
@@ -213,8 +226,8 @@ test("a run's output files are kept as artifacts; source files and vendored file
       await new Promise((r) => setTimeout(r, 10));
     }
     const kept = s.repo.listAttachments(task.id);
-    assert.deepEqual(kept.map((a) => a.name), ["report.html"], "only the output file, and only once despite two writes");
-    assert.match(kept[0].description ?? "", /Totals/);
+    assert.deepEqual(kept.map((a) => a.name), ["report.html"], "only the output file, and only once despite two writes; not the write that was refused");
+    assert.match(kept[0].description ?? "", /Totals/, "what is kept is the file as the last write left it, not as it stood when the write was announced");
   } finally {
     await s.app.close();
     s.cleanup();

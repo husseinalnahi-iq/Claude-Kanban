@@ -89,7 +89,7 @@ export async function queueInitTask({ repo, bus, runner }: Deps, project: Projec
     // One stage that sends the command itself. Balanced tier at Claude's default effort: /init reads a
     // lot of the repository, which a small model does poorly, but it is not a hard reasoning problem.
     // /init is a Claude Code command: it always runs on Claude, whatever provider the tier names.
-    pipeline: [{ stage: "custom", model: settings.tiers.balanced.provider === "anthropic" ? settings.tiers.balanced.model : "claude-sonnet-5", effort: "high", prompt: "/init" }],
+    pipeline: [{ stage: "custom", model: settings.tiers.balanced.provider === "anthropic" ? settings.tiers.balanced.model : "sonnet", effort: "high", prompt: "/init" }],
   });
   bus.publish({ type: "task.updated", task });
   runner.queueTask(task.id);
@@ -115,7 +115,7 @@ export async function queueBootstrapTask({ repo, bus, runner }: Deps, project: P
     mode,
     onboarding: "bootstrap",
     // It writes files and runs tools, which a text-only provider cannot: always Claude, like /init.
-    pipeline: [{ stage: "custom", model: settings.tiers.balanced.provider === "anthropic" ? settings.tiers.balanced.model : "claude-sonnet-5", effort: "high", prompt: "Work on the task below exactly as its checklist says." }],
+    pipeline: [{ stage: "custom", model: settings.tiers.balanced.provider === "anthropic" ? settings.tiers.balanced.model : "sonnet", effort: "high", prompt: "Work on the task below exactly as its checklist says." }],
   });
   bus.publish({ type: "task.updated", task });
   runner.queueTask(task.id);

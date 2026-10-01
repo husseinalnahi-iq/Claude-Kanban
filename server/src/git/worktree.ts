@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import type { DiffFile, MergeStrategy } from "../types.ts";
 
@@ -32,6 +32,9 @@ function git(cwd: string, args: string[]): Promise<string> {
 export function worktreePathFor(projectPath: string, taskId: string): string {
   return join(projectPath, ".kanban", "wt", taskId);
 }
+
+/** git prints C:/x/y where Node has C:\x\y, and Windows paths ignore case. */
+const samePath = (a: string, b: string) => resolve(a).toLowerCase() === resolve(b).toLowerCase();
 
 export function branchFor(taskId: string): string {
   return `kanban/${taskId}`;
@@ -253,7 +256,19 @@ export async function removeWorktree(
   if (existsSync(path)) {
     // Snapshot leftovers so `worktree remove` succeeds without --force; the branch keeps them until deleted.
     await commitAll(path, "kanban: snapshot before worktree removal");
-    await git(projectPath, ["worktree", "remove", path]);
+    try {
+      await git(projectPath, ["worktree", "remove", path]);
+    } catch (err) {
+      // On Windows a program whose working folder is the worktree (a dev server, a terminal) lets git
+      // empty and unregister it but not delete the folder itself. That is nothing to stop for: the
+      // branch still has to go, and once git has let go of the worktree no screen lists it any more.
+      if ((await listWorktrees(projectPath)).some((p) => samePath(p, path))) throw err;
+      try {
+        rmSync(path, { recursive: true, force: true });
+      } catch {
+        // still in use: an empty folder under .kanban is harmless, and the next removal tries again
+      }
+    }
   }
   await git(projectPath, ["worktree", "prune"]);
   if (opts.deleteBranch) {

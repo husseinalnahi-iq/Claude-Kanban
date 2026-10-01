@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE INDEX IF NOT EXISTS tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS tasks_parent ON tasks(parent_id);
+-- Paused, queued and running cards are looked up by status; without this each lookup read every spec.
+CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status);
 
 CREATE TABLE IF NOT EXISTS runs (
   id            TEXT PRIMARY KEY,
@@ -103,6 +105,8 @@ CREATE TABLE IF NOT EXISTS messages (
   ts           TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS messages_task ON messages(task_id);
+-- A task's drawer lists what it sent as well as what it received.
+CREATE INDEX IF NOT EXISTS messages_from ON messages(from_task_id);
 
 CREATE TABLE IF NOT EXISTS approvals (
   id         TEXT PRIMARY KEY,
@@ -119,6 +123,8 @@ CREATE TABLE IF NOT EXISTS approvals (
 CREATE INDEX IF NOT EXISTS approvals_run ON approvals(run_id);
 -- pendingApprovals() and the task drawer both filter by task.
 CREATE INDEX IF NOT EXISTS approvals_task ON approvals(task_id, created_at);
+-- The approvals inbox: a handful of undecided cards among thousands of decided ones.
+CREATE INDEX IF NOT EXISTS approvals_pending ON approvals(created_at) WHERE decision IS NULL;
 
 CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
@@ -190,6 +196,19 @@ CREATE TABLE IF NOT EXISTS schedules (
   created_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS schedules_project ON schedules(project_id);
+
+-- Small jobs that are not runs but are spend: sorting a new task (triage) and describing an attached
+-- image (vision). Kept so the Dashboard's total is the real total (D276).
+CREATE TABLE IF NOT EXISTS intake_costs (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id    TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+  project_id TEXT,
+  kind       TEXT NOT NULL,
+  model      TEXT NOT NULL,
+  cost_usd   REAL NOT NULL DEFAULT 0,
+  ts         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS intake_costs_project ON intake_costs(project_id);
 
 -- Side chat: conversations about a project, one Claude session each. Reads code, makes cards; never edits.
 CREATE TABLE IF NOT EXISTS chats (

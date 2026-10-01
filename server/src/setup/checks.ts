@@ -1,15 +1,28 @@
 import { z } from "zod";
 import type { ClaudeModelsResult, CliPreset, Provider, ProviderOut, SetupCheckResult, Settings } from "../types.ts";
 import { badClaudePicks } from "../engine/claudeModels.ts";
-import { pickBrowser, type Probe } from "./probe.ts";
+import { bundledClaude, pickBrowser, sdkVersion, type Probe } from "./probe.ts";
+import { ENGINE_LATEST_URL, ENGINE_PACKAGE, shouldInstall } from "./engine.ts";
+import { readFileSync } from "node:fs";
 import { isLmStudio, isLocal, isOllama } from "../engine/providers/catalog.ts";
 import { hardware, lmsPath, PICKS, SETUP_PICKS, verdictFor, verdictText, type Pick } from "./local.ts";
 import { join } from "node:path";
 import { loadPty, pwshPath } from "../terminal.ts";
+import { CLOUDFLARE_TOKEN_REF, POLLINATIONS_KEY_REF, claudeCodeArgs, claudeCodeCommand, imageReadiness } from "../engine/images.ts";
+import { IMAGE_SERVER } from "../types.ts";
 import { fileURLToPath } from "node:url";
 
 /** The Claude Kanban folder (package.json with both workspaces). */
 const BOARD_DIR = join(fileURLToPath(new URL(".", import.meta.url)), "..", "..", "..");
+
+/** The engine version this board was tested on (server/package.json): updates stay within its minor. */
+const ENGINE_FLOOR: string = (() => {
+  try {
+    return (JSON.parse(readFileSync(join(BOARD_DIR, "server", "package.json"), "utf8")) as { dependencies: Record<string, string> }).dependencies[ENGINE_PACKAGE];
+  } catch {
+    return "";
+  }
+})();
 
 export interface CheckCtx {
   probe: Probe;
@@ -372,6 +385,29 @@ const claudeModelIds: SetupCheck = {
   },
 };
 
+const claudeEngine: SetupCheck = {
+  id: "claude-engine",
+  title: "Claude's engine is up to date",
+  level: "recommended",
+  why: "The list of Claude models comes from the engine inside the board (Claude Code). A model that shipped after it does not show up until the engine is updated. The board updates it by itself each time it starts.",
+  manual: everywhere("node scripts/update-engine.mjs --force   (in the Claude Kanban folder, then start the board again)"),
+  link: { label: "Open Models & pipeline", href: "#/settings?tab=models" },
+  async detect({ probe, settings }) {
+    const installed = sdkVersion();
+    let latest: string | undefined;
+    try {
+      latest = ((await probe.fetchJson(ENGINE_LATEST_URL, 5000)) as { version?: string }).version;
+    } catch {
+      return ok(`${installed} — could not reach npm to see if there is a newer one`);
+    }
+    if (!shouldInstall({ installed, latest, floor: ENGINE_FLOOR })) return ok(`${installed} — the newest this board can use`);
+    const how = settings.autoUpdateEngine
+      ? "quit Claude Kanban (right-click its icon by the clock, or close its black window) and open it again to get it"
+      : "updates are switched off in Settings → Models & pipeline";
+    return bad(`${installed} installed, ${latest} is out — ${how}`);
+  },
+};
+
 const providerCredit: SetupCheck = {
   id: "provider-credit",
   title: "Credit left on your other providers",
@@ -392,10 +428,44 @@ const providerCredit: SetupCheck = {
   },
 };
 
+const images: SetupCheck = {
+  id: "images",
+  title: "Free images for tasks",
+  level: "optional",
+  why: "A task that needs an illustration, an icon or a placeholder photo makes one with a free image model instead of leaving a grey box. Pollinations.ai works with no account; a free key removes its watermark. Cloudflare Workers AI needs an account id and a token.",
+  link: { label: "Settings → Browser, images & plugins", href: "#/settings?tab=tools" },
+  async detect({ settings, hasSecret }) {
+    const r = imageReadiness({
+      provider: settings.imageProvider,
+      pollinationsKey: hasSecret(POLLINATIONS_KEY_REF) ? "set" : null,
+      cloudflareAccountId: settings.cloudflareAccountId,
+      cloudflareToken: hasSecret(CLOUDFLARE_TOKEN_REF) ? "set" : null,
+    });
+    return r.ready ? ok(r.detail) : bad(r.detail);
+  },
+};
+
+/** Your own Claude Code (the terminal one) gets the same tool: one `claude mcp add`, undone with `claude mcp remove`. */
+const imagesInClaudeCode: SetupCheck = {
+  id: "images-claude-code",
+  title: "The image tool in your own Claude Code",
+  level: "optional",
+  why: "The same generate_image tool in the Claude Code you run yourself, reading the provider and key set on the board. Nothing else is installed: it points Claude Code at the board's folder.",
+  // The board's own Claude binary writes the same ~/.claude.json the Claude Code you run reads.
+  run: () => [{ command: bundledClaude() ?? "claude", args: claudeCodeArgs(), timeoutMs: MIN }],
+  runLabel: "Add",
+  manual: everywhere(claudeCodeCommand()),
+  async detect({ probe }) {
+    const r = await probe.run(probe.claudeBin, ["mcp", "get", IMAGE_SERVER], { timeoutMs: 15_000 });
+    return r.code === 0 && !/No MCP server/i.test(r.stdout) ? ok("Added to your Claude Code (user scope)") : bad("Not added yet");
+  },
+};
+
 /** The checks that apply right now: always the core, then only what your settings switch on. */
 export function buildChecks(settings: Settings): SetupCheck[] {
-  const list: SetupCheck[] = [node, claudeLogin, claudeModelIds, git, gitIdentity];
+  const list: SetupCheck[] = [node, claudeLogin, claudeEngine, claudeModelIds, git, gitIdentity];
   if (settings.browserChecks) list.push(browser);
+  if (settings.imageProvider !== "off") list.push(images, imagesInClaudeCode);
   const enabled = settings.providers.filter((p) => p.enabled);
   const local = enabled.filter(isOllama);
   if (local.length) {

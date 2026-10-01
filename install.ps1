@@ -106,12 +106,16 @@ function Install-ClaudeKanban {
 
   Write-Host "`nDone. Claude Kanban is installed in $dir" -ForegroundColor Green
   Write-Host '  - Open it any time with the "Claude Kanban" icon on your Desktop (or in the Start menu).'
-  Write-Host '  - It opens in your browser. The first time, the Setup page walks you through logging in to Claude.'
+  Write-Host '  - It shows a startup screen, then opens in your browser and keeps running by the clock.'
+  Write-Host '    The first time, the Setup page walks you through logging in to Claude.'
   Write-Host '  - To update later, run the same install line again.'
 
-  # 6. Open it. The launcher restarts an older copy that is already running.
+  # 6. Open it. The launcher restarts an older copy that is already running. Claude Kanban.exe is there
+  # when the icons were made (step 5); otherwise the .cmd, whose window is the log.
   if (-not $env:KANBAN_NO_LAUNCH) {
-    Start-Process (Join-Path $dir 'Start Claude Kanban.cmd') -WorkingDirectory $dir -WindowStyle Minimized
+    $app = Join-Path $dir 'Claude Kanban.exe'
+    if (Test-Path $app) { Start-Process $app -WorkingDirectory $dir }
+    else { Start-Process (Join-Path $dir 'Start Claude Kanban.cmd') -WorkingDirectory $dir -WindowStyle Minimized }
   }
 }
 

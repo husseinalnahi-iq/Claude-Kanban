@@ -10,10 +10,14 @@ export class Bus {
   }
 
   publish(msg: WsMessage): void {
-    this.ee.emit("msg", msg);
+    // Every open tab sends the same text, so it is written once however many are listening — and not
+    // at all when nobody wants this message (a transcript event with no drawer open on it).
+    let text: string | undefined;
+    this.ee.emit("msg", msg, () => (text ??= JSON.stringify(msg)));
   }
 
-  subscribe(fn: (msg: WsMessage) => void): () => void {
+  /** `wire` is the message as the JSON a browser receives. */
+  subscribe(fn: (msg: WsMessage, wire: () => string) => void): () => void {
     this.ee.on("msg", fn);
     return () => this.ee.off("msg", fn);
   }

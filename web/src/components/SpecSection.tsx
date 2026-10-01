@@ -68,7 +68,7 @@ export function SpecSection({ task, busy }: { task: Task; busy: boolean }) {
   const [panel, setPanel] = useState(false);
   const [showVersions, setShowVersions] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
-  const [model, setModel] = useState(settings?.specModel ?? "claude-opus-5");
+  const [model, setModel] = useState(settings?.specModel ?? "opus");
   const [effort, setEffort] = useState<Effort>(settings?.specEffort ?? "high");
   const [instruction, setInstruction] = useState("");
   const [fresh, setFresh] = useState(0);
@@ -175,7 +175,7 @@ export function SpecSection({ task, busy }: { task: Task; busy: boolean }) {
             {sv.rewriting.note && sv.rewriting.note !== "reading the request" ? <span className="text-ink-400"> · {sv.rewriting.note}</span> : "…"}
           </span>
           <span className="text-[11px] text-ink-500"><Elapsed since={sv.rewriting.since} /></span>
-          <Button size="sm" variant="ghost" onClick={() => void api.stopSpecRewrite(task.id)}>Stop</Button>
+          <Button size="sm" variant="ghost" onClick={() => run(() => api.stopSpecRewrite(task.id))}>Stop</Button>
         </div>
       ) : null}
 

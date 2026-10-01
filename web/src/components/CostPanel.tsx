@@ -78,9 +78,20 @@ export function CostPanel({ runs }: { runs: Run[] }) {
                   <td className="py-1 pr-2 text-ink-100">{r.stage}</td>
                   <td className="py-1 pr-2">{modelLabel(r)}{r.role === "critic" ? <span className="ml-1 text-iris">critic</span> : null}</td>
                   <td className="py-1 pr-2 text-ink-400">{r.effort}</td>
-                  <td className="py-1 pr-2 text-right">{tokens(r.input_tokens)}</td>
+                  <td
+                    className="py-1 pr-2 text-right"
+                    title={r.cache_read_tokens || r.cache_write_tokens ? `${tokens(r.cache_read_tokens)} re-read from cache (cheapest), ${tokens(r.cache_write_tokens)} written to cache, ${tokens(Math.max(0, r.input_tokens - r.cache_read_tokens - r.cache_write_tokens))} new` : undefined}
+                  >
+                    {tokens(r.input_tokens)}
+                  </td>
                   <td className="py-1 pr-2 text-right">{tokens(r.output_tokens)}</td>
-                  <td className={`py-1 pr-2 text-right ${r.cost_source === "subscription" ? "text-ink-500" : ""}`}>{costLabel(r)}</td>
+                  <td
+                    className={`py-1 pr-2 text-right ${r.cost_source === "subscription" ? "text-ink-500" : ""}`}
+                    title={r.other_models_usd > 0 ? `of which ${cost(r.other_models_usd)} on helpers and Claude Code's own small calls` : undefined}
+                  >
+                    {costLabel(r)}
+                    {r.other_models_usd >= 0.01 ? <span className="block text-[10px] text-ink-500">helpers {cost(r.other_models_usd)}</span> : null}
+                  </td>
                   <td className="py-1 text-right text-ink-400">{share === null ? "—" : `${(share * 100).toFixed(1)}%`}</td>
                 </tr>
               );

@@ -1,10 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { addWorktree, aheadBehind, commitAll, isDirty, mergeTask, removeWorktree, updateFromBase } from "../src/git/worktree.ts";
+import { openDb } from "../src/db.ts";
+import { Repo } from "../src/repo.ts";
+import { Bus } from "../src/bus.ts";
+import { TaskRunner } from "../src/engine/runner.ts";
+import { DEFAULT_MERGE } from "../src/types.ts";
 
 /** Reads a file with line endings normalised: git on Windows may check out CRLF. */
 const read = (...p: string[]) => readFileSync(join(...p), "utf8").split("\r\n").join("\n");
@@ -109,6 +114,51 @@ test("rebase lands as a fast-forward, squash lands as one commit", async () => {
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
+  }
+});
+
+test("Approve lands a squash and clears its branch, which git itself still calls unmerged", async () => {
+  // Why Approve cannot use the safe delete here: the squashed commit has the branch's content, but
+  // none of its commits, so `git branch -d` refuses — after the merge has already landed.
+  const plain = makeRepo({ "a.txt": "one\n" });
+  try {
+    const wt = await addWorktree(plain, "t_safe");
+    writeFileSync(join(wt.path, "a.txt"), "two\n");
+    await commitAll(wt.path, "task work");
+    await mergeTask(plain, wt.branch, "land squash", "squash");
+    await assert.rejects(removeWorktree(plain, "t_safe", { deleteBranch: "safe" }), /not fully merged/);
+    await removeWorktree(plain, "t_safe", { deleteBranch: "force" });
+  } finally {
+    rmSync(plain, { recursive: true, force: true });
+  }
+
+  const dir = makeRepo({ "a.txt": "one\n" });
+  try {
+    const repo = new Repo(openDb(":memory:"));
+    const bus = new Bus();
+    const project = repo.createProject({
+      name: "squashes", path: dir, policy: { worktrees: "allowed", autonomous: "allowed", maxConcurrent: 3 },
+      merge: { ...DEFAULT_MERGE, strategy: "squash" },
+    });
+    const runner = new TaskRunner({ repo, bus, queryFn: () => (async function* () {})() });
+    const task = repo.createTask({ project_id: project.id, title: "squash me", mode: "autonomous", pipeline: [{ stage: "code", model: "m", effort: "low" }] });
+    const wt = await addWorktree(dir, task.id);
+    writeFileSync(join(wt.path, "a.txt"), "first\n");
+    await commitAll(wt.path, "step one");
+    writeFileSync(join(wt.path, "a.txt"), "second\n");
+    await commitAll(wt.path, "step two");
+    repo.updateTask(task.id, { status: "review", branch: wt.branch, worktree_path: wt.path, base_sha: wt.baseSha });
+
+    const done = await runner.approveTask(task.id);
+    assert.equal(done.status, "done", "the task used to stay in Review for good, with its work already merged");
+    assert.equal(done.note, null, "and the clean-up went through");
+    assert.equal(done.branch, null);
+    assert.equal(read(dir, "a.txt"), "second\n", "the work landed");
+    assert.equal(git(dir, "log", "-1", "--format=%s"), `Merge ${wt.branch}: squash me`, "as one commit");
+    assert.equal(git(dir, "branch", "--list", wt.branch), "", "the branch is gone");
+    assert.equal(existsSync(wt.path), false, "and so is the worktree");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

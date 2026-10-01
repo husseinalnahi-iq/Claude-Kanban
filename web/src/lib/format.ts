@@ -63,11 +63,12 @@ export const TYPE_META: Record<TaskType, { short: string; tone: string }> = {
   refactor: { short: "refac", tone: "border-ink-600 text-ink-300" },
 };
 
-export const PRIORITY_META: Record<Priority, { tone: string; title: string }> = {
-  p0: { tone: "border-rust/60 text-rust bg-rust/10", title: "P0 — production broken or everything blocked" },
-  p1: { tone: "border-amber/50 text-amber", title: "P1 — important, soon" },
-  p2: { tone: "border-ink-600 text-ink-400", title: "P2 — normal" },
-  p3: { tone: "border-ink-700 text-ink-500", title: "P3 — later" },
+/** `short` is what a drop-down shows (the dashboard uses the same words); `title` is the hover text that says what it means. */
+export const PRIORITY_META: Record<Priority, { tone: string; short: string; title: string }> = {
+  p0: { tone: "border-rust/60 text-rust bg-rust/10", short: "P0 · now", title: "P0 — production broken or everything blocked" },
+  p1: { tone: "border-amber/50 text-amber", short: "P1 · soon", title: "P1 — important, soon" },
+  p2: { tone: "border-ink-600 text-ink-400", short: "P2 · normal", title: "P2 — normal" },
+  p3: { tone: "border-ink-700 text-ink-500", short: "P3 · later", title: "P3 — later" },
 };
 
 export const STATUS_META: Record<TaskStatus, { label: string; color: string; text: string; dot: string }> = {

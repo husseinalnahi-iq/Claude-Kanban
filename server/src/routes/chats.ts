@@ -3,10 +3,12 @@ import { z } from "zod";
 import type { AppDeps } from "../app.ts";
 import type { ChatService } from "../engine/chat.ts";
 import { EFFORTS } from "../types.ts";
+import { reportBusy } from "./busy.ts";
 
 /** The side chat: conversations about a project that read the code and make cards. */
-export async function chatRoutes(app: FastifyInstance, { repo, chat }: AppDeps & { chat: ChatService }) {
+export async function chatRoutes(app: FastifyInstance, { repo, runner, chat }: AppDeps & { chat: ChatService }) {
   const idOf = (req: { params: unknown }) => (req.params as { id: string }).id;
+  reportBusy(runner, "chat", () => repo.chatIds().filter((c) => chat.isBusy(c.id)).map((c) => ({ what: "chat", project_id: c.project_id })));
 
   app.get("/projects/:id/chats", async (req) => chat.list(idOf(req)));
 

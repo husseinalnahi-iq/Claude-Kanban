@@ -1,4 +1,5 @@
 import type {
+  ImageStatus,
   Approval, Attachment, DiffFile, EventRow, FastModeStatus, Message, MergePolicy, Milestone, Mode, Note, Policy, Project, ProjectEnv, Run, RunListItem, SessionTools, Settings, SkillInfo, Stage, Task, TaskCard, UsageLimit,
   Provider, ProviderTestResult, SetupCheckResult, ModelCatalogResult, Schedule, Chat, ChatMessage, Effort, ClaudeModelsResult, SpecVersion,
   ProviderUsage, ProviderOut,
@@ -79,6 +80,15 @@ export interface CliHealth {
   sdkVersion: string;
   error: string | null;
   checkedAt: string;
+}
+
+/** What Settings → Images → Try it gets back: the picture itself, inline, or why not. */
+export interface ImageTry {
+  ok: boolean;
+  dataUrl: string | null;
+  provider: string;
+  latencyMs: number;
+  error: string | null;
 }
 
 export const api = {
@@ -229,4 +239,8 @@ export const api = {
   providerModels: (id: string) => req<ModelCatalogResult>("GET", `/providers/${encodeURIComponent(id)}/models`),
   testProvider: (id: string, model?: string) => req<ProviderTestResult>("POST", `/providers/${id}/test`, { model }),
   patchSettings: (b: Partial<Omit<Settings, "stateDir">>) => req<Settings>("PATCH", "/settings", b),
+  imageStatus: () => req<ImageStatus>("GET", "/settings/images"),
+  setImageSecret: (name: string, value: string) => req<ImageStatus>("PUT", "/settings/images/secret", { name, value }),
+  deleteImageSecret: (name: string) => req<ImageStatus>("DELETE", `/settings/images/secret/${encodeURIComponent(name)}`),
+  testImage: (prompt?: string) => req<ImageTry>("POST", "/settings/images/test", { prompt }),
 };

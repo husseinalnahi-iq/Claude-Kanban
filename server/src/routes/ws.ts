@@ -13,12 +13,12 @@ export async function wsRoutes(app: FastifyInstance, { bus }: AppDeps) {
   app.get("/ws", { websocket: true }, (socket) => {
     let watching: string | null = null;
     let watchingChat: string | null = null;
-    const off = bus.subscribe((msg) => {
+    const off = bus.subscribe((msg, wire) => {
       if (socket.readyState !== socket.OPEN) return;
       if (msg.type === "event" && msg.taskId !== watching) return;
       // A streaming reply sends its text many times a second: only to the panel showing that chat.
       if (msg.type === "chat.delta" && msg.chatId !== watchingChat) return;
-      socket.send(JSON.stringify(msg));
+      socket.send(wire());
     });
     socket.on("message", (raw: Buffer) => {
       try {

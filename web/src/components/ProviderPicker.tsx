@@ -4,7 +4,7 @@ import { claudeOptions, claudeWarning, useClaudeModels } from "../lib/claudeMode
 import { claudeModelStatus } from "../../../server/src/engine/claudeModels.ts";
 import { isLocal } from "../../../server/src/engine/providers/catalog.ts";
 import { ModelCombobox, type ModelOption } from "./ModelCombobox.tsx";
-import { inputCls } from "./ui.tsx";
+import { Select } from "./ui.tsx";
 
 const ADD_PROVIDER = "__add";
 
@@ -68,7 +68,7 @@ function providerWarning(p: Provider | undefined, r: ModelCatalogResult | null, 
  * Any id typed into the filter can be used as it is.
  */
 export function ProviderPicker({
-  value, onChange, models, providers, compact,
+  value, onChange, models, providers, compact, stacked,
 }: {
   value: TierRef;
   onChange: (v: TierRef) => void;
@@ -76,6 +76,8 @@ export function ProviderPicker({
   models: ModelEntry[];
   providers: Provider[];
   compact?: boolean;
+  /** Provider above model, for a column too narrow to show a whole model id beside it. */
+  stacked?: boolean;
 }) {
   const enabled = providers.filter((p) => p.enabled);
   const isClaude = !value.provider || value.provider === ANTHROPIC_PROVIDER_ID;
@@ -97,9 +99,10 @@ export function ProviderPicker({
   };
 
   return (
-    <div className={`grid gap-1 ${compact ? "grid-cols-[110px_1fr]" : "grid-cols-[140px_1fr]"}`}>
-      <select
-        className={`${inputCls} font-mono ${isClaude ? "" : "text-iris!"}`}
+    <div className={`grid gap-1 ${stacked ? "grid-cols-1" : compact ? "grid-cols-[104px_minmax(0,1fr)]" : "grid-cols-[140px_minmax(0,1fr)]"}`}>
+      <Select
+        wide
+        className={`font-mono ${isClaude ? "" : "text-iris!"}`}
         value={isClaude ? ANTHROPIC_PROVIDER_ID : value.provider}
         onChange={(e) => pickProvider(e.target.value)}
         title={isClaude ? "Claude, through your Claude Code login" : (current?.label ?? value.provider)}
@@ -117,7 +120,7 @@ export function ProviderPicker({
         })}
         {!isClaude && !current ? <option value={value.provider}>{value.provider} (missing)</option> : null}
         <option value={ADD_PROVIDER}>+ Add a provider (LM Studio, Ollama, OpenRouter…)</option>
-      </select>
+      </Select>
       <ModelCombobox
         value={value.model}
         onChange={(model) => onChange({ ...value, model })}

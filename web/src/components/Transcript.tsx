@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { EventRow } from "../../../server/src/types.ts";
 import { api } from "../lib/api.ts";
-import { useWs } from "../lib/ws.ts";
+import { useWs, useWsReconnect } from "../lib/ws.ts";
 import { Markdown } from "../lib/markdown.tsx";
 import { cost, costLabel, modelLabel, shortModel, tokens } from "../lib/format.ts";
 import { ContextBar } from "./UsageMeters.tsx";
@@ -26,23 +26,27 @@ function inputSummary(name: string, input: any): string {
   if (input.file_path) return String(input.file_path);
   if (input.pattern) return String(input.pattern);
   if (input.path) return String(input.path);
+  if (input.prompt && name.startsWith("mcp__images__")) return String(input.prompt);
   if (name.startsWith("mcp__board__")) return Object.values(input).map((v) => (typeof v === "string" ? v : JSON.stringify(v))).join(" · ").slice(0, 140);
   return "";
 }
 
-function Collapsible({ head, body, tone = "text-ink-300" }: { head: React.ReactNode; body: string; tone?: string }) {
+/** `body` is only worked out, and only put on the page, once the row is opened: a long run has hundreds of these, each up to 24k characters. */
+function Collapsible({ head, body, tone = "text-ink-300" }: { head: React.ReactNode; body: () => string; tone?: string }) {
+  const [open, setOpen] = useState(false);
   return (
-    <details className="group rounded-md border border-ink-700/80 bg-ink-900/60">
+    <details className="group rounded-md border border-ink-700/80 bg-ink-900/60" onToggle={(e) => setOpen(e.currentTarget.open)}>
       <summary className={`flex cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 font-mono text-[11.5px] ${tone}`}>
         <span className="text-ink-500 transition-transform group-open:rotate-90">▸</span>
         {head}
       </summary>
-      <pre className="max-h-80 overflow-auto border-t border-ink-700/80 px-2.5 py-2 font-mono text-[11.5px] leading-relaxed text-ink-300 whitespace-pre-wrap">{body}</pre>
+      {open ? <pre className="max-h-80 overflow-auto border-t border-ink-700/80 px-2.5 py-2 font-mono text-[11.5px] leading-relaxed text-ink-300 whitespace-pre-wrap">{body()}</pre> : null}
     </details>
   );
 }
 
-function EventView({ ev }: { ev: EventRow }) {
+/** Memoised: an event never changes once stored, so a new one arriving must not redraw the rest. */
+const EventView = memo(function EventView({ ev }: { ev: EventRow }) {
   const p = ev.payload as any;
   if (ev.type === "user:chat") {
     return (
@@ -50,7 +54,7 @@ function EventView({ ev }: { ev: EventRow }) {
     );
   }
   if (ev.type === "user:prompt") {
-    return <Collapsible head={<span className="text-ink-300">stage prompt sent to this session</span>} body={p.text} />;
+    return <Collapsible head={<span className="text-ink-300">stage prompt sent to this session</span>} body={() => p.text} />;
   }
   if (ev.type.startsWith("verify:")) {
     const ok = ev.type === "verify:passed";
@@ -103,20 +107,20 @@ function EventView({ ev }: { ev: EventRow }) {
       <div className="space-y-1.5">
         {blocks(p).map((b, i) => {
           if (b.type === "text" && b.text?.trim()) return <Markdown key={i} text={b.text} className="text-[13px]" />;
-          if (b.type === "thinking" && b.thinking?.trim()) return <Collapsible key={i} head={<span className="italic text-ink-400">thinking</span>} body={b.thinking} />;
+          if (b.type === "thinking" && b.thinking?.trim()) return <Collapsible key={i} head={<span className="italic text-ink-400">thinking</span>} body={() => b.thinking ?? ""} />;
           if (b.type === "tool_use") {
             const name = b.name ?? "tool";
             return (
               <Collapsible
                 key={i}
-                tone={name.startsWith("mcp__board__") ? "text-cyan" : "text-amber"}
+                tone={name.startsWith("mcp__board__") || name.startsWith("mcp__images__") ? "text-cyan" : "text-amber"}
                 head={
                   <>
-                    <span className="font-semibold">{name.replace("mcp__board__", "board.")}</span>
+                    <span className="font-semibold">{name.replace("mcp__board__", "board.").replace("mcp__images__", "images.")}</span>
                     <span className="truncate text-ink-400">{inputSummary(name, b.input)}</span>
                   </>
                 }
-                body={JSON.stringify(b.input, null, 2)}
+                body={() => JSON.stringify(b.input, null, 2)}
               />
             );
           }
@@ -137,7 +141,7 @@ function EventView({ ev }: { ev: EventRow }) {
               key={i}
               tone={b.is_error ? "text-rust" : "text-ink-400"}
               head={<span className="truncate">{b.is_error ? "✕ " : "↳ "}{text.split("\n")[0].slice(0, 120) || "(empty result)"}</span>}
-              body={text}
+              body={() => text}
             />
           );
         })}
@@ -155,33 +159,92 @@ function EventView({ ev }: { ev: EventRow }) {
     );
   }
   return null;
+});
+
+/** How many rows are drawn at once. Older ones stay a click away; drawing thousands made every new event stutter. */
+const WINDOW = 300;
+
+/** Adds events to the list by id, in order: a page from the server and a push can arrive in either order, and overlap. */
+function merged(have: EventRow[], more: EventRow[]): EventRow[] {
+  const seen = new Set(have.map((e) => e.id));
+  const fresh = more.filter((e) => !seen.has(e.id));
+  if (!fresh.length) return have;
+  const last = have[have.length - 1];
+  const all = [...have, ...fresh];
+  return !last || fresh[0].id > last.id ? all : all.sort((a, b) => a.id - b.id);
 }
 
 /** Live transcript of one run: loads stored events, then appends WS events for that run. */
 export function Transcript({ runId, meta }: { runId: string; meta?: { model: string; cost_usd: number; input_tokens: number; output_tokens: number; context_tokens: number; context_window: number } }) {
   const [events, setEvents] = useState<EventRow[]>([]);
+  /** Index of the first row drawn. */
+  const [start, setStart] = useState(0);
+  const box = useRef<HTMLDivElement>(null);
   const bottom = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  /** The run being shown, so a slow answer for the previous one is dropped. */
+  const showing = useRef(runId);
+  const newest = useRef(0);
+
+  // The server hands out a run's events a page at a time, oldest first, so keep asking until a page
+  // comes back empty: one request used to show a long run's beginning and silently leave out its end.
+  const load = useCallback(async (run: string, after: number) => {
+    for (;;) {
+      const page = await api.events(run, after);
+      if (showing.current !== run || !page.length) return;
+      // Added to what is there, never put in its place: events pushed while this was on its way stay.
+      setEvents((prev) => merged(prev, page));
+      after = page[page.length - 1].id;
+    }
+  }, []);
 
   useEffect(() => {
-    let alive = true;
+    showing.current = runId;
+    newest.current = 0;
+    stick.current = true;
     setEvents([]);
-    void api.events(runId).then((e) => alive && setEvents(e));
+    setStart(0);
+    load(runId, 0).catch(() => {});
     return () => {
-      alive = false;
+      showing.current = "";
     };
-  }, [runId]);
+  }, [runId, load]);
 
   useWs((m) => {
-    if (m.type === "event" && m.runId === runId) setEvents((prev) => (prev.some((e) => e.id === m.event.id) ? prev : [...prev, m.event]));
+    if (m.type === "event" && m.runId === runId) setEvents((prev) => merged(prev, [m.event]));
   });
+  // What was pushed while the socket was down is asked for again, from the last event seen.
+  useWsReconnect(() => void load(runId, newest.current).catch(() => {}));
 
-  useEffect(() => {
-    if (stick.current) bottom.current?.scrollIntoView({ block: "end" });
+  // While you follow the run the window follows it too; once you scroll up it holds still, so rows
+  // are not taken away from under what you are reading.
+  const from = stick.current ? Math.max(start, events.length - WINDOW) : start;
+  // Before the browser paints, not after: dropping rows off the top moves the scroll position, and
+  // a scroll seen before this has gone back to the bottom would read as "you scrolled up".
+  useLayoutEffect(() => {
+    newest.current = events.length ? events[events.length - 1].id : 0;
+    if (!stick.current) return;
+    setStart((s) => Math.max(s, events.length - WINDOW));
+    bottom.current?.scrollIntoView({ block: "end" });
   }, [events.length]);
+
+  /** Distance from the bottom before earlier rows were added, to put the view back where it was. */
+  const keep = useRef<number | null>(null);
+  const showEarlier = () => {
+    const el = box.current;
+    keep.current = el ? el.scrollHeight - el.scrollTop : null;
+    stick.current = false;
+    setStart(Math.max(0, from - WINDOW));
+  };
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (el && keep.current !== null) el.scrollTop = el.scrollHeight - keep.current;
+    keep.current = null;
+  }, [start]);
 
   return (
     <div
+      ref={box}
       className="h-full space-y-2.5 overflow-y-auto pr-1"
       onScroll={(e) => {
         const el = e.currentTarget;
@@ -197,7 +260,12 @@ export function Transcript({ runId, meta }: { runId: string; meta?: { model: str
         </div>
       ) : null}
       {events.length === 0 ? <div className="text-[12px] text-ink-500">No events yet.</div> : null}
-      {events.map((ev) => (
+      {from > 0 ? (
+        <button className="w-full cursor-pointer rounded-md border border-dashed border-ink-700 py-1.5 font-mono text-[11px] text-ink-400 hover:border-ink-500 hover:text-ink-200" onClick={showEarlier}>
+          Show earlier · {from} more above
+        </button>
+      ) : null}
+      {events.slice(from).map((ev) => (
         <EventView key={ev.id} ev={ev} />
       ))}
       <div ref={bottom} />

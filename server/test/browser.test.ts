@@ -14,6 +14,7 @@ import { TaskRunner, type QueryFn } from "../src/engine/runner.ts";
 import { browserDecision, confineOutput, isLocalUrl, PLAYWRIGHT_PLUGIN_TOOLS } from "../src/engine/browser.ts";
 import { killsByName, serverRule } from "../src/engine/gate.ts";
 import { buildStagePrompt, type PromptCtx } from "../src/engine/prompts.ts";
+import { reviewSkippedBrowser } from "../src/engine/runner.ts";
 import type { Mode, Stage } from "../src/types.ts";
 
 const PW = "mcp__playwright__";
@@ -42,7 +43,7 @@ function gitRepo(): string {
 }
 
 /** Runs one stage with a fake session and returns the options it was started with. */
-async function optionsFor(mode: Mode, settings: Record<string, unknown>, probe?: (o: Options, repo: Repo, taskId: string) => Promise<void>) {
+async function optionsFor(mode: Mode, settings: Record<string, unknown>, probe?: (o: Options, repo: Repo, taskId: string) => Promise<void>, pipeline: Stage[] = ONE_STAGE) {
   const dir = gitRepo();
   const seen: Options[] = [];
   const q: QueryFn = (params) =>
@@ -56,7 +57,7 @@ async function optionsFor(mode: Mode, settings: Record<string, unknown>, probe?:
   repo.updateSettings(settings as never);
   const runner = new TaskRunner({ repo, bus: new Bus(), queryFn: q });
   const project = repo.createProject({ name: "demo", path: dir, policy: { worktrees: "allowed", autonomous: "allowed", maxConcurrent: 3 } });
-  const task = repo.createTask({ project_id: project.id, title: "page", mode, pipeline: ONE_STAGE });
+  const task = repo.createTask({ project_id: project.id, title: "page", mode, pipeline });
   try {
     runner.queueTask(task.id);
     await until(() => ["review", "failed"].includes(repo.getTask(task.id)!.status));
@@ -168,7 +169,8 @@ test("whatever a stage leaves listening on the task's port is stopped, by PID", 
 });
 
 test("a run gets the board's own browser, and never your Chrome unless it is supervised and you allowed it", async () => {
-  const on = await optionsFor("autonomous", { browserChecks: true, chromeInSupervised: true, liveView: false });
+  // With the helpers switched off the stage drives the browser itself, the way it always did.
+  const on = await optionsFor("autonomous", { browserChecks: true, chromeInSupervised: true, liveView: false, browserCheckModel: "stage" });
   const server = on.options.mcpServers?.playwright as { command: string; args: string[] };
   assert.ok(server, "the board's browser is attached");
   for (const flag of ["--headless", "--isolated", "--output-dir"]) assert.ok(server.args.includes(flag), `started with ${flag}`);
@@ -176,7 +178,7 @@ test("a run gets the board's own browser, and never your Chrome unless it is sup
   assert.ok(!outDir.includes("kbrowser-"), "page snapshots and logs are written outside the project, so they are never committed");
 
   // With the live view on, the same settings travel in a config file, outside the project too.
-  const live = await optionsFor("autonomous", { browserChecks: true, liveView: true });
+  const live = await optionsFor("autonomous", { browserChecks: true, liveView: true, browserCheckModel: "stage" });
   const liveServer = live.options.mcpServers?.playwright as { command: string; args: string[] };
   const config = liveServer.args[liveServer.args.indexOf("--config") + 1];
   assert.ok(config && !config.includes("kbrowser-"), "the live-view config is written outside the project");
@@ -227,4 +229,61 @@ test("Settings explains how each tool server is treated", () => {
   assert.match(serverRule(`${PLAYWRIGHT_PLUGIN_TOOLS}__`), /Hidden/);
   assert.match(serverRule("mcp__claude-in-chrome__"), /supervised runs only/);
   assert.match(serverRule("mcp__claude_ai_Gmail__"), /Autonomous runs: refused\. Supervised runs: an approval card/);
+});
+
+test("a cheaper helper drives the browser; the stage only asks it, and carries no browser of its own", async () => {
+  const fresh = await optionsFor("autonomous", { browserChecks: true, liveView: false });
+  assert.equal(fresh.options.agents, undefined, "off by default: measured, it made tasks more thorough, not cheaper");
+  const { options } = await optionsFor("autonomous", { browserChecks: true, liveView: false, browserCheckModel: "sonnet" });
+  assert.equal(options.mcpServers?.playwright, undefined, "the stage itself has no browser tools to fill its context with");
+  const helper = options.agents?.["browser-check"];
+  assert.ok(helper, "the browser-check helper is offered");
+  assert.equal(helper.model, "sonnet");
+  const server = (helper.mcpServers?.[0] as Record<string, { args: string[] }>).playwright;
+  assert.ok(server.args.includes("--headless") && server.args.includes("--isolated"), "the same headless, private browser");
+  for (const t of ["Edit", "Write", "Bash"]) assert.ok(helper.disallowedTools?.includes(t), `the helper looks and reports; it cannot ${t}`);
+
+  const haiku = await optionsFor("autonomous", { browserChecks: true, liveView: false, browserCheckModel: "haiku" });
+  assert.equal(haiku.options.agents?.["browser-check"]?.model, "haiku");
+
+  const own = await optionsFor("autonomous", { browserChecks: true, liveView: false, browserCheckModel: "stage" });
+  assert.equal(own.options.agents, undefined, "switched to the stage's own model: no helpers at all, exactly as before");
+});
+
+test("a plan has no browser and no picture tool: it reads, it does not look or draw", async () => {
+  const plan: Stage[] = [{ stage: "plan", model: "m", effort: "low" }];
+  const { options } = await optionsFor("autonomous", { browserChecks: true, liveView: false, browserCheckModel: "stage", imageProvider: "pollinations" }, undefined, plan);
+  assert.equal(options.mcpServers?.playwright, undefined);
+  assert.equal(options.mcpServers?.images, undefined);
+  assert.ok(options.mcpServers?.board, "the board's own tools stay");
+});
+
+test("with a helper, code and review ask it to look; review must say whether anything was looked at", () => {
+  const ctx = (stage: PromptCtx["stage"]): PromptCtx => ({
+    stage, mode: "autonomous", task: { id: "t1", title: "Fix the header", spec_md: "" }, siblings: [], skills: [], messages: [],
+    browser: { port: 5301, chrome: false, helper: true },
+  });
+  const code = buildStagePrompt(ctx("code"));
+  assert.match(code, /ask the `browser-check` agent/);
+  assert.doesNotMatch(code, /take a screenshot \(no file name/, "the stage is not told to drive the browser itself");
+  assert.match(code, /keep a to-do list/, "its steps reach the card");
+  const review = buildStagePrompt(ctx("review"));
+  assert.match(review, /Browser: checked —[\s\S]*Browser: not needed —/);
+});
+
+test("a review that passed a visible change without a browser line is flagged; a backend change is not", () => {
+  assert.equal(reviewSkippedBrowser("All good.\nVERDICT: APPROVE", ["index.html", "js/main.js"]), true);
+  assert.equal(reviewSkippedBrowser("Browser: checked — the title screen and a crash.\nVERDICT: APPROVE", ["index.html"]), false);
+  assert.equal(reviewSkippedBrowser("**Browser:** not needed — only the README changed", ["css/style.css"]), false);
+  assert.equal(reviewSkippedBrowser("VERDICT: APPROVE", ["server/db.ts", "README.md"]), false);
+});
+
+test("a stage already on a model as cheap as the helper looks for itself: two sessions for one job cost more", async () => {
+  const sonnetReview: Stage[] = [{ stage: "review", model: "claude-sonnet-5-5", effort: "medium" }];
+  const { options } = await optionsFor("autonomous", { browserChecks: true, liveView: false, browserCheckModel: "sonnet" }, undefined, sonnetReview);
+  assert.equal(options.agents?.["browser-check"], undefined);
+  assert.ok(options.mcpServers?.playwright, "it keeps its own browser");
+  const opusCode: Stage[] = [{ stage: "code", model: "claude-opus-5-5", effort: "medium" }];
+  const opus = await optionsFor("autonomous", { browserChecks: true, liveView: false, browserCheckModel: "sonnet" }, undefined, opusCode);
+  assert.ok(opus.options.agents?.["browser-check"], "an Opus stage hands the looking to Sonnet");
 });

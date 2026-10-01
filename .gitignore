@@ -8,3 +8,6 @@ web/dist/
 # Local-only publishing rules (private names and excluded paths)
 .claude/publish.local.json
 .claude/*.local.*
+
+# Built on each computer from scripts/app (scripts/build-app.ps1)
+/Claude Kanban*.exe

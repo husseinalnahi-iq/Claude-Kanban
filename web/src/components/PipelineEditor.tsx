@@ -5,7 +5,7 @@ import {
 } from "../../../server/src/types.ts";
 import { api } from "../lib/api.ts";
 import { useAppData } from "../lib/store.tsx";
-import { Help, inputCls } from "./ui.tsx";
+import { Help, inputCls, Select } from "./ui.tsx";
 import { ProviderPicker } from "./ProviderPicker.tsx";
 import { EffortSelect } from "./ClaudeModelPicker.tsx";
 
@@ -48,6 +48,11 @@ const STAGE_TINT: Record<StageName, string> = { plan: "text-cyan!", code: "text-
 /** Is this stage on Claude (through your login)? Effort and fast mode only mean something there. */
 const onClaude = (s: Stage) => !s.provider || s.provider === ANTHROPIC_PROVIDER_ID;
 
+/** "plan Opus 5.5 · high → code Opus 5.5 · medium" — a pipeline in one line, model and effort for each stage. */
+export function pipelineLine(stages: Stage[], label: (s: Stage) => string): string {
+  return stages.map((s) => `${s.stage} ${label(s)}${onClaude(s) ? ` · ${s.effort}` : ""}`).join(" → ");
+}
+
 /** Edits a pipeline: one row per stage with provider + model, effort and optional prompt. */
 export function PipelineEditor({ value, onChange, models, providers: providersProp }: { value: Stage[]; onChange: (v: Stage[]) => void; models: ModelEntry[]; providers?: Provider[] }) {
   const fastStatus = useFastMode();
@@ -63,14 +68,19 @@ export function PipelineEditor({ value, onChange, models, providers: providersPr
   };
   return (
     <div className="space-y-2">
+      <div className="px-1 text-[11px] text-ink-500">
+        Each stage: what it does, which model runs it, and its <b className="font-medium text-ink-300">effort</b> — how long it may think. Higher effort
+        thinks more and costs more; medium suits most coding, high suits planning.
+      </div>
       {value.map((s, i) => (
         <div key={i} className="rounded-lg border border-ink-700 bg-ink-850/60 p-2.5">
-          <div className="grid grid-cols-[92px_1fr_150px_auto_auto] items-center gap-2">
-            <select className={`${inputCls} font-mono ${STAGE_TINT[s.stage]}`} value={s.stage} onChange={(e) => set(i, { stage: e.target.value as StageName })}>
+          {/* The model gets whatever the stage, effort and buttons leave: it is the one name that must read whole. */}
+          <div className="grid grid-cols-[88px_minmax(0,1fr)_auto_auto_auto] items-center gap-2">
+            <Select wide className={`font-mono ${STAGE_TINT[s.stage]}`} value={s.stage} onChange={(e) => set(i, { stage: e.target.value as StageName })}>
               {STAGES.map((st) => (
                 <option key={st} value={st}>{st}</option>
               ))}
-            </select>
+            </Select>
             <ProviderPicker
               compact
               value={{ provider: s.provider ?? ANTHROPIC_PROVIDER_ID, model: s.model }}
@@ -79,7 +89,7 @@ export function PipelineEditor({ value, onChange, models, providers: providersPr
               onChange={(v) => set(i, { model: v.model, provider: v.provider === ANTHROPIC_PROVIDER_ID ? undefined : v.provider, ...(v.provider === ANTHROPIC_PROVIDER_ID ? {} : { fast: undefined }) })}
             />
             <span className="block min-w-0" title={onClaude(s) ? undefined : "Effort is a Claude control; it is not sent to other providers"}>
-              <EffortSelect notes model={s.model} value={s.effort} disabled={!onClaude(s)} onChange={(effort) => set(i, { effort })} />
+              <EffortSelect notes labelled model={s.model} value={s.effort} disabled={!onClaude(s)} onChange={(effort) => set(i, { effort })} />
             </span>
             {(() => {
               // Fast mode is Opus 5 / 4.8 only, and only when the account allows it. When it cannot run,
@@ -159,7 +169,7 @@ export function PipelineEditor({ value, onChange, models, providers: providersPr
         <button
           type="button"
           className="flex-1 rounded-lg border border-dashed border-ink-600 py-1.5 text-[12px] text-ink-300 hover:border-ink-400 hover:text-ink-100 cursor-pointer"
-          onClick={() => onChange([...value, { stage: "code", model: models[1]?.id ?? models[0]?.id ?? "claude-opus-5", effort: DEFAULT_EFFORT }])}
+          onClick={() => onChange([...value, { stage: "code", model: models[1]?.id ?? models[0]?.id ?? "opus", effort: DEFAULT_EFFORT }])}
         >
           + stage
         </button>

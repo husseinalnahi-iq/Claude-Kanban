@@ -44,6 +44,12 @@ test("plan → critic → revision in the planner's own session, then the task w
     assert.match(f.calls[1].prompt, /PLAN v1/);
     assert.equal(f.calls[1].options.model, "claude-sonnet-5");
     assert.equal(f.calls[1].options.resume, undefined);
+    const critic = f.calls[1].options;
+    assert.deepEqual(critic.settingSources, ["project"], "a critique reads a plan: none of your plugins");
+    assert.deepEqual(critic.skills, []);
+    assert.equal(critic.strictMcpConfig, true);
+    assert.equal(critic.mcpServers.playwright, undefined, "nothing to look at");
+    assert.ok(critic.maxTurns <= 20 && critic.maxBudgetUsd <= 1, "a critique is short and cheap");
     assert.equal(f.calls[2].options.resume, "s-plan", "the planner revises in its own session");
     assert.match(f.calls[2].prompt, /skips the migration/);
     assert.doesNotMatch(f.calls[2].prompt, /## Your plan/, "a resumable planner already holds its plan");

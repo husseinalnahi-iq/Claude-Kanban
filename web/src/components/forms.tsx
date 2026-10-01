@@ -5,7 +5,8 @@ import type { StageStat } from "../../../server/src/routes/analytics.ts";
 import { useAppData } from "../lib/store.tsx";
 import { navigate } from "../lib/router.ts";
 import { Button, ErrorLine, Field, inputCls, Modal, useAction, ModeHelp } from "./ui.tsx";
-import { PipelineEditor } from "./PipelineEditor.tsx";
+import { PipelineEditor, pipelineLine } from "./PipelineEditor.tsx";
+import { modelLabel } from "../lib/format.ts";
 import { SafetyOptions } from "./SafetyOptions.tsx";
 import { defaultWhen, startAtOf, WhenPicker, whenInvalid, type When } from "./WhenPicker.tsx";
 
@@ -155,7 +156,7 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
                     same(pipeline, [...stages]) ? "border-amber/60 bg-amber/10 text-amber" : "border-ink-700 text-ink-300 hover:border-ink-500"
                   }`}
                 >
-                  <b>{label}</b> · <span className="font-mono">{stages.map((s) => s.stage).join(" → ")}</span>
+                  <b>{label}</b> · <span className="font-mono">{pipelineLine(stages, modelLabel)}</span>
                 </button>
               ))}
               <span className="text-[11.5px] text-ink-400">
@@ -174,7 +175,7 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
               live={live}
               planApproval={planApproval}
               settingOn={settings?.planApproval ?? false}
-              liveModel={settings?.liveReviewModel ?? "claude-opus-5"}
+              liveModel={settings?.liveReviewModel ?? "opus"}
               onChange={(v) => {
                 if (v.live !== undefined) setLive(v.live);
                 if (v.plan_approval !== undefined) setPlanApproval(v.plan_approval);

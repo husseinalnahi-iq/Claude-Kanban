@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { RunListItem } from "../../../server/src/types.ts";
 import { api } from "../lib/api.ts";
-import { useWs } from "../lib/ws.ts";
+import { useWs, useWsReconnect } from "../lib/ws.ts";
 import { navigate } from "../lib/router.ts";
 import { ago, cost, elapsed, modelLabel, tokens } from "../lib/format.ts";
 import { Empty } from "../components/ui.tsx";
@@ -12,8 +12,10 @@ const TONE = { running: "text-amber", approval: "text-rose", success: "text-moss
 export function Sessions() {
   const [runs, setRuns] = useState<RunListItem[]>([]);
   const [, tick] = useState(0);
-  const load = useCallback(() => void api.runs().then(setRuns), []);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(() => void api.runs().then((r) => (setRuns(r), setError(null)), (e: Error) => setError(e.message)), []);
   useEffect(load, [load]);
+  useWsReconnect(load);
   useWs((m) => {
     if (m.type === "run.updated" || m.type === "run.finished") {
       setRuns((prev) => (prev.some((r) => r.id === m.run.id) ? prev.map((r) => (r.id === m.run.id ? { ...r, ...m.run } : r)) : prev));
@@ -36,7 +38,9 @@ export function Sessions() {
           {live.length} live · {runs.length} total · {cost(total)}
         </span>
       </div>
-      {!runs.length ? (
+      {error ? (
+        <Empty>The list of runs could not be loaded: {error}</Empty>
+      ) : !runs.length ? (
         <Empty>No runs yet.</Empty>
       ) : (
         <div className="overflow-x-auto rounded-xl border border-ink-800">
