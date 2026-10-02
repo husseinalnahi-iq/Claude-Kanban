@@ -13,11 +13,53 @@ import { isImageProvider } from "./engine/images.ts";
 
 type Row = Record<string, SQLInputValue>;
 
-/** Memory guardrails: one line each, a bounded number per project. */
+function toNote(r: Row): Note {
+  return {
+    id: r.id as string,
+    project_id: r.project_id as string,
+    task_id: (r.task_id as string) ?? null,
+    text: r.text as string,
+    source: r.source as Note["source"],
+    kind: ((r.kind as string) === "outcome" ? "outcome" : "lesson"),
+    ts: r.ts as string,
+    flag: r.flagged_at ? { reason: (r.flag_reason as string) ?? "", at: r.flagged_at as string, task_id: (r.flag_task_id as string) ?? null } : null,
+    approved: Number(r.approved ?? 0),
+    sentBack: Number(r.sent_back ?? 0),
+  };
+}
+
+/** A note with how the tasks that carried it ended. */
+const NOTE_SELECT = `SELECT notes.*,
+  (SELECT COUNT(*) FROM note_uses u WHERE u.note_id = notes.id AND u.verdict = 'approved') AS approved,
+  (SELECT COUNT(*) FROM note_uses u WHERE u.note_id = notes.id AND u.verdict = 'rejected') AS sent_back
+  FROM notes`;
+
+/** Memory guardrails: one line each, a bounded number per project, per kind. */
 export const NOTE_MAX_CHARS = 280;
 export const NOTE_KEEP_PER_PROJECT = 60;
 /** How many memory lines a stage prompt carries; the rest are fetched on demand via board_memory. */
 export const NOTES_IN_PROMPT = 12;
+/** Of those, how many are simply the newest lessons, whatever the task: what was just decided often matters. */
+export const NOTES_ALWAYS_RECENT = 3;
+/** And at most how many are outcomes of earlier tasks — only ones that match this task get in at all. */
+export const NOTE_OUTCOMES_IN_PROMPT = 4;
+
+/** Words too common to say what a task is about; matching on them would rank every note alike. */
+const NOTE_STOPWORDS = new Set(
+  ("the and for are but not you all any can had has have her his how its our out who why was were will with " +
+    "this that these those from into onto then than them they their there what when where which while would " +
+    "should could does did done doing been being about also just only very more most some such each other " +
+    "make made use used using add added task tasks please need needs want like").split(" "),
+);
+
+/**
+ * The words of a task worth searching memory for, as an FTS5 query (any of them). Each word is quoted,
+ * so nothing a user typed is read as FTS syntax; null when nothing is left to search for.
+ */
+export function noteQuery(text: string): string | null {
+  const words = [...new Set((text.toLowerCase().match(/[\p{L}\p{N}_]{3,}/gu) ?? []).filter((w) => !NOTE_STOPWORDS.has(w)))];
+  return words.length ? words.slice(0, 64).map((w) => `"${w}"`).join(" OR ") : null;
+}
 
 /** Biggest a single stored event may be. Past this the transcript is a liability, not a record. */
 export const MAX_EVENT_CHARS = 24_000;
@@ -453,9 +495,11 @@ export class Repo {
       specModel: m.get("specModel") || "claude-opus-5-5",
       specEffort: (m.get("specEffort") as Effort) || "high",
       loadUserPlugins: (m.get("loadUserPlugins") ?? "true") !== "false",
+      claudeAutoMemory: m.get("claudeAutoMemory") === "true",
       browserChecks: (m.get("browserChecks") ?? "true") !== "false",
       chromeInSupervised: m.get("chromeInSupervised") === "true",
       autoAllowReadOnly: (m.get("autoAllowReadOnly") ?? "true") !== "false",
+      markitdownInTasks: (m.get("markitdownInTasks") ?? "true") !== "false",
       planApproval: m.get("planApproval") === "true",
       autoContinueTurns: Number(m.get("autoContinueTurns") ?? 2),
       liveReviewModel: m.get("liveReviewModel") || "claude-opus-5-5",
@@ -1137,34 +1181,104 @@ export class Repo {
    * without bound is the documented failure mode ("catastrophic remembering"), and stale
    * contradictory notes poison later runs.
    */
-  addNote(n: { project_id: string; task_id?: string | null; text: string; source?: Note["source"] }): Note | null {
+  addNote(n: { project_id: string; task_id?: string | null; text: string; source?: Note["source"]; kind?: Note["kind"] }): Note | null {
     const text = n.text.trim().replace(/\s+/g, " ").slice(0, NOTE_MAX_CHARS);
     if (text.length < 8) return null;
+    const kind = n.kind ?? "lesson";
     const dupe = this.stmt("SELECT id FROM notes WHERE project_id = ? AND lower(text) = lower(?)").get(n.project_id, text) as Row | undefined;
     if (dupe) {
-      this.stmt("UPDATE notes SET ts = ? WHERE id = ?").run(nowIso(), dupe.id as string);
-      return this.stmt("SELECT * FROM notes WHERE id = ?").get(dupe.id as string) as unknown as Note;
+      // Written again as something to follow, an outcome becomes a lesson; never the other way round.
+      this.stmt(`UPDATE notes SET ts = ?${kind === "lesson" ? ", kind = 'lesson'" : ""} WHERE id = ?`).run(nowIso(), dupe.id as string);
+      return this.note(dupe.id as string);
     }
     const id = newId("n");
-    this.stmt("INSERT INTO notes(id, project_id, task_id, text, source, ts) VALUES (?, ?, ?, ?, ?, ?)").run(
-      id, n.project_id, n.task_id ?? null, text, n.source ?? "agent", nowIso(),
+    this.stmt("INSERT INTO notes(id, project_id, task_id, text, source, kind, ts) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+      id, n.project_id, n.task_id ?? null, text, n.source ?? "agent", kind, nowIso(),
     );
-    this.stmt(`DELETE FROM notes WHERE project_id = ? AND id NOT IN (SELECT id FROM notes WHERE project_id = ? ORDER BY ts DESC LIMIT ?)`)
-      .run(n.project_id, n.project_id, NOTE_KEEP_PER_PROJECT);
-    return this.stmt("SELECT * FROM notes WHERE id = ?").get(id) as unknown as Note;
+    // Each kind has its own cap, so a run of approvals can never push the project's lessons out.
+    this.stmt(
+      `DELETE FROM notes WHERE project_id = ? AND kind = ? AND id NOT IN
+         (SELECT id FROM notes WHERE project_id = ? AND kind = ? ORDER BY ts DESC LIMIT ?)`,
+    ).run(n.project_id, kind, n.project_id, kind, NOTE_KEEP_PER_PROJECT);
+    return this.note(id);
   }
 
-  notes(projectId: string, limit = NOTE_KEEP_PER_PROJECT): Note[] {
-    const rows = this.stmt("SELECT * FROM (SELECT * FROM notes WHERE project_id = ? ORDER BY ts DESC LIMIT ?) ORDER BY ts DESC")
-      .all(projectId, limit) as Row[];
-    return rows.map((r) => ({
-      id: r.id as string,
-      project_id: r.project_id as string,
-      task_id: (r.task_id as string) ?? null,
-      text: r.text as string,
-      source: r.source as Note["source"],
-      ts: r.ts as string,
-    }));
+  private note(id: string): Note {
+    return toNote(this.stmt(`${NOTE_SELECT} WHERE notes.id = ?`).get(id) as Row);
+  }
+
+  /** Newest first: lessons and outcomes together, each kind at most NOTE_KEEP_PER_PROJECT. */
+  notes(projectId: string, limit = 2 * NOTE_KEEP_PER_PROJECT): Note[] {
+    return (this.stmt(`${NOTE_SELECT} WHERE notes.project_id = ? ORDER BY notes.ts DESC LIMIT ?`).all(projectId, limit) as Row[]).map(toNote);
+  }
+
+  /**
+   * The notes a prompt for this task carries. Lessons: the newest few, then the ones whose words best
+   * match the task (BM25), then newer ones while there is room. Outcomes — what approved tasks did —
+   * only when they match, and at most a few: newest-only let one decision from thirty tasks ago fall
+   * out of every prompt while the summaries of unrelated approvals filled it (D305, D307).
+   */
+  notesFor(projectId: string, about: string, limit = NOTES_IN_PROMPT): Note[] {
+    // A note a run called wrong waits for you; carrying it on would mislead every task until then.
+    const all = this.notes(projectId).filter((n) => !n.flag);
+    const lessons = all.filter((n) => n.kind === "lesson");
+    const picked = new Map(lessons.slice(0, Math.min(NOTES_ALWAYS_RECENT, limit)).map((n) => [n.id, n]));
+    let outcomes = 0;
+    const match = noteQuery(about);
+    if (match) {
+      const ranked = this.stmt(
+        `SELECT notes.id FROM notes_fts JOIN notes ON notes.rowid = notes_fts.rowid
+         WHERE notes_fts MATCH ? AND notes.project_id = ? ORDER BY bm25(notes_fts) LIMIT ?`,
+      ).all(match, projectId, limit + NOTE_OUTCOMES_IN_PROMPT + NOTES_ALWAYS_RECENT) as Row[];
+      const byId = new Map(all.map((n) => [n.id, n]));
+      for (const r of ranked) {
+        if (picked.size >= limit) break;
+        const n = byId.get(r.id as string);
+        if (!n || picked.has(n.id)) continue;
+        if (n.kind === "outcome" && outcomes++ >= NOTE_OUTCOMES_IN_PROMPT) continue;
+        picked.set(n.id, n);
+      }
+    }
+    for (const n of lessons) {
+      if (picked.size >= limit) break;
+      picked.set(n.id, n);
+    }
+    return [...picked.values()];
+  }
+
+  /** Remembers which notes a task's prompt carried; a later stage carrying them again changes nothing. */
+  recordNoteUses(taskId: string, noteIds: string[]): void {
+    const add = this.stmt("INSERT OR IGNORE INTO note_uses(note_id, task_id) VALUES (?, ?)");
+    for (const id of noteIds) add.run(id, taskId);
+  }
+
+  /** How the task ended, for every note it carried. A task sent back and later approved counts as approved. */
+  settleNoteUses(taskId: string, verdict: "approved" | "rejected"): void {
+    this.stmt("UPDATE note_uses SET verdict = ? WHERE task_id = ?").run(verdict, taskId);
+  }
+
+  /**
+   * A run's report that a note is wrong or stale, found by its text as the prompt showed it (or its start,
+   * at least 12 characters). Null when no note of this project reads like that.
+   */
+  flagNote(projectId: string, text: string, reason: string, taskId: string | null): Note | null {
+    const t = text.trim().replace(/\s+/g, " ").replace(/^- /, "");
+    if (t.length < 12) return null;
+    const row = this.stmt(
+      `SELECT id FROM notes WHERE project_id = ? AND (lower(text) = lower(?) OR lower(substr(text, 1, ?)) = lower(?))
+       ORDER BY lower(text) = lower(?) DESC, ts DESC LIMIT 1`,
+    ).get(projectId, t, t.length, t, t) as Row | undefined;
+    if (!row) return null;
+    this.stmt("UPDATE notes SET flag_reason = ?, flagged_at = ?, flag_task_id = ? WHERE id = ?")
+      .run(reason.trim().slice(0, NOTE_MAX_CHARS), nowIso(), taskId, row.id as string);
+    return this.note(row.id as string);
+  }
+
+  /** You looked at a flagged note and it stands: it goes back into prompts. */
+  keepNote(id: string): Note | null {
+    if (!this.stmt("SELECT id FROM notes WHERE id = ?").get(id)) return null;
+    this.stmt("UPDATE notes SET flag_reason = NULL, flagged_at = NULL, flag_task_id = NULL WHERE id = ?").run(id);
+    return this.note(id);
   }
 
   deleteNote(id: string): void {

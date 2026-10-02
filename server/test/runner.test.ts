@@ -278,6 +278,89 @@ test("project memory is capped, de-duplicated and injected into later prompts", 
   }
 });
 
+test("a stage prompt carries the project memory about its own task, not only the newest notes", async () => {
+  const f = fakeQuery();
+  const s = setup(f.fn);
+  try {
+    s.repo.addNote({ project_id: s.project.id, text: "Invoices are exported as CSV with a semicolon separator." });
+    for (let i = 0; i < 30; i++) s.repo.addNote({ project_id: s.project.id, text: `Dashboard widget ${i} uses the shared colour tokens.` });
+    const task = s.repo.createTask({ project_id: s.project.id, title: "Add a PDF option to the invoice export", mode: "supervised", pipeline: ONE_STAGE });
+    s.runner.queueTask(task.id);
+    await until(() => s.repo.getTask(task.id)!.status === "review");
+    assert.match(f.calls[0].prompt, /## Decisions from earlier tasks[\s\S]*semicolon separator/);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("runs leave Claude Code's own memory out unless the setting lets them use it", async () => {
+  const f = fakeQuery();
+  const s = setup(f.fn);
+  try {
+    assert.equal(s.repo.getSettings().claudeAutoMemory, false, "off on a new board");
+    const first = s.repo.createTask({ project_id: s.project.id, title: "x", mode: "supervised", pipeline: ONE_STAGE });
+    s.runner.queueTask(first.id);
+    await until(() => s.repo.getTask(first.id)!.status === "review");
+    assert.equal(f.calls[0].options.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, "1");
+
+    s.repo.updateSettings({ claudeAutoMemory: true });
+    const second = s.repo.createTask({ project_id: s.project.id, title: "y", mode: "supervised", pipeline: ONE_STAGE });
+    s.runner.queueTask(second.id);
+    await until(() => s.repo.getTask(second.id)!.status === "review");
+    assert.equal(f.calls[1].options.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, "the board adds nothing of its own");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("an approved task is remembered as what it did, and a later task about the same thing sees it with its id", async () => {
+  const f = fakeQuery({ result: "Added a semicolon-separated CSV export for invoices." });
+  const s = setup(f.fn);
+  try {
+    const first = s.repo.createTask({ project_id: s.project.id, title: "Invoice export", mode: "supervised", pipeline: ONE_STAGE });
+    s.runner.queueTask(first.id);
+    await until(() => s.repo.getTask(first.id)!.status === "review");
+    await s.runner.approveTask(first.id);
+    const [note] = s.repo.notes(s.project.id);
+    assert.equal(note.kind, "outcome");
+
+    const second = s.repo.createTask({ project_id: s.project.id, title: "Add totals to the invoice export", mode: "supervised", pipeline: ONE_STAGE });
+    s.runner.queueTask(second.id);
+    await until(() => s.repo.getTask(second.id)!.status === "review");
+    const prompt = f.calls.at(-1)!.prompt;
+    assert.match(prompt, new RegExp(`## Earlier tasks in this project that look related[\\s\\S]*Invoice export: [\\s\\S]*\\(\`${first.id}\`\\)`));
+    assert.doesNotMatch(prompt, /## Decisions from earlier tasks/, "an outcome is not presented as a rule");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("approving or sending back a task is counted on every note its prompts carried, and a run can flag one", async () => {
+  const f = fakeQuery();
+  const s = setup(f.fn);
+  try {
+    s.repo.addNote({ project_id: s.project.id, text: "Money is stored in integer cents, never as floats." });
+    const sent = s.repo.createTask({ project_id: s.project.id, title: "Totals", mode: "supervised", pipeline: ONE_STAGE });
+    s.runner.queueTask(sent.id);
+    await until(() => s.repo.getTask(sent.id)!.status === "review");
+    s.runner.rejectTask(sent.id, "Wrong rounding.");
+    const kept = s.repo.createTask({ project_id: s.project.id, title: "Tax", mode: "supervised", pipeline: ONE_STAGE });
+    s.runner.queueTask(kept.id);
+    await until(() => s.repo.getTask(kept.id)!.status === "review");
+    await s.runner.approveTask(kept.id);
+    const money = s.repo.notes(s.project.id).find((n) => n.text.startsWith("Money"))!;
+    assert.deepEqual([money.approved, money.sentBack], [1, 1]);
+
+    const h = boardHandlers(s.repo, s.bus, { taskId: kept.id, runId: "r_x" });
+    const out = h.flagMemory({ note: "Money is stored in integer cents", reason: "Prices are decimals in the new schema." });
+    assert.ok(!("isError" in out));
+    assert.equal(s.repo.notes(s.project.id).find((n) => n.id === money.id)!.flag?.reason, "Prices are decimals in the new schema.");
+    assert.ok("isError" in h.flagMemory({ note: "Nothing like this was ever noted", reason: "a reason" }));
+  } finally {
+    s.cleanup();
+  }
+});
+
 test("a Reject note reaches every stage of the next run, and only that run", async () => {
   const f = fakeQuery();
   const s = setup(f.fn);
@@ -545,5 +628,27 @@ test("landing refuses to touch a dirty checkout, or the wrong branch, and never 
     } finally {
       s.cleanup();
     }
+  }
+});
+
+test("a run can search its project's earlier work, and finds neither its own task nor another project's", async () => {
+  const f = fakeQuery({ result: "Moved the CSV writer into exportInvoices() in billing/export.ts." });
+  const s = setup(f.fn);
+  try {
+    const earlier = s.repo.createTask({ project_id: s.project.id, title: "Invoice CSV", mode: "supervised", pipeline: ONE_STAGE });
+    s.runner.queueTask(earlier.id);
+    await until(() => s.repo.getTask(earlier.id)!.status === "review");
+    const elsewhere = s.repo.createProject({ name: "other", path: s.dir + "-other", policy: { worktrees: "allowed", autonomous: "allowed", maxConcurrent: 3 } as any });
+    s.repo.createTask({ project_id: elsewhere.id, title: "exportInvoices() in the other app", mode: "supervised", pipeline: ONE_STAGE });
+    const now = s.repo.createTask({ project_id: s.project.id, title: "Rename exportInvoices()", mode: "supervised", pipeline: ONE_STAGE });
+
+    const h = boardHandlers(s.repo, s.bus, { taskId: now.id, runId: "r_x" });
+    const found = JSON.parse(h.searchPastWork({ query: "exportInvoices" }).content[0].text) as { results: { task_id: string; where: string }[] };
+    assert.ok(found.results.length > 0);
+    assert.ok(found.results.every((r) => r.task_id === earlier.id), "only the earlier task of this project");
+    assert.ok(found.results.some((r) => r.where.endsWith("result")), "a stage's result is searched");
+    assert.deepEqual(JSON.parse(h.searchPastWork({ query: "nothing like this anywhere" }).content[0].text).results, []);
+  } finally {
+    s.cleanup();
   }
 });

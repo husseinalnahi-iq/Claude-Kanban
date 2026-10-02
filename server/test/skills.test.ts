@@ -65,3 +65,36 @@ test("scanSkills groups user, plugin and project skills", () => {
     rmSync(proj, { recursive: true, force: true });
   }
 });
+
+test("a plugin's skills are found where its plugin.json says, as well as in skills/, and never outside the plugin", () => {
+  const home = mkdtempSync(join(tmpdir(), "khome-"));
+  try {
+    const plugins = join(home, ".claude", "plugins");
+    // ui-ux-pro-max's layout: its skills live in .claude/skills/, named by plugin.json.
+    const pro = join(plugins, "cache", "m", "pro", "2.0.0");
+    skill(join(pro, ".claude", "skills", "ui-ux-pro-max"), "ui-ux-pro-max", "Design search");
+    skill(join(pro, ".claude", "skills", "brand"), "brand", "Brand");
+    skill(join(pro, "skills", "also"), "also", "Default folder still read");
+    skill(join(home, "outside", "evil"), "evil", "Not the plugin's");
+    mkdirSync(join(pro, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(pro, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "pro", skills: ["./.claude/skills/", "../../../../../outside"] }));
+    // One folder holding SKILL.md, named directly.
+    const single = join(plugins, "cache", "m", "single", "1.0.0");
+    skill(join(single, "tool"), "one-tool", "Named directly");
+    mkdirSync(join(single, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(single, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "single", skills: "./tool" }));
+    // No skills/ and no manifest key: the SKILL.md at the root is the plugin's one skill.
+    const bare = join(plugins, "cache", "m", "bare", "1.0.0");
+    skill(bare, "bare-skill", "At the root");
+    writeFileSync(
+      join(plugins, "installed_plugins.json"),
+      JSON.stringify({ version: 2, plugins: { "pro@m": [{ installPath: pro }], "single@m": [{ installPath: single }], "bare@m": [{ installPath: bare }] } }),
+    );
+    writeFileSync(join(home, ".claude", "settings.json"), JSON.stringify({ enabledPlugins: { "pro@m": true, "single@m": true, "bare@m": true } }));
+
+    const names = scanSkills({ home }).map((s) => s.name).sort();
+    assert.deepEqual(names, ["bare:bare-skill", "pro:also", "pro:brand", "pro:ui-ux-pro-max", "single:one-tool"]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

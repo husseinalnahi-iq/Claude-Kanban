@@ -405,13 +405,13 @@ restarting it.
 | **Autonomous** | Runs in its own git worktree on `kanban/<taskId>`. Edits are accepted inside it; writes outside it and history-rewriting git commands are refused. **Approve** lands the branch — see *Landing safely*. |
 | **Supervised** | Runs in the project folder, and every tool call that needs permission becomes an approval card: Allow or Deny, with a note. Tick **Work on its own branch** and it runs in its own worktree on `kanban/<taskId>` instead, like an autonomous task — still approving every write, and landing only when you press **Approve**. Commands that only read (`grep`, `wc`, `ls`, `git status`, `git diff`…) run without a card and are listed in the run log — switch that off in Settings → *Guardrails*. When the spec says a step needs your go-ahead (a live write, a deploy), Claude asks for it on a card rather than stopping. |
 | **Queue** | Per-project FIFO with a per-project cap and a global cap. Drag between Backlog and Queued. |
-| **Board MCP** | Every run gets `board_get_task`, `board_list_siblings`, `board_post_message`, `board_create_subtasks`, `board_set_summary`, `board_remember`, `board_memory`, `board_report_blocked`. |
+| **Board MCP** | Every run gets `board_get_task`, `board_list_siblings`, `board_post_message`, `board_create_subtasks`, `board_set_summary`, `board_remember`, `board_memory`, `board_flag_memory`, `board_search_past_work`, `board_report_blocked`. |
 | **Approvals** | A global inbox with `a` / `y` / `n` and a tab-title badge, so an unattended run never stalls unnoticed. |
 | **Dashboard** | Needs-you, open, done, spend, median task time, first-pass rate, throughput, cost by model, where runs fail. Every chart has a table view. |
 | **Sessions** | Every run across projects: state, model, effort, cost, tokens, elapsed. |
-| **Skills** | User, project and plugin skills in one place, each with an on/off switch that applies to every run. |
-| **Memory** | One-line decisions per project, injected into later prompts, editable and prunable. |
-| **Search** | `/` or Ctrl-K over specs, run results, transcripts, messages and memory. |
+| **Skills** | User, project and plugin skills in one place, each with an on/off switch that applies to every run. A plugin's skills are found where its `plugin.json` puts them, not only in `skills/`. **Recommended** at the top offers [Frontend Design](https://github.com/anthropics/skills/tree/main/skills/frontend-design) (Anthropic's own), [Emil Kowalski's design engineering](https://github.com/emilkowalski/skills) (`emil-design-eng`), [Taste](https://github.com/Leonxlnx/taste-skill) (`design-taste-frontend`) and [UI/UX Pro Max](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill). **Install** puts the first three into `~/.claude/skills` with `npx skills add … -g -a claude-code --copy`, one skill each; UI/UX Pro Max is a plugin (7 design skills, needs Python 3), added with `claude plugin marketplace add` and `claude plugin install`. **Install with Claude** does either in a supervised session. **MarkItDown** ([Microsoft's markitdown-mcp](https://github.com/microsoft/markitdown/tree/main/packages/markitdown-mcp)) is a tool rather than a skill: Claude turns PDFs, Word, Excel and PowerPoint files and web pages into Markdown. **Install** finds a Python 3.10–3.14, makes MarkItDown its own environment in `~/.claude-kanban/tools/markitdown`, installs it there and adds it to your Claude Code (`claude mcp add -s user markitdown`). Tasks then use it like a read — a web page, or a file in the task's own folders, without a card; any other file is refused (autonomous) or asked about (supervised). Settings → *Browser, images & plugins* switches that off. All are installed for you, so every project's runs get them. |
+| **Memory** | One-line notes per project, editable and prunable, of two kinds: **rules and lessons** (from `board_remember` and from you) and **what earlier tasks did** (one line per approved task, with its id). Each prompt carries up to 12: the newest 3 lessons, then the notes that share the most words with the task (SQLite full-text search, BM25) — at most 4 outcomes, and only matching ones. Each kind keeps its own 60, so approvals never push the lessons out; `board_memory` reads them all. Every note shows how the tasks it was given to ended (approved or sent back) and is marked for a look when it keeps turning up on work you send back. A run that finds a note wrong calls `board_flag_memory`: the note leaves the prompts until you **Keep it** or delete it. Nothing is ever removed for you. |
+| **Search** | `/` or Ctrl-K over specs, run results, transcripts, messages and memory. Runs get the same search for their own project as `board_search_past_work`: short lines first, then `board_get_task` for the full record. |
 | **Usage** | Your 5-hour and weekly Claude windows in the top bar, with reset times. A task stopped by the limit **pauses and resumes by itself** when the window reopens. |
 | **Recovery** | On restart, interrupted runs become `failed`; **Retry** resumes the stored session. Paused tasks keep their resume time. Transcripts past the retention window are pruned then — runs, costs and results are kept. |
 
@@ -826,6 +826,11 @@ is called, so the check costs nothing. Next to each tool server it shows how the
 claude.ai connectors (Gmail, Slack, Drive…) appear there too: autonomous runs are refused them, and
 supervised runs ask you before every call.
 
+**Claude Code's own memory** (off by default): Claude Code keeps notes of its own for each repository,
+shared with the sessions you run yourself. Runs leave those out, so the project memory in *Settings →
+Memory* is the only memory a task reads — the one you can see and edit. "Let runs use Claude Code's
+own memory too" in *Runs & limits* lets them back in.
+
 ---
 
 ## Images
@@ -1127,9 +1132,15 @@ rather have narrow cards and scroll sideways. Both are stored per machine. Anywh
 choice you might not know the words for, there is a **?** that explains it on hover.
 
 **Light, dark or navy** is the ◐ ☀ ☾ ◈ switch beside the size control: Auto follows the computer
-between light and dark, the other three are fixed. *Navy* is a deep blue ground with its own typefaces,
-Inter and JetBrains Mono, where the other two use IBM Plex. The same choice, with words, is in
-Settings → *Appearance*.
+between light and dark, the other three are fixed. *Navy* is a deep blue ground with JetBrains Mono for
+code, where the other two use IBM Plex Mono. The same choice, with words, is in Settings → *Appearance*.
+
+**The font** is the **Aa** button next to it: **SF Pro** (Apple, the default), **Inter**, **Segoe UI**
+(Microsoft), **Roboto** (Google) or **IBM Plex Sans**, the board's earlier font. It applies to all the
+text in every theme; code keeps its own font. SF Pro is only on a Mac, iPhone or iPad — Apple does not
+allow it to be downloaded onto a page — so on Windows it shows as Segoe UI; Segoe UI is only on Windows,
+and on a Mac it shows as SF Pro. The other three are downloaded and look the same everywhere. Like the
+theme, it is kept per computer, and it is in Settings → *Appearance* too.
 
 **Drop-down lists** are the browser's own, so they work with the keyboard and a screen reader, and in
 Chrome and Edge the open list is drawn in the board's colours, with a second line under a choice where

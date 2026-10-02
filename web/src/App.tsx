@@ -3,7 +3,7 @@ import { api } from "./lib/api.ts";
 import { navigate, useRoute, type View } from "./lib/router.ts";
 import { useAppData } from "./lib/store.tsx";
 import { useWs, useWsConnected, useWsReconnect } from "./lib/ws.ts";
-import { applyTheme, getViewPrefs, setViewPrefs, useViewPrefs, ZOOMS } from "./lib/view.ts";
+import { applyFont, applyTheme, getViewPrefs, setViewPrefs, useViewPrefs, ZOOMS } from "./lib/view.ts";
 import { seedAlerts, watchAlerts } from "./lib/alerts.ts";
 import { armSounds } from "./lib/sounds.ts";
 import { useTabBadge } from "./lib/badge.ts";
@@ -11,6 +11,7 @@ import { BellControl } from "./components/BellControl.tsx";
 import { Toasts } from "./components/Toasts.tsx";
 import { ZoomControl } from "./components/ZoomControl.tsx";
 import { ThemeControl } from "./components/ThemeControl.tsx";
+import { FontControl } from "./components/FontControl.tsx";
 import { UsageMeters } from "./components/UsageMeters.tsx";
 import { SearchModal } from "./components/SearchModal.tsx";
 import { NewProjectForm } from "./components/forms.tsx";
@@ -142,6 +143,7 @@ export function App() {
   // The theme goes on <html> too, beside the zoom. index.html has already painted it from the same
   // stored value; this keeps it right when the choice changes, and follows the OS while it is "system".
   useEffect(() => applyTheme(view.theme), [view.theme]);
+  useEffect(() => applyFont(view.font), [view.font]);
 
   // Sounds, pop-ups and desktop notifications. Seeded first, so opening the board replays nothing.
   useEffect(() => {
@@ -255,6 +257,7 @@ export function App() {
           </button>
           <BellControl />
           <ThemeControl />
+          <FontControl />
           <ZoomControl />
           <div className="pr-1">
             <UsageMeters />

@@ -7,7 +7,8 @@
  * its meaning in both themes and no component has to know which one is on.
  */
 @theme {
-  --font-sans: "IBM Plex Sans", ui-sans-serif, "Segoe UI", system-ui, sans-serif;
+  /* SF Pro, the default face (D304); the other faces are swapped in by `data-font` below */
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro", "Segoe UI", system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
 
   /* graphite ground */
@@ -155,18 +156,14 @@
 
 /*
  * Navy. A third look, chosen rather than followed: a deep blue ground instead of graphite, and its own
- * typefaces — Inter for text and JetBrains Mono for code, the two most-used screen faces on Google
- * Fonts in 2026 (D264). The ink ramp keeps the dark theme's direction (ink-950 is the ground), so
+ * code face, JetBrains Mono (D264); its text follows the font picker like every theme (D304). The ink ramp keeps the dark theme's direction (ink-950 is the ground), so
  * every component reads the same; only the hue under it changes. Signal colours are lifted a little
  * because a cool ground dulls warm hues: the amber here is a shade brighter than the graphite one.
  */
 :root[data-theme="navy"] {
   color-scheme: dark;
 
-  --font-sans: "Inter", ui-sans-serif, "Segoe UI", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
-  /* Inter's tabular figures and slashed zero, so costs and clocks line up in a column */
-  font-feature-settings: "tnum" 1, "zero" 1, "cv11" 1;
 
   --color-ink-950: #070c17;
   --color-ink-900: #0b1222;
@@ -204,6 +201,27 @@
 
   --kb-diff-add: #b9e0b4;
   --kb-diff-del: #f5a992;
+}
+
+/*
+ * The text face, chosen in the top bar and kept per computer (`data-font` on <html>, D304). After the
+ * themes so it wins over any of them; code keeps the theme's monospace face. The stacks are repeated
+ * in FONTS (lib/view.ts), which draws each name in its own face — change both together.
+ * "apple" needs no rule: it is the @theme default above.
+ */
+:root[data-font="inter"] {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  /* Inter's tabular figures and slashed zero, so costs and clocks line up in a column */
+  font-feature-settings: "tnum" 1, "zero" 1, "cv11" 1;
+}
+:root[data-font="segoe"] {
+  --font-sans: "Segoe UI", system-ui, sans-serif;
+}
+:root[data-font="roboto"] {
+  --font-sans: "Roboto", ui-sans-serif, system-ui, sans-serif;
+}
+:root[data-font="plex"] {
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
 }
 
 html,

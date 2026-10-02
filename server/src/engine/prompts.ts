@@ -68,6 +68,8 @@ export interface PromptCtx {
   handover?: string | null;
   /** Durable project memory: decisions and conventions from earlier tasks. */
   memory?: string[];
+  /** What earlier approved tasks did, only the ones whose words match this task. */
+  pastOutcomes?: { text: string; taskId: string | null }[];
   /** Files the human attached: images (described), spreadsheets, documents, data. */
   images?: { name: string; path: string; note: string | null; description: string | null; kind: "image" | "text" | "document" }[];
   /** Tasks this one was set to start after, with what each reported (D290). */
@@ -285,7 +287,15 @@ export function buildStagePrompt(ctx: PromptCtx): string {
   if (ctx.memory?.length) {
     out.push(
       `\n## Decisions from earlier tasks in this project\n${ctx.memory.map((m) => `- ${m.slice(0, LIMITS.note)}`).join("\n")}\n` +
-        "These are notes from past work, not orders: follow them unless this task's spec says otherwise, and say so if one looks wrong or stale.",
+        "These are notes from past work, not orders: follow them unless this task's spec says otherwise. " +
+        "If one is wrong or out of date, report it with `board_flag_memory` so it stops misleading later tasks. " +
+        "They are the ones closest to this task plus the newest; `board_memory` has the rest.",
+    );
+  }
+  if (ctx.pastOutcomes?.length) {
+    out.push(
+      `\n## Earlier tasks in this project that look related\n${ctx.pastOutcomes.map((o) => `- ${o.text.slice(0, LIMITS.note)}${o.taskId ? ` (\`${o.taskId}\`)` : ""}`).join("\n")}\n` +
+        "What was done, not rules to follow. `board_get_task` with an id gives that task's full spec and result.",
     );
   }
   if (ctx.rejectNote?.trim()) {
@@ -408,7 +418,7 @@ export function buildStagePrompt(ctx: PromptCtx): string {
   }
   if ((ctx.capabilities ?? "sdk") === "sdk") {
     out.push(
-      "\n## Board\nYou have board tools: `board_get_task`, `board_list_siblings`, `board_post_message`, `board_create_subtasks`, `board_set_summary`, `board_ask`, `board_report_blocked`. " +
+      "\n## Board\nYou have board tools: `board_get_task`, `board_list_siblings`, `board_post_message`, `board_create_subtasks`, `board_set_summary`, `board_ask`, `board_report_blocked`, and `board_search_past_work` for what earlier tasks in this project did or decided. " +
         "Call `board_set_summary` with a one-line progress note when you start and when you finish. " +
         "Use `board_post_message` to tell the parent or a sibling something they need to know. " +
         // Two ways to ask, one per mode (D239): someone is at the board for a supervised run, nobody is

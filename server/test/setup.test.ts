@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../src/db.ts";
@@ -11,6 +11,7 @@ import { buildApp } from "../src/app.ts";
 import { buildChecks } from "../src/setup/checks.ts";
 import { pickBrowser, type Probe, type RunResult } from "../src/setup/probe.ts";
 import { SetupService } from "../src/setup/service.ts";
+import { recommendedChecks } from "../src/setup/recommended.ts";
 import { resetHardwareCache } from "../src/setup/local.ts";
 import { setCodexRunner } from "../src/engine/providers/codexLocal.ts";
 import type { Provider, WsMessage } from "../src/types.ts";
@@ -256,6 +257,78 @@ test("setup routes: summary, validation, one-click fix, Claude session", async (
     release();
     await until(() => repo.getTask(t.id)!.status === "review", 8000);
     await until(() => events.some((m) => m.type === "setup.updated" && m.check.id === "git" && m.check.ok));
+  } finally {
+    await app.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recommended skills install for this user in one click or with Claude, and are not Setup rows", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ksetup-rec-"));
+  const home = join(dir, "home");
+  const f = fake();
+  const repo = new Repo(openDb(":memory:"));
+  const bus = new Bus();
+  const runner = new TaskRunner({ repo, bus, queryFn: done });
+  const setup = new SetupService({ repo, bus, runner, stateDir: join(dir, "setup"), probe: f.probe, recommended: recommendedChecks(() => home) });
+  const app = await buildApp({ repo, bus, runner, setup, allowedHosts: ["localhost:80"] });
+  const events: WsMessage[] = [];
+  bus.subscribe((m) => events.push(m));
+  const post = (url: string, payload: unknown) => app.inject({ method: "POST", url: `/api${url}`, payload: payload as object });
+  const list = async () => (await app.inject({ method: "GET", url: "/api/setup/recommended?fresh=1" })).json().checks as { id: string; ok: boolean; fixes: string[]; manual: string; link: { href: string } }[];
+  try {
+    const ids = (await list()).map((c) => c.id);
+    assert.deepEqual(ids, ["skill:frontend-design", "skill:emil-design-eng", "skill:design-taste-frontend", "skill:ui-ux-pro-max", "tool:markitdown"]);
+    const setupIds = (await app.inject({ method: "GET", url: "/api/setup?fresh=1" })).json().checks.map((c: { id: string }) => c.id);
+    assert.ok(!setupIds.some((id: string) => id.startsWith("skill:")), "the Setup checklist does not nag about them");
+
+    const emil = (await list())[1];
+    assert.equal(emil.ok, false);
+    assert.deepEqual(emil.fixes, ["run", "claude"]);
+    assert.equal(emil.link.href, "https://github.com/emilkowalski/skills");
+    assert.equal(emil.manual, "npx -y skills@latest add emilkowalski/skills -g -a claude-code -s emil-design-eng -y --copy");
+
+    // With Claude: a supervised task that names the one skill and where it must end up.
+    const t = (await post("/setup/skill:design-taste-frontend/fix", { kind: "claude" })).json().task;
+    assert.equal(t.mode, "supervised");
+    assert.match(t.spec_md, /design-taste-frontend/);
+    assert.match(t.spec_md, /Leonxlnx\/taste-skill/);
+    assert.match(t.spec_md, /~\/\.claude\/skills\/design-taste-frontend\/SKILL\.md/);
+
+    // One click: the installer runs, and once the skill is on disk the card says so and offers nothing.
+    mkdirSync(join(home, ".claude", "skills", "emil-design-eng"), { recursive: true });
+    writeFileSync(join(home, ".claude", "skills", "emil-design-eng", "SKILL.md"), "---\nname: emil-design-eng\ndescription: d\n---\n");
+    assert.equal((await post("/setup/skill:emil-design-eng/fix", { kind: "run" })).statusCode, 200);
+    await until(() => events.some((m) => m.type === "setup.updated" && m.check.id === "skill:emil-design-eng" && m.check.ok));
+    assert.ok(f.calls.includes(`stream npx ${emil.manual.slice(4)}`));
+    const after = (await list())[1];
+    assert.equal(after.ok, true);
+    assert.deepEqual(after.fixes, []);
+
+    // UI/UX Pro Max is a plugin: its marketplace is added, then it is installed, by Claude Code itself.
+    const pro = (await list())[3];
+    assert.equal(pro.manual, "claude plugin marketplace add nextlevelbuilder/ui-ux-pro-max-skill\nclaude plugin install ui-ux-pro-max@ui-ux-pro-max-skill");
+    assert.equal((await post("/setup/skill:ui-ux-pro-max/fix", { kind: "run" })).statusCode, 200);
+    await until(() => f.calls.some((c) => c.endsWith(" plugin install ui-ux-pro-max@ui-ux-pro-max-skill")));
+    const added = f.calls.findIndex((c) => c.endsWith(" plugin marketplace add nextlevelbuilder/ui-ux-pro-max-skill"));
+    assert.ok(added >= 0 && added < f.calls.findIndex((c) => c.endsWith(" plugin install ui-ux-pro-max@ui-ux-pro-max-skill")), "the marketplace comes first");
+
+    // Installed but switched off in Claude Code: not counted as installed, and Install is offered to turn it on.
+    const root = join(home, ".claude", "plugins", "cache", "ui-ux-pro-max-skill", "ui-ux-pro-max", "2.13.0");
+    mkdirSync(join(root, ".claude", "skills", "ui-ux-pro-max"), { recursive: true });
+    writeFileSync(join(root, ".claude", "skills", "ui-ux-pro-max", "SKILL.md"), "---\nname: ui-ux-pro-max\ndescription: d\n---\n");
+    mkdirSync(join(root, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(root, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "ui-ux-pro-max", skills: "./.claude/skills/" }));
+    writeFileSync(join(home, ".claude", "plugins", "installed_plugins.json"), JSON.stringify({ version: 2, plugins: { "ui-ux-pro-max@ui-ux-pro-max-skill": [{ installPath: root }] } }));
+    writeFileSync(join(home, ".claude", "settings.json"), JSON.stringify({ enabledPlugins: { "ui-ux-pro-max@ui-ux-pro-max-skill": false } }));
+    const off = (await list())[3] as unknown as { ok: boolean; warn: boolean; fixes: string[] };
+    assert.equal(off.ok, false);
+    assert.equal(off.warn, true);
+    assert.deepEqual(off.fixes, ["run", "claude"]);
+    writeFileSync(join(home, ".claude", "settings.json"), JSON.stringify({ enabledPlugins: { "ui-ux-pro-max@ui-ux-pro-max-skill": true } }));
+    const on = (await list())[3] as unknown as { ok: boolean; detail: string };
+    assert.equal(on.ok, true);
+    assert.equal(on.detail, "Installed with the ui-ux-pro-max plugin");
   } finally {
     await app.close();
     rmSync(dir, { recursive: true, force: true });

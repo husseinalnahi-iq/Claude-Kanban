@@ -1,6 +1,6 @@
 import * as nodePath from "node:path";
 import { BROWSER_SERVER, CHROME_PREFIX, PLAYWRIGHT_PLUGIN_TOOLS } from "./browser.ts";
-import { IMAGE_PREFIX } from "../types.ts";
+import { IMAGE_PREFIX, MARKITDOWN_SERVER, MARKITDOWN_TOOL } from "../types.ts";
 import { credentialRisk } from "./credentials.ts";
 
 export type GateResult =
@@ -38,13 +38,16 @@ export function isSafeMcp(toolName: string): boolean {
 }
 
 /** How the board treats one MCP server's tools, in the words the Settings page shows. */
-export function serverRule(prefix: string): string {
+export function serverRule(prefix: string, opts: { markitdown?: boolean } = {}): string {
   if (prefix === "mcp__board__") return "The board's own tools — always allowed.";
   if (SAFE_MCP_PREFIXES.includes(prefix)) return "Read-only lookups — always allowed.";
   if (prefix === `mcp__${BROWSER_SERVER}__`) return "The board's browser — looking at local pages is free; see Browser checks.";
   if (prefix === `${PLAYWRIGHT_PLUGIN_TOOLS}__`) return "Hidden: runs use the board's own browser instead, one per task.";
   if (prefix === CHROME_PREFIX) return "Your own Chrome — supervised runs only, every action approved.";
   if (prefix === IMAGE_PREFIX) return "Free image generation — saves inside the task's folder; supervised runs approve each image on a card.";
+  if (prefix === `mcp__${MARKITDOWN_SERVER}__` && opts.markitdown) {
+    return "Documents to Markdown — a web page or a file in the task's own folders is a read, without a card; other files are refused (autonomous) or asked (supervised).";
+  }
   return "Autonomous runs: refused. Supervised runs: an approval card for every call.";
 }
 
@@ -974,6 +977,30 @@ export function readViolation(toolName: string, input: Record<string, unknown>, 
 }
 
 /**
+ * MarkItDown's `convert_to_markdown(uri)` judged as the read it is (D316): a web page or inline data
+ * like WebFetch, a `file:` URI like Read — inside the task's folders, or refused with Read's own words.
+ * Its server reads anything your user can, so a file URI is the one thing that needs a rule.
+ */
+export function markitdownRead(input: Record<string, unknown>, cwd: string, readRoots: string[] = []): { ok: true; path?: string } | { ok: false; message: string } {
+  const uri = typeof input.uri === "string" ? input.uri.trim() : "";
+  let url: URL;
+  try {
+    url = new URL(uri);
+  } catch {
+    return { ok: false, message: `MarkItDown needs a URI (https:, file: or data:); got "${uri.slice(0, 80)}".` };
+  }
+  if (url.protocol === "http:" || url.protocol === "https:" || url.protocol === "data:") return { ok: true };
+  if (url.protocol !== "file:") return { ok: false, message: `MarkItDown in a task reads https:, file: and data: URIs only; refused ${url.protocol}.` };
+  // file://server/share is another computer's folder: never one of the task's.
+  if (url.hostname && url.hostname !== "localhost") return { ok: false, message: `Autonomous runs read only inside the task worktree (${cwd}); refused ${uri}.` };
+  let path = decodeURIComponent(url.pathname);
+  // file:///C:/x reads as /C:/x; a Windows path starts at the drive.
+  if (/^\/[A-Za-z]:/.test(path)) path = path.slice(1);
+  const refused = readViolation("Read", { file_path: path }, cwd, readRoots);
+  return refused ? { ok: false, message: refused } : { ok: true, path };
+}
+
+/**
  * Added to every autonomous refusal. The run it was written for tried four ways round the sandbox —
  * the main checkout's secrets twice, the environment, then a browser at the live site — instead of
  * saying it needed a supervised run (docs/DECISIONS.md D186).
@@ -1152,7 +1179,11 @@ export function isReadOnlyShell(cmd: string, cwd: string): boolean {
 }
 
 /** Permission gate for autonomous runs (no human watching). See docs/DECISIONS.md D6/D19. */
-export function autonomousGate(toolName: string, input: Record<string, unknown>, cwd: string, readRoots: string[] = []): GateResult {
+export function autonomousGate(toolName: string, input: Record<string, unknown>, cwd: string, readRoots: string[] = [], opts: { markitdown?: boolean } = {}): GateResult {
+  if (opts.markitdown && toolName === MARKITDOWN_TOOL) {
+    const read = markitdownRead(input, cwd, readRoots);
+    return read.ok ? { behavior: "allow", updatedInput: input } : { behavior: "deny", message: read.message };
+  }
   if (toolName.startsWith("mcp__") && !isSafeMcp(toolName)) {
     return { behavior: "deny", message: `Autonomous runs can't call external MCP tools (${toolName}).` };
   }

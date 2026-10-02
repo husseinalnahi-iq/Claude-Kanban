@@ -357,7 +357,7 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
     },
 
     memory() {
-      return text({ memory: repo.notes(projectId).map((n) => n.text) });
+      return text({ memory: repo.notes(projectId).map((n) => ({ kind: n.kind, text: n.text })) });
     },
   };
 }

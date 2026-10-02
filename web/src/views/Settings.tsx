@@ -19,7 +19,7 @@ import { GitSettings } from "./settings/GitSettings.tsx";
 import { ClaudeMdSettings } from "./settings/ClaudeMdSettings.tsx";
 import { SessionToolsPanel } from "./settings/ToolsSettings.tsx";
 import { ImageSettings } from "./settings/ImageSettings.tsx";
-import { COLUMN_SIZES, setViewPrefs, THEMES, useViewPrefs, ZOOMS } from "../lib/view.ts";
+import { COLUMN_SIZES, FONTS, setViewPrefs, THEMES, useViewPrefs, ZOOMS } from "../lib/view.ts";
 import { disableNotifications, enableNotifications, notifyState } from "../lib/notify.ts";
 
 function Section({ title, hint, children }: { title: string; hint?: string; children: React.ReactNode }) {
@@ -118,6 +118,9 @@ function WorktreeSettings({ project }: { project: ProjectWithGit }) {
   );
 }
 
+/** Sent back at least three times, and more often than approved: weak evidence, so a hint, never a removal. */
+const doubtful = (n: Note) => n.sentBack >= 3 && n.sentBack > n.approved;
+
 /** What the board remembers for this project, and hands to every later task. */
 function MemorySettings({ project }: { project: ProjectWithGit }) {
   const [notes, setNotes] = useState<Note[] | null>(null);
@@ -126,18 +129,50 @@ function MemorySettings({ project }: { project: ProjectWithGit }) {
   const load = () => void api.memory(project.id).then(setNotes, () => setNotes([]));
   useEffect(load, [project.id]);
   return (
-    <Section title="Project memory" hint="Decisions carried into every later task in this project. The first 12 go into each prompt; runs can read the rest with board_memory. Delete anything stale — old notes mislead new runs.">
-      <div className="space-y-1.5">
-        {(notes ?? []).map((n) => (
-          <div key={n.id} className="flex items-start gap-2 rounded-md border border-ink-700 px-3 py-1.5 text-[12.5px]">
-            <span className="font-mono text-[10px] uppercase text-ink-500">{n.source}</span>
-            <span className="flex-1 text-ink-200">{n.text}</span>
-            <span className="font-mono text-[10px] text-ink-600">{ago(n.ts)}</span>
-            <button className="cursor-pointer text-ink-500 hover:text-rust" title="Forget this" onClick={() => run(async () => { await api.deleteMemory(n.id); load(); })}>×</button>
+    <Section title="Project memory" hint="What the board carries from one task to the next. Each prompt gets up to 12 notes: the newest 3 rules and lessons, then the ones that share the most words with the task. Delete anything stale — old notes mislead new runs.">
+      {(
+        [
+          ["lesson", "Rules and lessons", "Decisions, conventions and gotchas — from runs and from you. The newest 3 are in every prompt, the rest when they match the task."],
+          ["outcome", "What earlier tasks did", "One line per approved task. A prompt only gets the few that match its task, so they never crowd out the rules."],
+        ] as const
+      ).map(([kind, title, hint]) => {
+        const group = (notes ?? []).filter((n) => (n.kind ?? "lesson") === kind);
+        return (
+          <div key={kind} className="mb-4">
+            <div className="mb-1 text-[12.5px] font-medium text-ink-200">{title}</div>
+            <div className="mb-1.5 text-[11.5px] text-ink-400">{hint}</div>
+            <div className="space-y-1.5">
+              {group.map((n) => (
+                <div key={n.id} className={`rounded-md border px-3 py-1.5 text-[12.5px] ${n.flag || doubtful(n) ? "border-rust/60" : "border-ink-700"}`}>
+                  <div className="flex items-start gap-2">
+                    <span className="font-mono text-[10px] uppercase text-ink-500">{n.source}</span>
+                    <span className="flex-1 text-ink-200">{n.text}</span>
+                    <span className="font-mono text-[10px] text-ink-600">{ago(n.ts)}</span>
+                    <button className="cursor-pointer text-ink-500 hover:text-rust" title="Forget this" onClick={() => run(async () => { await api.deleteMemory(n.id); load(); })}>×</button>
+                  </div>
+                  {n.approved || n.sentBack ? (
+                    <div className="mt-0.5 text-[11px] text-ink-500">
+                      Given to {n.approved + n.sentBack} finished {n.approved + n.sentBack === 1 ? "task" : "tasks"}: {n.approved} approved, {n.sentBack} sent back
+                      {doubtful(n) ? <span className="text-rust"> — it keeps turning up on work you send back; worth checking it still holds.</span> : null}
+                    </div>
+                  ) : null}
+                  {n.flag ? (
+                    <div className="mt-1 flex items-start gap-2 text-[11.5px] text-rust">
+                      <span className="flex-1">A task said this is wrong or out of date: “{n.flag.reason}”. It is left out of prompts until you decide.</span>
+                      <button className="cursor-pointer whitespace-nowrap text-ink-300 underline hover:text-ink-100" onClick={() => run(async () => { await api.keepMemory(n.id); load(); })}>Keep it</button>
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+              {notes && !group.length ? (
+                <div className="text-[12px] text-ink-500">
+                  {kind === "lesson" ? "Nothing yet. Runs add one with board_remember, and you can add one below." : "Nothing yet. Each approved task adds a line."}
+                </div>
+              ) : null}
+            </div>
           </div>
-        ))}
-        {notes && !notes.length ? <div className="text-[12px] text-ink-500">Nothing yet. Approved tasks add a line, and runs can call board_remember.</div> : null}
-      </div>
+        );
+      })}
       <form
         className="mt-3 flex gap-2"
         onSubmit={(e) => {
@@ -229,9 +264,9 @@ function ProjectSettings({ project }: { project: ProjectWithGit }) {
 
 /** How the board is displayed on this screen. Stored per machine, applied immediately. */
 function AppearanceSettings() {
-  const { zoom, columns, theme } = useViewPrefs();
+  const { zoom, columns, theme, font } = useViewPrefs();
   return (
-    <Section title="Theme, size and layout" hint="Applies to this computer only, straight away — there is nothing to save.">
+    <Section title="Theme, font, size and layout" hint="Applies to this computer only, straight away — there is nothing to save.">
       <div className="space-y-4">
         <Field label="Theme" group>
           <div className="flex flex-wrap items-center gap-1.5">
@@ -246,6 +281,26 @@ function AppearanceSettings() {
               </button>
             ))}
             <span className="ml-2 text-[11.5px] text-ink-500">Auto follows this computer's light/dark setting.</span>
+          </div>
+        </Field>
+        <Field label="Font" group>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {FONTS.map((f) => (
+              <button
+                key={f.value}
+                onClick={() => setViewPrefs({ font: f.value })}
+                title={`${f.hint}.`}
+                style={{ fontFamily: f.stack }}
+                className={`rounded-md border px-3 py-1.5 text-[12.5px] transition-colors cursor-pointer ${font === f.value ? "border-amber bg-amber/10 text-amber" : "border-ink-700 text-ink-300 hover:border-ink-500"}`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+          <div className="mt-1 text-[11.5px] text-ink-400">
+            For all the board's text, in every theme; code keeps its own font. <b>SF Pro</b> is Apple's and is only
+            on a Mac, iPhone or iPad — on Windows it shows as Segoe UI. <b>Segoe UI</b> is only on Windows — on a
+            Mac it shows as SF Pro.
           </div>
         </Field>
         <Field label="Interface size" group>
@@ -403,6 +458,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [retention, setRetention] = useState(30);
   const [blocked, setBlocked] = useState("");
   const [loadPlugins, setLoadPlugins] = useState(true);
+  const [autoMemory, setAutoMemory] = useState(false);
   const [autoResume, setAutoResume] = useState(true);
   const [claudeFallback, setClaudeFallback] = useState<TierRef | null>(null);
   const [keepAwake, setKeepAwake] = useState(true);
@@ -411,6 +467,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [browserCheckModel, setBrowserCheckModel] = useState<HelperModel>("stage");
   const [chrome, setChrome] = useState(false);
   const [readOnlyNoCard, setReadOnlyNoCard] = useState(true);
+  const [markitdown, setMarkitdown] = useState(true);
   const [liveView, setLiveView] = useState(true);
   const [imageProvider, setImageProvider] = useState<ImageProvider>("codex");
   const [cloudflareAccountId, setCloudflareAccountId] = useState("");
@@ -467,6 +524,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
     take((s) => s.eventRetentionDays, setRetention);
     take((s) => s.blockedCommands.join(String.fromCharCode(10)), setBlocked);
     take((s) => s.loadUserPlugins, setLoadPlugins);
+    take((s) => s.claudeAutoMemory ?? false, setAutoMemory);
     take((s) => s.autoResume, setAutoResume);
     take((s) => s.claudeFallback, setClaudeFallback);
     take((s) => s.keepAwake, setKeepAwake);
@@ -475,6 +533,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
     take((s) => s.browserCheckModel ?? "stage", setBrowserCheckModel);
     take((s) => s.chromeInSupervised, setChrome);
     take((s) => s.autoAllowReadOnly, setReadOnlyNoCard);
+    take((s) => s.markitdownInTasks ?? true, setMarkitdown);
     take((s) => s.liveView, setLiveView);
     take((s) => s.imageProvider, setImageProvider);
     take((s) => s.cloudflareAccountId, setCloudflareAccountId);
@@ -497,6 +556,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           maxCostPerTaskUsd: maxTaskCost, maxRepeatedToolCalls: maxRepeats, eventRetentionDays: retention,
           blockedCommands: blocked.split(/\r?\n/).map((l) => l.trim()).filter(Boolean),
           loadUserPlugins: loadPlugins,
+          claudeAutoMemory: autoMemory,
           autoResume,
           claudeFallback: claudeFallback?.model && claudeFallback.provider !== ANTHROPIC_PROVIDER_ID ? claudeFallback : null,
           keepAwake,
@@ -505,6 +565,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           browserCheckModel,
           chromeInSupervised: chrome,
           autoAllowReadOnly: readOnlyNoCard,
+          markitdownInTasks: markitdown,
           liveView,
           imageProvider,
           cloudflareAccountId,
@@ -840,6 +901,16 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
               </span>
             </span>
           </label>
+          <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
+            <input type="checkbox" className="mt-1 accent-amber" checked={autoMemory} onChange={(e) => setAutoMemory(e.target.checked)} />
+            <span>
+              Let runs use Claude Code's own memory too
+              <span className="block text-[11.5px] text-ink-400">
+                Claude Code keeps its own notes for each repository, shared with the sessions you run yourself. The board can't show or
+                edit those, and they can disagree with the project memory here, so runs leave them out unless this is on.
+              </span>
+            </span>
+          </label>
         </Section>
 
         <Section
@@ -1031,6 +1102,17 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
                 <span className="font-mono">grep</span>, <span className="font-mono">ls</span>, <span className="font-mono">git log</span>,{" "}
                 <span className="font-mono">sed -n</span> and the like, inside the project. Anything that could write a file, run a program or touch a
                 credentials file still asks. They show in the transcript as allowed by the board.
+              </span>
+            </span>
+          </label>
+          <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
+            <input type="checkbox" className="mt-1 accent-amber" checked={markitdown} onChange={(e) => setMarkitdown(e.target.checked)} />
+            <span>
+              Tasks can read PDFs, Word and Excel files with MarkItDown
+              <span className="block text-[11.5px] text-ink-400">
+                Once MarkItDown is added from Skills → Recommended, a task can turn a document into text it can read: a web page, or a
+                file in the task's own folders, without a card. Any other file is refused in autonomous tasks and asked about in supervised
+                ones. Off: every use is refused (autonomous) or a card (supervised), like any other outside tool.
               </span>
             </span>
           </label>

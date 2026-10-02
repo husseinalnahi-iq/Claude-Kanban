@@ -19,6 +19,9 @@ export async function setupRoutes(app: FastifyInstance, setup: SetupService) {
     return { checks, summary: { required: failing("required"), recommended: failing("recommended") } };
   });
 
+  /** Skills worth having, for the Skills page: installed with the same Install / with-Claude fixes as a check. */
+  app.get("/setup/recommended", async (req) => ({ checks: await setup.recommended((req.query as { fresh?: string }).fresh === "1") }));
+
   /** The "Free AI on this computer" guide: this machine, and how far LM Studio and Ollama are set up. */
   app.get("/setup/local-models", async () => localModelsStatus(setup.probe, setup.settings()));
 

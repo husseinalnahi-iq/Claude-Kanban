@@ -397,7 +397,7 @@ const plugins: SetupCheck = {
   id: "plugins",
   title: "Plugins and skills",
   level: "info",
-  why: "No board feature needs a plugin. Runs load the ones you enabled in Claude Code.",
+  why: "No board feature needs a plugin. Runs load the ones you enabled in Claude Code, and the Skills tab recommends a few skills and tools worth having, with an Install button.",
   link: { label: "Open Skills", href: "#/skills" },
   async detect({ settings }) {
     return ok(settings.loadUserPlugins ? "Runs load your Claude Code plugins" : "Runs load no global plugins (Settings → Runs & limits)");

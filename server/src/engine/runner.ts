@@ -21,8 +21,8 @@ type RateLimitInfo = {
   unifiedWindows?: Record<string, { utilization?: number; resetsAt?: number }>;
 };
 import { RunQueue } from "./queue.ts";
-import { buildStagePrompt } from "./prompts.ts";
-import { autonomousGate, blockedCommand, escalationHint, isReadOnlyShell, isSafeMcp, killsByName, READ_ONLY_TOOLS, readViolation, serverRule } from "./gate.ts";
+import { buildStagePrompt, type PromptCtx } from "./prompts.ts";
+import { autonomousGate, blockedCommand, escalationHint, isReadOnlyShell, isSafeMcp, killsByName, markitdownRead, READ_ONLY_TOOLS, readViolation, serverRule } from "./gate.ts";
 import { credentialRisk } from "./credentials.ts";
 import { allowedMode, createBoardServer } from "./boardMcp.ts";
 import { CONFIDENCE_TO_APPLY, serialiseFileConflicts, triageTask, type Sizing, type TriageResult, type TriageSubtask } from "./triage.ts";
@@ -48,7 +48,7 @@ import { QuotaReader, type LiveQuota } from "./providers/usage.ts";
 import type { Resolved, StageInvocation } from "./providers/types.ts";
 import { saveAttachment } from "../routes/attachments.ts";
 import { pickBrowser, realProbe } from "../setup/probe.ts";
-import { ANTHROPIC_PROVIDER_ID, ARTIFACT_EXTS, EFFORTS, usesWorktree, MAX_ATTACHMENT_BYTES, attachmentKind, supportsFastMode, type ClaudeModelsResult, type FastModeStatus } from "../types.ts";
+import { ANTHROPIC_PROVIDER_ID, ARTIFACT_EXTS, EFFORTS, MARKITDOWN_TOOL, usesWorktree, MAX_ATTACHMENT_BYTES, attachmentKind, supportsFastMode, type ClaudeModelsResult, type FastModeStatus } from "../types.ts";
 import { claudeUpgrades, fromSdk, type SdkModelInfo } from "./claudeModels.ts";
 import { BROWSER_AGENT, helperAgents, usesHelper } from "./helpers.ts";
 import { applyChecklistTool } from "./checklist.ts";
@@ -1169,7 +1169,7 @@ export class TaskRunner {
             helper: claudeStage && usesHelper(settings.browserCheckModel, effective.model),
           }
         : null,
-      memory: this.repo.notes(project.id, NOTES_IN_PROMPT).map((n) => n.text),
+      ...this.memoryFor(project.id, task),
       // Images the user attached, by absolute path: Claude reads them with the Read tool, which
       // renders images. Ones a previous run produced are left out — it already saw those.
       images: this.repo
@@ -1358,6 +1358,17 @@ export class TaskRunner {
       // An image from the board's own tool lands inside the task's folder (the tool refuses any other
       // path): a card in a supervised run, like any new file; free in an autonomous one (D262).
       if (toolName.startsWith(IMAGE_PREFIX)) return autonomous ? { behavior: "allow", updatedInput: input } : this.askApproval(run, task.id, toolName, input, o);
+      // MarkItDown reads a document: free where a Read would be, otherwise refused or a card (D316).
+      if (toolName === MARKITDOWN_TOOL && settings.markitdownInTasks) {
+        const read = markitdownRead(input, a.cwd, readRoots);
+        if (autonomous) return read.ok ? { behavior: "allow", updatedInput: input } : refuse(read.message);
+        if (read.ok && !(read.path && credentialRisk("Read", { file_path: read.path }))) {
+          const event = this.repo.insertEvent(run.id, "board:auto-allowed", { type: "auto_allowed", tool: toolName, command: String(input.uri ?? "") });
+          this.bus.publish({ type: "event", runId: run.id, taskId: task.id, event });
+          return { behavior: "allow", updatedInput: input };
+        }
+        return this.askApproval(run, task.id, toolName, input, o);
+      }
       // Browser tools have their own rules: looking at a local page is not a write (docs/DECISIONS.md D128).
       const browser = browserDecision(toolName, input, autonomous, a.cwd, browserDir);
       if (browser?.behavior === "allow") return { behavior: "allow", updatedInput: browser.input };
@@ -1376,7 +1387,7 @@ export class TaskRunner {
         }
         return this.askApproval(run, task.id, toolName, input, o);
       }
-      const decision = autonomousGate(toolName, input, a.cwd, readRoots);
+      const decision = autonomousGate(toolName, input, a.cwd, readRoots, { markitdown: settings.markitdownInTasks });
       // A question nobody can answer is not the sandbox saying no: it gets its own message, uncounted.
       if (decision.behavior === "deny" && toolName !== "AskUserQuestion") return refuse(decision.message);
       return decision;
@@ -1405,7 +1416,7 @@ export class TaskRunner {
             const browser = browserDecision(name, input, true, a.cwd, browserDir);
             if (browser?.behavior === "allow") return {};
             if (browser?.behavior === "deny") return deny(refuse(browser.message).message);
-            const decision = autonomousGate(name, input, a.cwd, readRoots);
+            const decision = autonomousGate(name, input, a.cwd, readRoots, { markitdown: settings.markitdownInTasks });
             return decision.behavior === "deny" ? deny(refuse(decision.message).message) : {};
           },
         ],
@@ -1459,6 +1470,9 @@ export class TaskRunner {
         CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: String(settings.maxConcurrentSubagents),
         // Newer models ship with their to-do tools switched off; the card's checklist is read from them.
         CLAUDE_CODE_ENABLE_TODO_TOOLS: "1",
+        // Claude Code's own memory is per repository and shared with your own sessions; left on, a run
+        // reads notes the board cannot show you (D306). When it is allowed, your own choice still stands.
+        ...(settings.claudeAutoMemory ? {} : { CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" }),
         ...(lean ? { ENABLE_CLAUDEAI_MCP_SERVERS: "false" } : {}),
       },
       // Keeps the system prompt static so it can be cached across sessions; the stripped
@@ -2239,7 +2253,7 @@ export class TaskRunner {
   async sessionTools(force = false): Promise<SessionTools> {
     const settings = this.repo.getSettings();
     // Changing one of these settings changes the answer, so it also invalidates the cache.
-    const key = `${settings.loadUserPlugins}|${settings.browserChecks}|${settings.chromeInSupervised}`;
+    const key = `${settings.loadUserPlugins}|${settings.browserChecks}|${settings.chromeInSupervised}|${settings.markitdownInTasks}`;
     const cached = this.toolsStatus;
     if (cached && !force && cached.key === key && Date.now() - Date.parse(cached.checked_at) < 10 * 60_000) return cached;
     // The check starts every tool server once; a second caller waits for the one already under way.
@@ -2276,7 +2290,7 @@ export class TaskRunner {
           { name: "board", status: "connected", tools: -1, rule: serverRule("mcp__board__") },
           ...(m.mcp_servers ?? []).map((s) => {
             const prefix = `mcp__${s.name.replace(/[^A-Za-z0-9_-]/g, "_")}__`;
-            return { name: s.name, status: s.status, tools: tools.filter((t) => t.startsWith(prefix)).length, rule: serverRule(prefix) };
+            return { name: s.name, status: s.status, tools: tools.filter((t) => t.startsWith(prefix)).length, rule: serverRule(prefix, { markitdown: settings.markitdownInTasks }) };
           }),
         ];
         out.skills = (m.skills ?? []).length;
@@ -3050,13 +3064,24 @@ export class TaskRunner {
     return run;
   }
 
+  /** The project memory a stage prompt carries, split into what to follow and what earlier tasks did. */
+  private memoryFor(projectId: string, task: Task): Pick<PromptCtx, "memory" | "pastOutcomes"> {
+    const notes = this.repo.notesFor(projectId, `${task.title}\n${task.spec_md}`, NOTES_IN_PROMPT);
+    this.repo.recordNoteUses(task.id, notes.map((n) => n.id));
+    return {
+      memory: notes.filter((n) => n.kind === "lesson").map((n) => n.text),
+      pastOutcomes: notes.filter((n) => n.kind === "outcome").map((n) => ({ text: n.text, taskId: n.task_id })),
+    };
+  }
+
   async approveTask(taskId: string): Promise<Task> {
     return this.hold(taskId, async () => {
       const { task, project } = this.load(taskId);
       if (task.status !== "review") throw new ConflictError(`Only tasks in review can be approved (status is "${task.status}").`);
       // Approved work is worth remembering: one line, so later tasks in this project inherit it.
+      this.repo.settleNoteUses(task.id, "approved");
       const summary = outcomeLine(this.repo.runsForTask(task.id), task.summary);
-      if (summary) this.repo.addNote({ project_id: project.id, task_id: task.id, text: `${task.title}: ${summary}`, source: "board" });
+      if (summary) this.repo.addNote({ project_id: project.id, task_id: task.id, text: `${task.title}: ${summary}`, source: "board", kind: "outcome" });
 
       // Merge whenever a branch exists — even if the mode was switched after the worktree was made.
       let done: Task;
@@ -3118,6 +3143,7 @@ export class TaskRunner {
     const { task } = this.load(taskId);
     if (this.isBusy(taskId)) throw new ConflictError("Task is still running.");
     if (!["review", "failed"].includes(task.status) && !task.plan_gate) throw new ConflictError(`Cannot reject a task in status "${task.status}".`);
+    this.repo.settleNoteUses(taskId, "rejected");
     return this.setTask(taskId, { status: "backlog", note, plan_gate: null, blocked: null });
   }
 
@@ -3175,7 +3201,7 @@ export class TaskRunner {
         title: task.title,
         spec_md: task.spec_md,
         projectName: project.name,
-        memory: this.repo.notes(project.id, NOTES_IN_PROMPT).map((n) => n.text),
+        memory: this.repo.notesFor(project.id, `${task.title}\n${task.spec_md}`, NOTES_IN_PROMPT).map((n) => n.text),
         knownLabels,
         mode,
         cwd: project.path,

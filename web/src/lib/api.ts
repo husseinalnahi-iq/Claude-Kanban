@@ -101,6 +101,8 @@ export const api = {
   recheckSetup: (id: string) => req<SetupCheckResult>("POST", `/setup/${encodeURIComponent(id)}/check`, {}),
   fixSetup: (id: string, body: { kind: "run"; input?: Record<string, string> } | { kind: "claude" }) =>
     req<{ started?: boolean; task?: Task }>("POST", `/setup/${encodeURIComponent(id)}/fix`, body),
+  /** Skills worth having, installed with the same fixes as a Setup row (`fixSetup`). */
+  recommendedSkills: (fresh = false) => req<{ checks: SetupCheckResult[] }>("GET", `/setup/recommended${fresh ? "?fresh=1" : ""}`),
   login: () => req<CliHealth & { started: boolean }>("POST", "/auth/login", {}),
   /** A Setup row's own action ("Use it", "Sign in"): one of the board's endpoints, posted as is. */
   setupAction: (endpoint: string) => req<unknown>("POST", endpoint, {}),
@@ -194,6 +196,7 @@ export const api = {
   memory: (projectId: string) => req<Note[]>("GET", `/memory?project=${encodeURIComponent(projectId)}`),
   addMemory: (project_id: string, text: string) => req<Note>("POST", "/memory", { project_id, text }),
   deleteMemory: (id: string) => req<{ ok: true }>("DELETE", `/memory/${id}`),
+  keepMemory: (id: string) => req<Note>("POST", `/memory/${id}/keep`),
 
   pausedTasks: () => req<Task[]>("GET", "/tasks/paused"),
   claudeMd: (projectId: string) => req<InstructionFile[]>("GET", `/projects/${projectId}/claude-md`),

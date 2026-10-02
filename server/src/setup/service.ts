@@ -4,6 +4,7 @@ import { ConflictError, NotFoundError, type TaskRunner } from "../engine/runner.
 import type { SetupCheckResult, Task } from "../types.ts";
 import { buildChecks, type CheckCtx, type Detected, type SetupCheck } from "./checks.ts";
 import { realProbe, type Probe } from "./probe.ts";
+import { recommendedChecks } from "./recommended.ts";
 
 const LABEL = "setup:";
 const CLOSED: Task["status"][] = ["done", "failed"];
@@ -45,8 +46,12 @@ export class SetupService {
   private cache = new Map<string, { at: number; d: Detected }>();
   private running = new Set<string>();
 
-  constructor(private readonly deps: { repo: Repo; bus: Bus; runner: TaskRunner; stateDir: string; probe?: Probe }) {
+  /** Skills the Skills page offers to install: they install like a check but are not on the Setup list. */
+  private readonly extras: SetupCheck[];
+
+  constructor(private readonly deps: { repo: Repo; bus: Bus; runner: TaskRunner; stateDir: string; probe?: Probe; recommended?: SetupCheck[] }) {
     this.probe = deps.probe ?? realProbe;
+    this.extras = deps.recommended ?? recommendedChecks();
     // A Claude session that stops (for review, done or failed) may have installed something: look again.
     deps.bus.subscribe((m) => {
       if (m.type !== "task.updated") return;
@@ -81,7 +86,7 @@ export class SetupService {
   }
 
   private find(id: string): SetupCheck {
-    const c = buildChecks(this.deps.repo.getSettings()).find((x) => x.id === id);
+    const c = [...buildChecks(this.deps.repo.getSettings()), ...this.extras].find((x) => x.id === id);
     if (!c) throw new NotFoundError(`No setup check "${id}".`);
     return c;
   }
@@ -145,6 +150,13 @@ export class SetupService {
     const detected = await Promise.all(checks.map((c) => this.detect(c, fresh)));
     const open = this.openTasks();
     return checks.map((c, i) => this.result(c, detected[i], open));
+  }
+
+  /** The Skills page's Recommended list, installed or not. */
+  async recommended(fresh = false): Promise<SetupCheckResult[]> {
+    const detected = await Promise.all(this.extras.map((c) => this.detect(c, fresh)));
+    const open = this.openTasks();
+    return this.extras.map((c, i) => this.result(c, detected[i], open));
   }
 
   async recheck(id: string): Promise<SetupCheckResult> {

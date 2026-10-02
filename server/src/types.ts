@@ -29,6 +29,9 @@ export type ImageProvider = (typeof IMAGE_PROVIDERS)[number];
 export const IMAGE_SERVER = "images";
 export const IMAGE_PREFIX = `mcp__${IMAGE_SERVER}__`;
 export const IMAGE_TOOL = `${IMAGE_PREFIX}generate_image`;
+/** Microsoft's MarkItDown (PDF, Word, Excel… → Markdown), as the Skills page adds it to your Claude Code. */
+export const MARKITDOWN_SERVER = "markitdown";
+export const MARKITDOWN_TOOL = `mcp__${MARKITDOWN_SERVER}__convert_to_markdown`;
 
 /** What Settings → Images shows: which keys are set (never their values), whether an image would come, and how to give your own Claude Code the tool. */
 export interface ImageStatus {
@@ -666,7 +669,17 @@ export interface Note {
   task_id: string | null;
   text: string;
   source: "agent" | "board" | "user";
+  /**
+   * A lesson is something to follow (a decision, a convention, a gotcha); an outcome is what an
+   * approved task did. Outcomes only reach a prompt when they match its task (D307).
+   */
+  kind: "lesson" | "outcome";
   ts: string;
+  /** A run said this note is wrong or stale. It stays out of prompts until you keep or delete it (D308). */
+  flag: { reason: string; at: string; task_id: string | null } | null;
+  /** Tasks whose prompts carried this note and that were approved, or sent back, in the end. */
+  approved: number;
+  sentBack: number;
 }
 
 /** A subscription usage window as reported by the CLI (Claude Code shows the same numbers). */
@@ -839,6 +852,12 @@ export interface Settings {
    * per stage (~12%), paid whether a task uses them or not. Project settings (CLAUDE.md) always load.
    */
   loadUserPlugins: boolean;
+  /**
+   * Let Claude Code's own auto memory (~/.claude/projects/<repo>/memory, shared with your own sessions)
+   * load into runs and be written by them. Off by default: the board's project memory is the one you
+   * can see and edit, and a second memory could contradict it (D306).
+   */
+  claudeAutoMemory: boolean;
   /** Classify new tasks (type, priority, labels) automatically. */
   autoTriage: boolean;
   /** Cheap model used for intake: classification and spec refinement. */
@@ -907,6 +926,11 @@ export interface Settings {
    * approval card. Anything that could write, run a program or touch credentials still asks (D202).
    */
   autoAllowReadOnly: boolean;
+  /**
+   * Tasks use MarkItDown (once it is in your Claude Code) like a read: a web page or a file in the
+   * folders the task may read, without a card; any other file is refused (autonomous) or asked (D316).
+   */
+  markitdownInTasks: boolean;
   /** Every task waits for the human after its plan stage (a task can override it). D231. */
   planApproval: boolean;
   /** A stage that hits maxTurnsPerStage continues in the same session this many times before failing. D232. */

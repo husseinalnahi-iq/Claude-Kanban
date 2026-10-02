@@ -142,6 +142,28 @@ CREATE TABLE IF NOT EXISTS notes (
   ts         TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS notes_project ON notes(project_id, ts);
+-- Which notes each task's prompts carried, and how the task ended: the evidence for "this note helps"
+-- or "this note keeps showing up on work that is sent back" (D308). The last verdict on a task wins.
+CREATE TABLE IF NOT EXISTS note_uses (
+  note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+  task_id TEXT NOT NULL,
+  verdict TEXT,
+  PRIMARY KEY (note_id, task_id)
+);
+CREATE INDEX IF NOT EXISTS note_uses_task ON note_uses(task_id);
+-- Full-text index over the notes, so a prompt carries the ones about its task, not just the newest.
+-- Kept in step by triggers; rebuilt on every open (db.ts), because it points at implicit rowids.
+CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(text, content='notes', tokenize='porter unicode61');
+CREATE TRIGGER IF NOT EXISTS notes_fts_insert AFTER INSERT ON notes BEGIN
+  INSERT INTO notes_fts(rowid, text) VALUES (new.rowid, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS notes_fts_delete AFTER DELETE ON notes BEGIN
+  INSERT INTO notes_fts(notes_fts, rowid, text) VALUES ('delete', old.rowid, old.text);
+END;
+CREATE TRIGGER IF NOT EXISTS notes_fts_update AFTER UPDATE OF text ON notes BEGIN
+  INSERT INTO notes_fts(notes_fts, rowid, text) VALUES ('delete', old.rowid, old.text);
+  INSERT INTO notes_fts(rowid, text) VALUES (new.rowid, new.text);
+END;
 
 -- Subscription usage windows reported by the CLI (five_hour, seven_day, ...), latest value per type.
 CREATE TABLE IF NOT EXISTS usage_limits (

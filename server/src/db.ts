@@ -91,7 +91,7 @@ const samePipeline = (a: unknown, b: Stage[]) =>
   a.every((s: Record<string, unknown>, i) => Object.keys(s).length === 3 && s.stage === b[i].stage && s.model === b[i].model && s.effort === b[i].effort);
 
 /** Columns added after the first schema; ALTER only when missing so boots stay idempotent. */
-const LATER_COLUMNS: { table: string; column: string; ddl: string }[] = [
+const LATER_COLUMNS: { table: string; column: string; ddl: string; backfill?: string }[] = [
   { table: "runs", column: "context_tokens", ddl: "context_tokens INTEGER NOT NULL DEFAULT 0" },
   { table: "runs", column: "context_window", ddl: "context_window INTEGER NOT NULL DEFAULT 0" },
   { table: "projects", column: "env_json", ddl: "env_json TEXT NOT NULL DEFAULT '{}'" },
@@ -133,6 +133,15 @@ const LATER_COLUMNS: { table: string; column: string; ddl: string }[] = [
   { table: "tasks", column: "done_at", ddl: "done_at TEXT" },
   { table: "tasks", column: "chat_id", ddl: "chat_id TEXT" },
   { table: "chats", column: "provider", ddl: "provider TEXT NOT NULL DEFAULT 'anthropic'" },
+  {
+    table: "notes", column: "kind", ddl: "kind TEXT NOT NULL DEFAULT 'lesson'",
+    // Until kinds, the board wrote two notes of its own: each approved task's outcome, and the verify
+    // command it set (D165), which is a fact about the project rather than something a task did.
+    backfill: "UPDATE notes SET kind = 'outcome' WHERE source = 'board' AND text NOT LIKE 'Verify command set to %'",
+  },
+  { table: "notes", column: "flag_reason", ddl: "flag_reason TEXT" },
+  { table: "notes", column: "flagged_at", ddl: "flagged_at TEXT" },
+  { table: "notes", column: "flag_task_id", ddl: "flag_task_id TEXT" },
 ];
 
 /**
@@ -156,9 +165,12 @@ export function newId(prefix: string): string {
   return `${prefix}_${randomBytes(8).toString("hex")}`;
 }
 
-function addColumnIfMissing(db: DatabaseSync, table: string, column: string, ddl: string) {
+function addColumnIfMissing(db: DatabaseSync, table: string, column: string, ddl: string, backfill?: string) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
-  if (!cols.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  if (cols.some((c) => c.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  // Only on the boot that adds the column: later rows get their value when they are written.
+  if (backfill) db.exec(backfill);
 }
 
 export function openDb(file: string): DatabaseSync {
@@ -167,8 +179,11 @@ export function openDb(file: string): DatabaseSync {
   // NORMAL is the standard durability level under WAL; FULL fsyncs on every streamed event.
   db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
   db.exec(SCHEMA);
-  for (const c of LATER_COLUMNS) addColumnIfMissing(db, c.table, c.column, c.ddl);
+  for (const c of LATER_COLUMNS) addColumnIfMissing(db, c.table, c.column, c.ddl, c.backfill);
   for (const ddl of LATER_INDEXES) db.exec(ddl);
+  // The memory index is new to older boards, and it follows `notes` by implicit rowid, which a VACUUM
+  // may renumber. Rebuilding is a few hundred short rows at most, so it is simply done every time.
+  db.exec("INSERT INTO notes_fts(notes_fts) VALUES ('rebuild')");
   // Boards from before done_at only know when a finished task was last touched: the best date there is.
   db.exec("UPDATE tasks SET done_at = updated_at WHERE status = 'done' AND done_at IS NULL");
 
@@ -201,9 +216,11 @@ export function openDb(file: string): DatabaseSync {
   seed.run("specModel", "claude-opus-5-5");
   seed.run("specEffort", "high");
   seed.run("loadUserPlugins", "true");
+  seed.run("claudeAutoMemory", "false");
   seed.run("browserChecks", "true");
   seed.run("chromeInSupervised", "false");
   seed.run("autoAllowReadOnly", "true");
+  seed.run("markitdownInTasks", "true");
   seed.run("planApproval", "false");
   seed.run("autoContinueTurns", "2");
   seed.run("liveReviewModel", "claude-opus-5-5");
