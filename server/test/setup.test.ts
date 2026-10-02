@@ -12,6 +12,7 @@ import { buildChecks } from "../src/setup/checks.ts";
 import { pickBrowser, type Probe, type RunResult } from "../src/setup/probe.ts";
 import { SetupService } from "../src/setup/service.ts";
 import { recommendedChecks } from "../src/setup/recommended.ts";
+import { CATALOG } from "../src/skills/catalog.ts";
 import { resetHardwareCache } from "../src/setup/local.ts";
 import { setCodexRunner } from "../src/engine/providers/codexLocal.ts";
 import type { Provider, WsMessage } from "../src/types.ts";
@@ -94,11 +95,11 @@ const LMS = ["lmstudio", "lmstudio-server", "lmstudio-model:google/gemma-4-12b-q
 test("the checklist follows what is switched on and set up", () => {
   const repo = new Repo(openDb(":memory:"));
   const ids = () => buildChecks(repo.getSettings()).map((c) => c.id);
-  assert.deepEqual(ids(), ["node", "claude-login", "claude-engine", "claude-models", "git", "git-identity", "browser", "images", "images-claude-code", ...LMS, "codex", "plugins", "terminal", ...(process.platform === "win32" ? ["pwsh"] : [])]);
+  assert.deepEqual(ids(), ["node", "claude-login", "claude-engine", "claude-models", "git", "git-identity", "browser", "images", "images-claude-code", ...LMS, "codex", "plugins", "starter-skills", "terminal", ...(process.platform === "win32" ? ["pwsh"] : [])]);
   repo.updateSettings({ browserChecks: false });
   assert.ok(!ids().includes("browser"));
   repo.updateSettings({ providers: PROVIDERS });
-  assert.deepEqual(ids(), ["node", "claude-login", "claude-engine", "claude-models", "git", "git-identity", "images", "images-claude-code", "ollama", "ollama-model:qwen3-coder", ...LMS, "codex", "key-zai", "provider-credit", "plugins", "terminal", ...(process.platform === "win32" ? ["pwsh"] : [])]);
+  assert.deepEqual(ids(), ["node", "claude-login", "claude-engine", "claude-models", "git", "git-identity", "images", "images-claude-code", "ollama", "ollama-model:qwen3-coder", ...LMS, "codex", "key-zai", "provider-credit", "plugins", "starter-skills", "terminal", ...(process.platform === "win32" ? ["pwsh"] : [])]);
 });
 
 test("LM Studio gets a server check and no key check; an Ollama model a pipeline picked gets a pull check", async () => {
@@ -263,7 +264,7 @@ test("setup routes: summary, validation, one-click fix, Claude session", async (
   }
 });
 
-test("recommended skills install for this user in one click or with Claude, and are not Setup rows", async () => {
+test("recommended skills install with Claude at the pinned version, are not Setup rows, and a switched-off plugin does not count", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ksetup-rec-"));
   const home = join(dir, "home");
   const f = fake();
@@ -272,48 +273,41 @@ test("recommended skills install for this user in one click or with Claude, and 
   const runner = new TaskRunner({ repo, bus, queryFn: done });
   const setup = new SetupService({ repo, bus, runner, stateDir: join(dir, "setup"), probe: f.probe, recommended: recommendedChecks(() => home) });
   const app = await buildApp({ repo, bus, runner, setup, allowedHosts: ["localhost:80"] });
-  const events: WsMessage[] = [];
-  bus.subscribe((m) => events.push(m));
   const post = (url: string, payload: unknown) => app.inject({ method: "POST", url: `/api${url}`, payload: payload as object });
-  const list = async () => (await app.inject({ method: "GET", url: "/api/setup/recommended?fresh=1" })).json().checks as { id: string; ok: boolean; fixes: string[]; manual: string; link: { href: string } }[];
+  const list = async () => (await app.inject({ method: "GET", url: "/api/setup/recommended?fresh=1" })).json().checks as { id: string; ok: boolean; warn: boolean; detail: string; fixes: string[]; manual: string; link: { href: string } }[];
+  const by = async (id: string) => (await list()).find((c) => c.id === id)!;
   try {
     const ids = (await list()).map((c) => c.id);
-    assert.deepEqual(ids, ["skill:frontend-design", "skill:emil-design-eng", "skill:design-taste-frontend", "skill:ui-ux-pro-max", "tool:markitdown"]);
+    assert.equal(ids.length, CATALOG.length, "one check per card of the Recommended list");
+    assert.ok(ids.includes("skill:emil-design-eng") && ids.includes("tool:markitdown"));
     const setupIds = (await app.inject({ method: "GET", url: "/api/setup?fresh=1" })).json().checks.map((c: { id: string }) => c.id);
-    assert.ok(!setupIds.some((id: string) => id.startsWith("skill:")), "the Setup checklist does not nag about them");
+    assert.ok(!setupIds.some((id: string) => id.startsWith("skill:") || id.startsWith("tool:")), "the Setup checklist does not nag about them");
 
-    const emil = (await list())[1];
+    // One click is the board's own installer (pinned, with its marker); this check offers the Claude session.
+    const emil = await by("skill:emil-design-eng");
     assert.equal(emil.ok, false);
-    assert.deepEqual(emil.fixes, ["run", "claude"]);
-    assert.equal(emil.link.href, "https://github.com/emilkowalski/skills");
-    assert.equal(emil.manual, "npx -y skills@latest add emilkowalski/skills -g -a claude-code -s emil-design-eng -y --copy");
+    assert.deepEqual(emil.fixes, ["claude"]);
+    assert.equal(emil.link.href, "https://github.com/emilkowalski/skills/tree/e8a175de22ae1e49370fc144c1f3bb9aeedf988d/skills/emil-design-eng");
+    assert.equal((await post("/setup/skill:emil-design-eng/fix", { kind: "run" })).statusCode, 409);
 
-    // With Claude: a supervised task that names the one skill and where it must end up.
+    // With Claude: a supervised task that names the one folder, the commit and where it must end up.
     const t = (await post("/setup/skill:design-taste-frontend/fix", { kind: "claude" })).json().task;
     assert.equal(t.mode, "supervised");
-    assert.match(t.spec_md, /design-taste-frontend/);
-    assert.match(t.spec_md, /Leonxlnx\/taste-skill/);
-    assert.match(t.spec_md, /~\/\.claude\/skills\/design-taste-frontend\/SKILL\.md/);
+    assert.match(t.spec_md, /`skills\/taste-skill` of github\.com\/Leonxlnx\/taste-skill, at commit ce26fc25c0e5e8cab638f883de62d9a86ee5e45b/);
+    assert.match(t.spec_md, /~\/\.claude\/skills\/design-taste-frontend\/SKILL\.md exists/);
 
-    // One click: the installer runs, and once the skill is on disk the card says so and offers nothing.
+    // On disk however it got there: done, and nothing more to offer.
     mkdirSync(join(home, ".claude", "skills", "emil-design-eng"), { recursive: true });
     writeFileSync(join(home, ".claude", "skills", "emil-design-eng", "SKILL.md"), "---\nname: emil-design-eng\ndescription: d\n---\n");
-    assert.equal((await post("/setup/skill:emil-design-eng/fix", { kind: "run" })).statusCode, 200);
-    await until(() => events.some((m) => m.type === "setup.updated" && m.check.id === "skill:emil-design-eng" && m.check.ok));
-    assert.ok(f.calls.includes(`stream npx ${emil.manual.slice(4)}`));
-    const after = (await list())[1];
+    const after = await by("skill:emil-design-eng");
     assert.equal(after.ok, true);
     assert.deepEqual(after.fixes, []);
 
-    // UI/UX Pro Max is a plugin: its marketplace is added, then it is installed, by Claude Code itself.
-    const pro = (await list())[3];
-    assert.equal(pro.manual, "claude plugin marketplace add nextlevelbuilder/ui-ux-pro-max-skill\nclaude plugin install ui-ux-pro-max@ui-ux-pro-max-skill");
-    assert.equal((await post("/setup/skill:ui-ux-pro-max/fix", { kind: "run" })).statusCode, 200);
-    await until(() => f.calls.some((c) => c.endsWith(" plugin install ui-ux-pro-max@ui-ux-pro-max-skill")));
-    const added = f.calls.findIndex((c) => c.endsWith(" plugin marketplace add nextlevelbuilder/ui-ux-pro-max-skill"));
-    assert.ok(added >= 0 && added < f.calls.findIndex((c) => c.endsWith(" plugin install ui-ux-pro-max@ui-ux-pro-max-skill")), "the marketplace comes first");
+    // UI/UX Pro Max is a plugin; its manual steps add the marketplace first, for this user.
+    const pro = await by("skill:ui-ux-pro-max");
+    assert.equal(pro.manual, "claude plugin marketplace add nextlevelbuilder/ui-ux-pro-max-skill --scope user\nclaude plugin install ui-ux-pro-max@ui-ux-pro-max-skill --scope user");
 
-    // Installed but switched off in Claude Code: not counted as installed, and Install is offered to turn it on.
+    // Installed but switched off in Claude Code: not counted, and Claude is offered to set it right.
     const root = join(home, ".claude", "plugins", "cache", "ui-ux-pro-max-skill", "ui-ux-pro-max", "2.13.0");
     mkdirSync(join(root, ".claude", "skills", "ui-ux-pro-max"), { recursive: true });
     writeFileSync(join(root, ".claude", "skills", "ui-ux-pro-max", "SKILL.md"), "---\nname: ui-ux-pro-max\ndescription: d\n---\n");
@@ -321,14 +315,12 @@ test("recommended skills install for this user in one click or with Claude, and 
     writeFileSync(join(root, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "ui-ux-pro-max", skills: "./.claude/skills/" }));
     writeFileSync(join(home, ".claude", "plugins", "installed_plugins.json"), JSON.stringify({ version: 2, plugins: { "ui-ux-pro-max@ui-ux-pro-max-skill": [{ installPath: root }] } }));
     writeFileSync(join(home, ".claude", "settings.json"), JSON.stringify({ enabledPlugins: { "ui-ux-pro-max@ui-ux-pro-max-skill": false } }));
-    const off = (await list())[3] as unknown as { ok: boolean; warn: boolean; fixes: string[] };
+    const off = await by("skill:ui-ux-pro-max");
     assert.equal(off.ok, false);
     assert.equal(off.warn, true);
-    assert.deepEqual(off.fixes, ["run", "claude"]);
+    assert.deepEqual(off.fixes, ["claude"]);
     writeFileSync(join(home, ".claude", "settings.json"), JSON.stringify({ enabledPlugins: { "ui-ux-pro-max@ui-ux-pro-max-skill": true } }));
-    const on = (await list())[3] as unknown as { ok: boolean; detail: string };
-    assert.equal(on.ok, true);
-    assert.equal(on.detail, "Installed with the ui-ux-pro-max plugin");
+    assert.equal((await by("skill:ui-ux-pro-max")).ok, true);
   } finally {
     await app.close();
     rmSync(dir, { recursive: true, force: true });

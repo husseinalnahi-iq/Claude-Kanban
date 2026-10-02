@@ -1,25 +1,39 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { navigate } from "../lib/router.ts";
 import { forecast, openWelcome } from "../lib/welcome.ts";
 import { GROUPS, SHORTCUTS, type Feature } from "../components/tour/features.ts";
+import { DemoStyles, FeatureDemo, hasDemo } from "../components/tour/FeatureDemos.tsx";
 import { MiniBoard } from "../components/tour/MiniBoard.tsx";
-import { TourStyles, tint, useDisplayFont } from "../components/tour/TourStyles.tsx";
+import { TourStyles, tint, useDisplayFont, useReveal } from "../components/tour/TourStyles.tsx";
 import { Button } from "../components/ui.tsx";
 
 function FeatureCard({ f }: { f: Feature }) {
+  const [on, setOn] = useState(false);
+  const demo = hasDemo(f.id);
   return (
     <div
+      data-reveal
       className="kb-feature group relative flex flex-col overflow-hidden rounded-xl border border-ink-800 bg-ink-900/70 p-4 hover:bg-ink-900"
-      onMouseEnter={(e) => (e.currentTarget.style.borderColor = tint(f.color, 45))}
-      onMouseLeave={(e) => (e.currentTarget.style.borderColor = "")}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.borderColor = tint(f.color, 45);
+        setOn(true);
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.borderColor = "";
+        setOn(false);
+      }}
+      onFocus={() => setOn(true)}
+      onBlur={() => setOn(false)}
     >
-      <span aria-hidden className="absolute inset-x-0 top-0 h-[2px]" style={{ background: `linear-gradient(90deg, ${f.color}, transparent 85%)` }} />
+      <span aria-hidden className="kb-bar absolute inset-x-0 top-0 h-[2px]" style={{ background: `linear-gradient(90deg, ${f.color}, transparent 85%)` }} />
       <div className="flex items-center gap-2.5">
-        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[15px]" style={{ background: tint(f.color, 15), color: f.color }}>
-          {f.icon}
+        <span className="kb-icon flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[15px]" style={{ background: tint(f.color, 15), color: f.color }}>
+          <span className="kb-glyph inline-block">{f.icon}</span>
         </span>
         <h3 className="text-[14px] font-semibold leading-snug text-ink-100">{f.title}</h3>
+        {demo ? <span className="kb-demo-hint ml-auto shrink-0 self-start font-mono text-[9.5px] text-ink-500">▶ hover</span> : null}
       </div>
+      <FeatureDemo id={f.id} color={f.color} on={on} />
       <p className="mt-2.5 text-[12.5px] leading-relaxed text-ink-200">{f.pitch}</p>
       <p className="mt-1.5 flex-1 text-[12.5px] leading-relaxed text-ink-400">
         <span className="font-semibold" style={{ color: f.color }}>Why it's good: </span>
@@ -46,6 +60,8 @@ export function Tour({ hasProjects, onAddProject }: { hasProjects: boolean; onAd
   useDisplayFont();
   const [sound, setSound] = useState(false);
   const [line] = useState(forecast);
+  const scroller = useRef<HTMLDivElement>(null);
+  useReveal(scroller);
 
   const steps = [
     {
@@ -69,8 +85,9 @@ export function Tour({ hasProjects, onAddProject }: { hasProjects: boolean; onAd
   ];
 
   return (
-    <div className="h-full overflow-y-auto">
+    <div ref={scroller} className="h-full overflow-y-auto">
       <TourStyles />
+      <DemoStyles />
       <div className="relative mx-auto max-w-[1180px] px-8 pb-16 pt-8">
         <div
           aria-hidden
@@ -79,7 +96,7 @@ export function Tour({ hasProjects, onAddProject }: { hasProjects: boolean; onAd
         />
 
         {/* hero */}
-        <section className="relative grid items-end gap-8 lg:grid-cols-[1fr_auto]">
+        <section data-reveal className="relative grid items-end gap-8 lg:grid-cols-[1fr_auto]">
           <div>
             <div className="font-mono text-[10.5px] uppercase tracking-[0.18em] text-ink-500">Tour · what you get</div>
             <h1 className="kb-display mt-2 text-[52px] leading-[1] text-ink-100">
@@ -101,20 +118,20 @@ export function Tour({ hasProjects, onAddProject }: { hasProjects: boolean; onAd
           </div>
         </section>
 
-        <section className="relative mt-6 rounded-2xl border border-ink-800 bg-ink-900/50 p-4">
-          <MiniBoard sound={sound} />
-          <p className="mt-3 text-[11.5px] text-ink-500">
-            One task's whole life, sped up: queued, planned, coded, checked in a browser, approved by you, reviewed, landed.
-            The colours are the ones the real board uses for each state.
+        <section data-reveal className="relative mt-6 rounded-2xl border border-ink-800 bg-ink-900/50 p-4">
+          <MiniBoard sound={sound} scenes={["life", "chat", "chain", "limit"]} />
+          <p className="mt-2 text-[11.5px] text-ink-500">
+            Four short scenes, sped up, one after another — pick one to jump to it. The colours are the ones the real board uses
+            for each state.
           </p>
         </section>
 
         {/* getting started */}
         <section className="relative mt-10">
-          <h2 className="kb-display text-[30px] text-ink-100">Start in three steps</h2>
-          <div className="kb-stagger mt-4 grid gap-3 md:grid-cols-3">
+          <h2 data-reveal className="kb-display text-[30px] text-ink-100">Start in three steps</h2>
+          <div className="mt-4 grid gap-3 md:grid-cols-3">
             {steps.map((s) => (
-              <div key={s.n} className="relative overflow-hidden rounded-xl border border-ink-800 bg-ink-900/70 p-4">
+              <div key={s.n} data-reveal className="relative overflow-hidden rounded-xl border border-ink-800 bg-ink-900/70 p-4">
                 <span aria-hidden className="kb-display pointer-events-none absolute right-4 top-2 text-[64px] leading-none text-ink-700/70">
                   {s.n}
                 </span>
@@ -134,12 +151,12 @@ export function Tour({ hasProjects, onAddProject }: { hasProjects: boolean; onAd
 
         {GROUPS.map((g) => (
           <section key={g.title} className="relative mt-12">
-            <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+            <div data-reveal className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
               <h2 className="kb-display text-[30px] text-ink-100">{g.title}</h2>
               <p className="text-[13px] text-ink-500">{g.blurb}</p>
             </div>
             {/* four cards sit two by two rather than three and an orphan */}
-            <div className={`kb-stagger mt-4 grid gap-3 md:grid-cols-2 ${g.features.length % 3 === 0 ? "xl:grid-cols-3" : ""}`}>
+            <div className={`mt-4 grid gap-3 md:grid-cols-2 ${g.features.length % 3 === 0 ? "xl:grid-cols-3" : ""}`}>
               {g.features.map((f) => (
                 <FeatureCard key={f.id} f={f} />
               ))}
@@ -149,7 +166,7 @@ export function Tour({ hasProjects, onAddProject }: { hasProjects: boolean; onAd
 
         {/* shortcuts */}
         <section className="relative mt-12 grid gap-6 lg:grid-cols-[1fr_1fr]">
-          <div>
+          <div data-reveal>
             <h2 className="kb-display text-[30px] text-ink-100">Fingers on the keys</h2>
             <div className="mt-4 overflow-hidden rounded-xl border border-ink-800">
               {SHORTCUTS.map(([k, what], n) => (
@@ -160,7 +177,7 @@ export function Tour({ hasProjects, onAddProject }: { hasProjects: boolean; onAd
               ))}
             </div>
           </div>
-          <div>
+          <div data-reveal>
             <h2 className="kb-display text-[30px] text-ink-100">Good to know</h2>
             <ul className="mt-4 space-y-3 text-[12.5px] leading-relaxed text-ink-400">
               <li>
@@ -184,7 +201,7 @@ export function Tour({ hasProjects, onAddProject }: { hasProjects: boolean; onAd
           </div>
         </section>
 
-        <p className="relative mt-14 text-center text-[12px] text-ink-600">Built with Claude, supervised by you. Have a good one. 🌤️</p>
+        <p data-reveal className="relative mt-14 text-center text-[12px] text-ink-600">Built with Claude, supervised by you. Have a good one. 🌤️</p>
       </div>
     </div>
   );

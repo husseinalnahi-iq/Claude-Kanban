@@ -4,8 +4,10 @@ import { z } from "zod";
 import type { AppDeps } from "../app.ts";
 import { NotFoundError } from "../engine/runner.ts";
 import { scanSkills } from "../skills.ts";
+import { projectFits, type SuggestedSkills } from "../skills/install.ts";
+import { reportBusy } from "./busy.ts";
 
-export async function skillRoutes(app: FastifyInstance, { repo }: AppDeps) {
+export async function skillRoutes(app: FastifyInstance, { repo, runner, suggested }: AppDeps & { suggested: SuggestedSkills }) {
   const scan = (projectId?: string) => {
     const off = new Set(repo.getSettings().disabledSkills);
     return scanSkills({ projectPath: projectId ? repo.getProject(projectId)?.path : undefined }).map((s) => ({
@@ -26,5 +28,36 @@ export async function skillRoutes(app: FastifyInstance, { repo }: AppDeps) {
     const child = spawn(opener, [known.path], { detached: true, stdio: "ignore", shell: false });
     child.unref();
     return { ok: true };
+  });
+
+  // An install cut off halfway leaves a half-copied skill or plugin: count it as Setup work in flight.
+  reportBusy(runner, "skills", () => suggested.busy().map(() => ({ what: "setup" })));
+
+  /** The Suggested section: each card with this computer's state, and what kind of project is open. */
+  app.get("/skills/suggested", async (req) => {
+    const projectId = (req.query as { project?: string }).project;
+    return {
+      skills: await suggested.list(),
+      project: projectFits(projectId ? repo.getProject(projectId)?.path : undefined),
+      loadUserPlugins: repo.getSettings().loadUserPlugins,
+    };
+  });
+
+  /** Starts in the background; progress and the new state arrive over the websocket. */
+  app.post("/skills/suggested/starter", async () => ({ queued: suggested.installStarter() }));
+
+  app.post("/skills/suggested/:id/install", async (req) => {
+    suggested.install((req.params as { id: string }).id);
+    return { started: true };
+  });
+
+  app.post("/skills/suggested/:id/remove", async (req) => {
+    suggested.remove((req.params as { id: string }).id);
+    return { started: true };
+  });
+
+  app.post("/skills/suggested/:id/enabled", async (req) => {
+    const { on } = z.object({ on: z.boolean() }).parse(req.body);
+    return suggested.setEnabled((req.params as { id: string }).id, on);
   });
 }

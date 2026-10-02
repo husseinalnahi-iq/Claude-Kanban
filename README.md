@@ -244,6 +244,29 @@ The **Plan** tab of every task shows the plan the code stage worked to, next to 
   & limits, on by default) stops the computer sleeping while work is waiting; the screen can still turn
   off.
 
+## Add good skills
+
+The **Skills** tab opens with a **Recommended** list: skills, plugins and one tool, each checked to work on
+tasks that run with nobody watching.
+
+- **Install the starter pack** adds the five essentials in one go. They make a task show its tests
+  passing before it says "done", find the real cause of a bug, write the test first, write less code,
+  and tidy what it wrote.
+- The others are one click each: better-looking screens (Frontend Design, Emil Kowalski's design
+  engineering, Taste, UI/UX Pro Max), React habits, PDF and Office files (document-skills, and Microsoft's
+  MarkItDown tool), extra reviewers, a browser a task can click through, and current library docs
+  (Context7).
+- **Install** does it in one click. **Install with Claude** does it in a session that asks you before
+  every command.
+- The **ⓘ** on each card says whether it works unattended, what to watch out for (a cost, a program it
+  needs, where your questions go) and, where the usual switch does not cover it, how to turn it off.
+- Once installed, each skill has its on/off switch in the list below; the Context7 plugin, which has
+  no skills, has its switch on its own card. **Remove** takes it away again.
+- The board copies a skill from the exact version that was checked, not whatever its author changes
+  later, and removes only what it installed itself: a skill you added yourself is never touched.
+- Tasks use them when **Load your global plugins, hooks and skills into runs** is on (Settings → Runs &
+  limits, on by default). The **Setup** tab shows how many of the five are installed.
+
 ## Let a cheaper subscription do the typing
 
 Claude plans; another model can write the code. Monthly coding plans from other companies work, not only
@@ -381,7 +404,9 @@ The **Setup** tab lists what this computer has for the board's features, in four
   Chrome is used when installed, then Edge (every Windows 11 machine has it), then Playwright's own
   Chromium.
 - **Optional** — only for what you have set up: Ollama and each model a provider lists, the agent CLIs
-  (Codex, Gemini, Kimi, OpenCode), provider keys, desktop notifications.
+  (Codex, Gemini, Kimi, OpenCode), provider keys, desktop notifications. Also **Recommended skills**:
+  how many of the five essentials from [Add good skills](#add-good-skills) are installed, with
+  **Install the starter pack**.
 - **Good to know** — plugins and skills. No board feature needs one.
 
 Each missing item offers what fits it:
@@ -409,7 +434,7 @@ restarting it.
 | **Approvals** | A global inbox with `a` / `y` / `n` and a tab-title badge, so an unattended run never stalls unnoticed. |
 | **Dashboard** | Needs-you, open, done, spend, median task time, first-pass rate, throughput, cost by model, where runs fail. Every chart has a table view. |
 | **Sessions** | Every run across projects: state, model, effort, cost, tokens, elapsed. |
-| **Skills** | User, project and plugin skills in one place, each with an on/off switch that applies to every run. A plugin's skills are found where its `plugin.json` puts them, not only in `skills/`. **Recommended** at the top offers [Frontend Design](https://github.com/anthropics/skills/tree/main/skills/frontend-design) (Anthropic's own), [Emil Kowalski's design engineering](https://github.com/emilkowalski/skills) (`emil-design-eng`), [Taste](https://github.com/Leonxlnx/taste-skill) (`design-taste-frontend`) and [UI/UX Pro Max](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill). **Install** puts the first three into `~/.claude/skills` with `npx skills add … -g -a claude-code --copy`, one skill each; UI/UX Pro Max is a plugin (7 design skills, needs Python 3), added with `claude plugin marketplace add` and `claude plugin install`. **Install with Claude** does either in a supervised session. **MarkItDown** ([Microsoft's markitdown-mcp](https://github.com/microsoft/markitdown/tree/main/packages/markitdown-mcp)) is a tool rather than a skill: Claude turns PDFs, Word, Excel and PowerPoint files and web pages into Markdown. **Install** finds a Python 3.10–3.14, makes MarkItDown its own environment in `~/.claude-kanban/tools/markitdown`, installs it there and adds it to your Claude Code (`claude mcp add -s user markitdown`). Tasks then use it like a read — a web page, or a file in the task's own folders, without a card; any other file is refused (autonomous) or asked about (supervised). Settings → *Browser, images & plugins* switches that off. All are installed for you, so every project's runs get them. |
+| **Skills** | User, project and plugin skills in one place, each with an on/off switch that applies to every run. A plugin's skills are found where its `plugin.json` puts them, not only in `skills/`. **Recommended** at the top installs checked skills and plugins in one click — see [Add good skills](#add-good-skills). A skill is copied from the commit that was read, only its own folder, into `~/.claude/skills` with a marker file (**Remove** deletes only a folder with that marker); a plugin goes through `claude plugin marketplace add` and `claude plugin install --scope user`. **Install with Claude** does either in a supervised session. **MarkItDown** ([Microsoft's markitdown-mcp](https://github.com/microsoft/markitdown/tree/main/packages/markitdown-mcp)) is a tool rather than a skill: Claude turns PDFs, Word, Excel and PowerPoint files and web pages into Markdown. **Install** finds a Python 3.10–3.14, makes MarkItDown its own environment in `~/.claude-kanban/tools/markitdown`, installs it there and adds it to your Claude Code (`claude mcp add -s user markitdown`). Tasks then use it like a read — a web page, or a file in the task's own folders, without a card; any other file is refused (autonomous) or asked about (supervised). Settings → *Browser, images & plugins* switches that off. All are installed for you, so every project's runs get them. |
 | **Memory** | One-line notes per project, editable and prunable, of two kinds: **rules and lessons** (from `board_remember` and from you) and **what earlier tasks did** (one line per approved task, with its id). Each prompt carries up to 12: the newest 3 lessons, then the notes that share the most words with the task (SQLite full-text search, BM25) — at most 4 outcomes, and only matching ones. Each kind keeps its own 60, so approvals never push the lessons out; `board_memory` reads them all. Every note shows how the tasks it was given to ended (approved or sent back) and is marked for a look when it keeps turning up on work you send back. A run that finds a note wrong calls `board_flag_memory`: the note leaves the prompts until you **Keep it** or delete it. Nothing is ever removed for you. |
 | **Search** | `/` or Ctrl-K over specs, run results, transcripts, messages and memory. Runs get the same search for their own project as `board_search_past_work`: short lines first, then `board_get_task` for the full record. |
 | **Usage** | Your 5-hour and weekly Claude windows in the top bar, with reset times. A task stopped by the limit **pauses and resumes by itself** when the window reopens. |
@@ -724,6 +749,14 @@ When a run hits your Claude usage limit the whole queue waits for that window ra
 next task into the same wall — but stages **delegated to another provider keep running**, because the
 limit is Claude's, not theirs. The board says so in a line under the header, with the time the window
 reopens. Forcing a task does not skip this: it would only pause a moment later.
+
+## Roadmap
+
+The **Roadmap** tab (key `3`) groups a project's cards into **milestones**, each with an optional due
+date. Every milestone is a column that shows how many of its cards are done; cards with no milestone
+sit under *Unscheduled*. Drag a card to another milestone, move a milestone left or right with its
+arrows, and add a task straight into one with **+ task**. Deleting a milestone keeps its cards — they
+go back to *Unscheduled*.
 
 ---
 
@@ -1110,14 +1143,19 @@ instruction to start from the repository as it is now, with both tasks linked.
 
 ## Welcome and the Tour tab
 
-The first time the board opens on a machine it says hello: six headline features, and a demo card
+The first time the board opens on a machine it says hello: seven headline features, and a demo card
 walking across a pretend board in the real status colours. The **Skip** button is shy. It slides away
 from your mouse twice, then gives up with a 😂 and lets you click it. From the keyboard, Enter or Esc
 closes it straight away.
 
-**✦ Tour** (key `8`) is the long version: every feature, why it beats doing the same by hand, and a
-link to where it lives. It also has a three-step start, the keyboard shortcuts, and the demo with the
-real event sounds. **↺ Replay the welcome** opens the pop-up again.
+**✦ Tour** (key `8`) is the long version: every feature in five groups — it runs the work, it fits
+how you already work, it works while you sleep, you stay in charge, it respects your time and money —
+why it beats doing the same by hand, and a link to where it lives. The headline features have a small
+moving picture of what they do, which plays while you point at the card. Its demo board plays four
+short scenes — a task's whole life, a question to the chat, two tasks in a chain, a usage limit that
+pauses and resumes — with a line under the board saying what is happening, and the real event sounds
+if you turn them on. It also has a three-step start and the keyboard shortcuts. **↺ Replay the
+welcome** opens the pop-up again.
 
 ---
 

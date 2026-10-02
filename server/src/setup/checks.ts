@@ -15,6 +15,8 @@ import { loadPty, pwshPath } from "../terminal.ts";
 import { CLOUDFLARE_TOKEN_REF, POLLINATIONS_KEY_REF, claudeCodeArgs, claudeCodeCommand, imageReadiness } from "../engine/images.ts";
 import { IMAGE_SERVER } from "../types.ts";
 import { fileURLToPath } from "node:url";
+import { CATALOG } from "../skills/catalog.ts";
+import { entryStatus } from "../skills/install.ts";
 
 /** The Claude Kanban folder (package.json with both workspaces). */
 const BOARD_DIR = join(fileURLToPath(new URL(".", import.meta.url)), "..", "..", "..");
@@ -36,6 +38,10 @@ export interface CheckCtx {
   claudeModels?: () => Promise<ClaudeModelsResult>;
   /** Delegated providers that ran out. */
   providerOuts?: () => ProviderOut[];
+  /** Where ~/.claude is; tests point it at a temp folder. */
+  home?: string;
+  /** Suggested skills being installed or removed right now (the Skills tab's queue). */
+  skillsBusy?: () => string[];
 }
 
 export interface Detected {
@@ -404,6 +410,31 @@ const plugins: SetupCheck = {
   },
 };
 
+/** The starter pack of the Skills tab's Suggested list (D317): optional, so it never adds to the Setup badge. */
+const starterSkills: SetupCheck = {
+  id: "starter-skills",
+  title: "Recommended skills",
+  level: "optional",
+  why: "Five skills that make unattended tasks test before they finish, find the real cause of a bug, write less code and tidy what they wrote. Each can be switched off in the Skills tab.",
+  link: { label: "Open Skills", href: "#/skills" },
+  async detect({ home, skillsBusy }) {
+    const starter = CATALOG.filter((e) => e.starter);
+    const missing = starter.filter((e) => entryStatus(e, home) === "not-installed");
+    const have = `${starter.length - missing.length} of ${starter.length} installed`;
+    if (!missing.length) return ok(have);
+    const busy = new Set(skillsBusy?.() ?? []);
+    const installing = missing.filter((e) => busy.has(e.id));
+    // No button while they install: a second click would only be refused.
+    if (installing.length) return { ok: false, offerFixes: false, detail: `${have} · installing ${installing.map((e) => e.name).join(", ")}…` };
+    return {
+      ok: false,
+      offerFixes: false,
+      detail: `${have} · missing: ${missing.map((e) => e.name).join(", ")}`,
+      action: { label: "Install the starter pack", endpoint: "/skills/suggested/starter" },
+    };
+  },
+};
+
 const claudeModelIds: SetupCheck = {
   id: "claude-models",
   title: "Claude models in your settings",
@@ -545,7 +576,7 @@ export function buildChecks(settings: Settings): SetupCheck[] {
   list.push(codexCheck(settings));
   for (const p of enabled) if (p.kind !== "cli" && p.authRef && !isLocal(p)) list.push(keyCheck(p));
   if (enabled.some((p) => !isLocal(p))) list.push(providerCredit);
-  list.push(plugins, terminal);
+  list.push(plugins, starterSkills, terminal);
   if (process.platform === "win32") list.push(pwsh);
   return list;
 }

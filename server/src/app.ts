@@ -17,6 +17,7 @@ import { runRoutes } from "./routes/runs.ts";
 import { approvalRoutes } from "./routes/approvals.ts";
 import { milestoneRoutes } from "./routes/milestones.ts";
 import { skillRoutes } from "./routes/skills.ts";
+import { SuggestedSkills } from "./skills/install.ts";
 import { settingsRoutes } from "./routes/settings.ts";
 import { healthRoutes } from "./routes/health.ts";
 import { codexRoutes } from "./routes/codex.ts";
@@ -59,6 +60,8 @@ export interface AppDeps {
   terminals?: TerminalManager;
   /** The Spec section's ✦ Rewrite. */
   specs?: SpecWriter;
+  /** The Skills tab's Suggested section. Tests pass one with a fake machine and a temp home. */
+  suggested?: SuggestedSkills;
 }
 
 export function defaultAllowedHosts(): string[] {
@@ -99,7 +102,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   });
 
   await app.register(websocket);
-  const setup = deps.setup ?? new SetupService({ repo: deps.repo, bus: deps.bus, runner: deps.runner, stateDir: join(STATE_DIR, "setup") });
+  const suggested = deps.suggested ?? new SuggestedSkills({ bus: deps.bus });
+  const setup = deps.setup ?? new SetupService({ repo: deps.repo, bus: deps.bus, runner: deps.runner, stateDir: join(STATE_DIR, "setup"), skillsBusy: () => suggested.busy() });
   const scheduler = deps.scheduler ?? new Scheduler({ repo: deps.repo, bus: deps.bus, runner: deps.runner });
   const chat = deps.chat ?? new ChatService({ repo: deps.repo, bus: deps.bus, runner: deps.runner, scheduler });
   const specs = deps.specs ?? new SpecWriter({ repo: deps.repo, bus: deps.bus, runner: deps.runner });
@@ -109,7 +113,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     await runRoutes(api, deps);
     await approvalRoutes(api, deps);
     await milestoneRoutes(api, deps);
-    await skillRoutes(api, deps);
+    await skillRoutes(api, { ...deps, suggested });
     await settingsRoutes(api, deps);
     await imageRoutes(api, deps);
     await healthRoutes(api, deps);

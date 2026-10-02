@@ -49,7 +49,7 @@ export class SetupService {
   /** Skills the Skills page offers to install: they install like a check but are not on the Setup list. */
   private readonly extras: SetupCheck[];
 
-  constructor(private readonly deps: { repo: Repo; bus: Bus; runner: TaskRunner; stateDir: string; probe?: Probe; recommended?: SetupCheck[] }) {
+  constructor(private readonly deps: { repo: Repo; bus: Bus; runner: TaskRunner; stateDir: string; probe?: Probe; recommended?: SetupCheck[]; skillsBusy?: () => string[] }) {
     this.probe = deps.probe ?? realProbe;
     this.extras = deps.recommended ?? recommendedChecks();
     // A Claude session that stops (for review, done or failed) may have installed something: look again.
@@ -82,6 +82,7 @@ export class SetupService {
       hasSecret: (n) => this.deps.runner.secrets.has(n),
       claudeModels: () => this.deps.runner.claudeModels(),
       providerOuts: () => this.deps.repo.providerOuts(),
+      skillsBusy: this.deps.skillsBusy,
     };
   }
 

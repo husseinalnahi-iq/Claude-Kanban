@@ -13,7 +13,8 @@ export interface Feature {
   /** Where to find it. */
   where: string;
   go?: View;
-  /** One of the six shown in the welcome pop-up. */
+  /** Shown in the welcome pop-up, and given a moving demo on its Tour card (`FeatureDemos.tsx`). The README's
+   * Welcome section says how many, so change it there too. */
   headline?: boolean;
 }
 
@@ -90,23 +91,14 @@ export const GROUPS: FeatureGroup[] = [
         go: "board",
       },
       {
-        id: "terminal",
-        icon: ">_",
-        color: "var(--color-slate)",
-        title: "Your terminal, built in",
-        pitch: "A real terminal under the board, opened in the project's folder, or in a task's own copy with Terminal here.",
-        why: "Run the app, check git, try a command, without leaving the board or hunting for the right folder. Tabs keep several going, and they keep running when you hide the panel.",
-        where: "Top bar → Terminal, or Ctrl + `",
-      },
-      {
-        id: "mcp",
-        icon: "⌘",
-        color: "var(--color-slate)",
-        title: "Sessions that talk to each other",
-        pitch: "Every run gets board tools: read its siblings, post messages, split work into subtasks, remember decisions, search what earlier tasks did.",
-        why: "A subtask knows what its siblings decided. Project memory hands each later task the decisions that match it, and a run can flag one that is out of date for you to check.",
-        where: "Settings → Memory",
-        go: "settings",
+        id: "roadmap",
+        icon: "⚑",
+        color: "var(--color-moss)",
+        title: "A roadmap above the board",
+        pitch: "Group cards into milestones with due dates, and drag a card from one milestone to another. Each milestone shows how many of its cards are done.",
+        why: "The board says what is happening now; the roadmap says what the week or the release still needs. Add a task straight into a milestone with + task.",
+        where: "Roadmap tab — press 3",
+        go: "roadmap",
       },
       {
         id: "delegation",
@@ -128,6 +120,12 @@ export const GROUPS: FeatureGroup[] = [
         where: "Settings → Model lists",
         go: "settings",
       },
+    ],
+  },
+  {
+    title: "It fits how you already work",
+    blurb: "Your Claude Code, your terminal, your computer, and a memory of what earlier tasks learned.",
+    features: [
       {
         id: "claude-code",
         icon: "✦",
@@ -142,11 +140,50 @@ export const GROUPS: FeatureGroup[] = [
         id: "recommended-skills",
         icon: "★",
         color: "var(--color-moss)",
-        title: "Recommended skills, one click to install",
-        pitch: "The Skills tab offers design skills worth having — Anthropic's Frontend Design, Emil Kowalski's design engineering, Taste and UI/UX Pro Max — and Microsoft's MarkItDown, which lets Claude read PDFs, Word and Excel files. Install, or Install with Claude.",
-        why: "No hunting for the right repository or install command. Install does it for you in one click; Install with Claude does it in a session that asks before every command. Either way they are installed for you rather than one project, so every project's tasks can use them.",
-        where: "Skills tab → Recommended",
+        title: "Recommended skills, one click in and out",
+        pitch: "The Skills tab recommends skills checked to work with nobody watching: test before saying done, find the real cause of a bug, write less code, better-looking screens, read PDFs and Office files, look up current docs. Install the five essentials in one go.",
+        why: "No hunting for the right repository or install command. Each card's ⓘ says whether it works unattended, what it costs or needs, and how to turn it off. Install does it in one click; Install with Claude does it in a session that asks before every command.",
+        where: "Skills tab → Recommended · Setup → Recommended skills",
         go: "skills",
+      },
+      {
+        id: "setup",
+        icon: "⚙",
+        color: "var(--color-lime)",
+        title: "Setup checks this computer for you",
+        pitch: "The Setup tab lists what the board needs and what each feature can use — Node, your Claude login, git, a browser, other models' tools — and shows what is missing.",
+        why: "Each missing thing comes with its fix: Install runs a known command and shows its output, Fix with Claude installs it in a session that asks before every command, and Copy gives you the command to run yourself.",
+        where: "Setup tab — press 9",
+        go: "setup",
+      },
+      {
+        id: "terminal",
+        icon: ">_",
+        color: "var(--color-slate)",
+        title: "Your terminal, built in",
+        pitch: "A real terminal under the board, opened in the project's folder, or in a task's own copy with Terminal here.",
+        why: "Run the app, check git, try a command, without leaving the board or hunting for the right folder. Tabs keep several going, and they keep running when you hide the panel.",
+        where: "Top bar → Terminal, or Ctrl + `",
+      },
+      {
+        id: "memory",
+        icon: "◎",
+        color: "var(--color-cyan)",
+        title: "A project memory you can read and edit",
+        pitch: "Each project keeps short notes of two kinds: lessons to follow, and what earlier approved tasks did. Every run gets the newest lessons plus the notes that match its task.",
+        why: "Later tasks stop repeating old mistakes, without every note costing on every run. A run that finds a note wrong flags it, and the note waits for you to Keep it or delete it. Nothing is removed for you.",
+        where: "Settings → Memory",
+        go: "settings",
+      },
+      {
+        id: "mcp",
+        icon: "⌘",
+        color: "var(--color-slate)",
+        title: "Sessions that talk to each other",
+        pitch: "Every run gets board tools: read its siblings, post messages, split work into subtasks, save a lesson, and search what earlier tasks in the project did.",
+        why: "A subtask knows what its siblings decided, and a run can look up how a similar task went last week instead of working it out again.",
+        where: "Any task · Messages and Subtasks tabs",
+        go: "board",
       },
     ],
   },

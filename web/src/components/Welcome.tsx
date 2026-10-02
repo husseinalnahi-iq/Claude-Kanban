@@ -8,7 +8,7 @@ import { TourStyles, tint, useDisplayFont } from "./tour/TourStyles.tsx";
 import { Button, useEscape } from "./ui.tsx";
 
 /**
- * What a first-time user sees: the six things that make the board worth using, a demo card walking
+ * What a first-time user sees: the headline features that make the board worth using, a demo card walking
  * across it, and a Skip button with a sense of humour. Shown once per machine; the Tour tab has the
  * rest and can replay this.
  */
@@ -23,6 +23,7 @@ export function Welcome({ hasProjects, onAddProject }: { hasProjects: boolean; o
     then();
   };
   const more = ALL_FEATURES.length - HEADLINES.length;
+  const fours = HEADLINES.length % 3 === 1 ? 4 : 0;
 
   return (
     <div className="kb-scrim fixed inset-0 z-[60] flex items-center justify-center bg-[var(--kb-scrim)] p-4 backdrop-blur-[3px]" role="dialog" aria-modal="true" aria-labelledby="kb-welcome-title">
@@ -75,11 +76,12 @@ export function Welcome({ hasProjects, onAddProject }: { hasProjects: boolean; o
             <MiniBoard />
           </section>
 
-          <section className="kb-stagger grid grid-cols-1 gap-2.5 px-8 pt-5 sm:grid-cols-2 lg:grid-cols-3">
-            {HEADLINES.map((f) => (
+          {/* a count one past a multiple of three (seven) opens with a row of four, so no card sits alone */}
+          <section className="kb-stagger grid grid-cols-1 gap-2.5 px-8 pt-5 sm:grid-cols-2 lg:grid-cols-12">
+            {HEADLINES.map((f, i) => (
               <div
                 key={f.id}
-                className="kb-feature group rounded-xl border border-ink-800 bg-ink-850/70 p-3.5 hover:bg-ink-850"
+                className={`${i < fours ? "lg:col-span-3" : "lg:col-span-4"} ${i === HEADLINES.length - 1 && HEADLINES.length % 2 ? "sm:col-span-2" : ""} kb-feature group rounded-xl border border-ink-800 bg-ink-850/70 p-3.5 hover:bg-ink-850`}
                 onMouseEnter={(e) => (e.currentTarget.style.borderColor = tint(f.color, 45))}
                 onMouseLeave={(e) => (e.currentTarget.style.borderColor = "")}
               >

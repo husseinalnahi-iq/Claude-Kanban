@@ -2,7 +2,7 @@ import type {
   ImageStatus,
   Approval, Attachment, DiffFile, EventRow, FastModeStatus, Message, MergePolicy, Milestone, Mode, Note, Policy, Project, ProjectEnv, Run, RunListItem, SessionTools, Settings, SkillInfo, Stage, Task, TaskCard, UsageLimit,
   Provider, ProviderTestResult, SetupCheckResult, ModelCatalogResult, Schedule, Chat, ChatMessage, Effort, ClaudeModelsResult, SpecVersion,
-  ProviderUsage, ProviderOut, WsMessage,
+  ProviderUsage, ProviderOut, WsMessage, SuggestedSkill,
 } from "../../../server/src/types.ts";
 import type { ProviderPreset } from "../../../server/src/engine/providers/presets.ts";
 import type { LocalModelsStatus } from "../../../server/src/setup/local.ts";
@@ -17,6 +17,12 @@ import type { TriageResult } from "../../../server/src/engine/triage.ts";
 import type { SearchHit } from "../../../server/src/routes/search.ts";
 
 export type ProjectWithGit = Project & { isGit: boolean };
+export interface SuggestedList {
+  skills: SuggestedSkill[];
+  /** What kind of project is open, for "Good for this project". */
+  project: { web: boolean; react: boolean };
+  loadUserPlugins: boolean;
+}
 export type { TerminalInfo } from "../../../server/src/terminal.ts";
 import type { TerminalInfo } from "../../../server/src/terminal.ts";
 export type ScheduleBody = Partial<Pick<Schedule, "spec_md" | "mode" | "type" | "priority" | "pipeline" | "skills" | "enabled">> &
@@ -176,6 +182,12 @@ export const api = {
 
   skills: (projectId?: string) => req<SkillInfo[]>("GET", `/skills${projectId ? `?project=${encodeURIComponent(projectId)}` : ""}`),
   openSkill: (path: string, project?: string) => req<{ ok: true }>("POST", "/skills/open", { path, project }),
+  suggestedSkills: (projectId?: string) =>
+    req<SuggestedList>("GET", `/skills/suggested${projectId ? `?project=${encodeURIComponent(projectId)}` : ""}`),
+  installSuggested: (id: string) => req<{ started: true }>("POST", `/skills/suggested/${encodeURIComponent(id)}/install`),
+  removeSuggested: (id: string) => req<{ started: true }>("POST", `/skills/suggested/${encodeURIComponent(id)}/remove`),
+  setSuggestedEnabled: (id: string, on: boolean) => req<SuggestedSkill>("POST", `/skills/suggested/${encodeURIComponent(id)}/enabled`, { on }),
+  installStarterPack: () => req<{ queued: string[] }>("POST", "/skills/suggested/starter"),
 
   search: (q: string, projectId?: string) =>
     req<SearchHit[]>("GET", `/search?q=${encodeURIComponent(q)}${projectId ? `&project=${encodeURIComponent(projectId)}` : ""}`),

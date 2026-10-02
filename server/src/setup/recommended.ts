@@ -1,114 +1,67 @@
 import { homedir } from "node:os";
 import { posix, win32 } from "node:path";
 import { scanSkills } from "../skills.ts";
+import { CATALOG, checkOf, linkOf, pluginKey, skillDir, type CatalogPlugin, type CatalogSkill } from "../skills/catalog.ts";
+import { entryStatus } from "../skills/install.ts";
 import { MARKITDOWN_SERVER } from "../types.ts";
-import type { FixCommand, SetupCheck } from "./checks.ts";
+import type { SetupCheck } from "./checks.ts";
 import { bundledClaude, type Probe } from "./probe.ts";
 
 const MIN = 60_000;
 
-/** A skill copied into ~/.claude/skills by `npx skills add`, or a Claude Code plugin from its marketplace. */
-type Install = { kind: "skill"; source: string } | { kind: "plugin"; marketplace: string; plugin: string };
-
-/** What the Skills page offers to install, each with the people who made it and where it comes from. */
-interface SkillPick {
-  /** The skill's own name (its SKILL.md `name`): the folder it lands in, or the part after `plugin:`. */
-  skill: string;
-  title: string;
-  why: string;
-  install: Install;
-  link: string;
-}
-
-const SKILLS: SkillPick[] = [
-  {
-    skill: "frontend-design",
-    title: "Frontend Design — Anthropic's official skill",
-    why: "Anthropic's own guidance for building screens with a clear look of their own: a deliberate style, type that suits it, and choices that don't read as a template.",
-    install: { kind: "skill", source: "anthropics/skills" },
-    link: "https://github.com/anthropics/skills/tree/main/skills/frontend-design",
-  },
-  {
-    skill: "emil-design-eng",
-    title: "Emil Kowalski — design engineering",
-    why: "Interfaces that feel finished: when to animate and how fast, easing that feels natural, buttons that respond to a press, menus that open from where you clicked. From the maker of Sonner and Vaul.",
-    install: { kind: "skill", source: "emilkowalski/skills" },
-    link: "https://github.com/emilkowalski/skills",
-  },
-  {
-    skill: "design-taste-frontend",
-    title: "Taste — pages that don't look generic",
-    why: "Stops the look every AI-made page shares: plain layouts, default fonts, no motion. Claude settles how bold, how lively and how dense the page should be before it builds it.",
-    install: { kind: "skill", source: "Leonxlnx/taste-skill" },
-    link: "https://github.com/Leonxlnx/taste-skill",
-  },
-  {
-    skill: "ui-ux-pro-max",
-    title: "UI/UX Pro Max — a design library to search",
-    why: "Claude looks up styles, colour palettes, font pairings, chart types and the rules for your framework before it designs, instead of guessing. Comes as a plugin of 7 design skills (brand, slides, banners and more). Needs Python 3.",
-    // A plugin, as its authors ship it: its skill runs its search script from ${CLAUDE_PLUGIN_ROOT},
-    // which only a plugin has. Copied in as a plain skill, that path points nowhere.
-    install: { kind: "plugin", marketplace: "nextlevelbuilder/ui-ux-pro-max-skill", plugin: "ui-ux-pro-max@ui-ux-pro-max-skill" },
-    link: "https://github.com/nextlevelbuilder/ui-ux-pro-max-skill",
-  },
-];
-
 /**
- * `npx skills add` (vercel-labs/skills) for this user and Claude Code only. `--copy` puts real files in
- * ~/.claude/skills: a link into ~/.agents is not a folder to the scanner, and Windows may refuse to make one.
+ * "Install with Claude" for a skill or plugin of the Skills tab's Recommended list (D321): a supervised
+ * session that installs the very version the board's own Install would. The one-click Install is the
+ * board's (`skills/install.ts`): a skill copied from its pinned commit with the board's marker.
  */
-export const skillInstallArgs = (p: { source: string; skill: string }) =>
-  ["-y", "skills@latest", "add", p.source, "-g", "-a", "claude-code", "-s", p.skill, "-y", "--copy"];
-
-/** Both are safe to repeat (checked with Claude Code 2.1.285), and installing again turns a plugin you switched off back on. */
-export const pluginInstallArgs = (p: { marketplace: string; plugin: string }) => [
-  ["plugin", "marketplace", "add", p.marketplace],
-  ["plugin", "install", p.plugin],
-];
-
-function commands(p: SkillPick): FixCommand[] {
-  if (p.install.kind === "skill") return [{ command: "npx", args: skillInstallArgs({ source: p.install.source, skill: p.skill }), timeoutMs: 5 * MIN }];
-  // The board's own Claude binary writes the same ~/.claude the Claude Code you run reads.
-  const claude = bundledClaude() ?? "claude";
-  return pluginInstallArgs(p.install).map((args) => ({ command: claude, args, timeoutMs: 5 * MIN }));
-}
-
-/** The command lines to copy, with `claude` as you would type it. */
-function manual(p: SkillPick): string {
-  if (p.install.kind === "skill") return `npx ${skillInstallArgs({ source: p.install.source, skill: p.skill }).join(" ")}`;
-  return pluginInstallArgs(p.install).map((a) => `claude ${a.join(" ")}`).join("\n");
-}
-
-function goal(p: SkillPick): { goal: string; doneWhen: string } {
-  if (p.install.kind === "skill") {
+function goal(e: CatalogSkill | CatalogPlugin): { goal: string; doneWhen: string } {
+  if (e.kind === "skill") {
+    const dest = `~/.claude/skills/${skillDir(e)}`;
+    const tool = e.npmTool ? ` First install its command with \`npm install -g ${e.npmTool}\`.` : "";
     return {
-      goal: `Install the "${p.skill}" skill from github.com/${p.install.source} for Claude Code, for this user, so it is at ~/.claude/skills/${p.skill}/SKILL.md. Install only that one skill from the repository.`,
-      doneWhen: `~/.claude/skills/${p.skill}/SKILL.md exists and starts with "name: ${p.skill}" in its frontmatter`,
+      goal: `Install one skill for Claude Code, for this user: copy the folder \`${e.path}\` of github.com/${e.repo}, at commit ${e.commit}, to ${dest}/. Copy only that folder, nothing else from the repository, and not from a newer commit.${tool}`,
+      doneWhen: `${dest}/SKILL.md exists`,
     };
   }
   return {
-    goal: `Install the Claude Code plugin ${p.install.plugin} for this user: add the plugin marketplace ${p.install.marketplace} (github.com/${p.install.marketplace}), then install the plugin from it, at user scope.`,
-    doneWhen: `\`claude plugin list\` shows ${p.install.plugin} as enabled`,
+    goal: `Install the Claude Code plugin ${pluginKey(e)} for this user: add the plugin marketplace ${e.marketplaceRepo} (github.com/${e.marketplaceRepo}), then install the plugin from it, at user scope (\`--scope user\`).`,
+    doneWhen: `\`claude plugin list\` shows ${pluginKey(e)} as enabled`,
   };
 }
 
-function skillCheck(p: SkillPick, home: () => string): SetupCheck {
-  const how = manual(p);
+/** The command lines to copy, with `claude` as you would type it. */
+function manual(e: CatalogSkill | CatalogPlugin): string {
+  if (e.kind === "plugin") return `claude plugin marketplace add ${e.marketplaceRepo} --scope user\nclaude plugin install ${pluginKey(e)} --scope user`;
+  return [
+    ...(e.npmTool ? [`npm install -g ${e.npmTool}`] : []),
+    `git clone --filter=blob:none --sparse https://github.com/${e.repo}.git skill-src`,
+    `git -C skill-src sparse-checkout set ${e.path}`,
+    `git -C skill-src checkout ${e.commit}`,
+    `copy the folder skill-src/${e.path} to ~/.claude/skills/${skillDir(e)}`,
+  ].join("\n");
+}
+
+function catalogCheck(e: CatalogSkill | CatalogPlugin, home: () => string): SetupCheck {
+  const how = manual(e);
   return {
-    id: `skill:${p.skill}`,
-    title: p.title,
+    id: checkOf(e),
+    title: e.name,
     level: "optional",
-    why: p.why,
-    run: () => commands(p),
-    claude: goal(p),
+    why: e.what,
+    claude: goal(e),
     manual: { win32: how, darwin: how, linux: how },
-    link: { label: "See it on GitHub", href: p.link },
+    link: { label: "See it on GitHub", href: linkOf(e) },
     async detect() {
-      // By name, wherever it is: installed by hand into another folder, or as part of a plugin, it counts.
-      const found = scanSkills({ home: home() }).filter((s) => s.name === p.skill || s.name.endsWith(`:${p.skill}`));
-      const on = found.find((s) => s.pluginEnabled);
-      if (on) return { ok: true, detail: on.source === "plugin" ? `Installed with the ${on.plugin} plugin` : "Installed", offerFixes: false };
-      if (found.length) return { ok: false, warn: true, detail: `Its ${found[0].plugin} plugin is switched off in Claude Code. Install turns it back on.` };
+      const status = entryStatus(e, home());
+      if (e.kind === "plugin") {
+        // Installed but switched off in Claude Code: runs do not get it, so it does not count.
+        const found = scanSkills({ home: home() }).filter((s) => s.plugin === e.plugin);
+        if (status === "installed" && found.length && !found.some((s) => s.pluginEnabled)) {
+          return { ok: false, warn: true, detail: `Its ${e.plugin} plugin is switched off in Claude Code.` };
+        }
+      }
+      if (status === "installed") return { ok: true, detail: "Installed", offerFixes: false };
+      if (status === "installed-elsewhere") return { ok: true, detail: "Already on this computer", offerFixes: false };
       return { ok: false, detail: "Not installed" };
     },
   };
@@ -211,5 +164,11 @@ function markitdownCheck(home: () => string): SetupCheck {
 
 /** The recommended skills and tools, in the order the Skills page shows them. `home` is for tests. */
 export function recommendedChecks(home: () => string = homedir): SetupCheck[] {
-  return [...SKILLS.map((p) => skillCheck(p, home)), markitdownCheck(home)];
+  const tools: Record<string, (home: () => string) => SetupCheck> = { "tool:markitdown": markitdownCheck };
+  return CATALOG.map((e) => {
+    if (e.kind !== "tool") return catalogCheck(e, home);
+    const make = tools[e.check];
+    if (!make) throw new Error(`The catalog names a tool with no Setup check: ${e.check}`);
+    return make(home);
+  });
 }

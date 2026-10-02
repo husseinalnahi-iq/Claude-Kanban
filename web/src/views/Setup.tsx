@@ -131,6 +131,8 @@ export function Setup() {
     if (m.type === "setup.updated") setChecks((cs) => cs?.map((c) => (c.id === m.check.id ? m.check : c)) ?? cs);
     if (m.type === "setup.output") setOut((o) => ({ ...o, [m.id]: ((o[m.id] ?? "") + m.chunk).slice(-20_000) }));
     if (m.type === "health.updated" || m.type === "settings.updated") load();
+    // The starter pack installs in the Skills tab's queue, which does not report to Setup itself.
+    if (m.type === "skills.suggested" && m.skill.starter) void api.recheckSetup("starter-skills").then(put, () => {});
   });
   const put = (c: SetupCheckResult) => setChecks((cs) => cs?.map((x) => (x.id === c.id ? c : x)) ?? cs);
   const failing = (checks ?? []).filter((c) => !c.ok && (c.level === "required" || c.level === "recommended")).length;

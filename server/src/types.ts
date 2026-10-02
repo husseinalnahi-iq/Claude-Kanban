@@ -991,6 +991,44 @@ export interface SkillInfo {
   path: string; // SKILL.md
 }
 
+/** A card in the Skills tab's Recommended list (D317–D321): the catalog entry plus this computer's state. */
+export interface SuggestedSkill {
+  id: string;
+  name: string;
+  /** One plain sentence on what it does for you. */
+  what: string;
+  /** A tool (MarkItDown) is installed and checked by its Setup check, named in `check`. */
+  kind: "skill" | "plugin" | "tool";
+  /** Where to read it on GitHub. */
+  link: string;
+  /** The Setup check behind it: "Install with Claude" for all, and a tool's whole state. */
+  check: string;
+  /** Where it comes from, for the card: "obra/superpowers". */
+  from: string;
+  starter: boolean;
+  /** The kind of project it is good for; null when it suits any. */
+  fits: "web" | "react" | null;
+  needsPython: boolean;
+  tooltip: {
+    unattended: "yes" | "note" | "person";
+    watch: string;
+    /** How to turn it off, only where the usual switch does not cover it. */
+    off: string | null;
+  };
+  /**
+   * installed-elsewhere: on this computer but not put there by the board's Install, so it never removes it.
+   * unknown: a tool, whose state is its Setup check's.
+   */
+  status: "not-installed" | "installed" | "installed-elsewhere" | "unknown";
+  /** A plugin with no skills has no switch in the Skills list, so its card carries one. null: no card switch. */
+  enabled: boolean | null;
+  /** What it needs that this computer lacks, e.g. "LibreOffice". */
+  missing: string[];
+  running: "install" | "remove" | null;
+  /** The end of the output of the last install or remove that failed. */
+  error: string | null;
+}
+
 export interface DiffFile {
   file: string;
   status: string;
@@ -1053,5 +1091,7 @@ export type WsMessage =
   | { type: "providers.out"; out: ProviderOut[] }
   | { type: "setup.updated"; check: SetupCheckResult }
   | { type: "setup.output"; id: string; chunk: string }
+  | { type: "skills.suggested"; skill: SuggestedSkill }
+  | { type: "skills.output"; id: string; chunk: string }
   | { type: "codex.updated"; status: { found: boolean; command: string; version: string | null; signedIn: "chatgpt" | "api-key" | null; line: string; linked: boolean } }
   | { type: "health.updated"; health: { loggedIn: boolean; authMethod: string | null; cliVersion: string | null; sdkVersion: string; error: string | null; checkedAt: string } };
