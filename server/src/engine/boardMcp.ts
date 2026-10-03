@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { Repo } from "../repo.ts";
 import type { Bus } from "../bus.ts";
 import type { Blocked, Mode, Project, Run, Stage, Task, TaskQuestion } from "../types.ts";
-import { EFFORTS } from "../types.ts";
+import { EFFORTS, accessOf, isAnswerPipeline } from "../types.ts";
 import { searchBoard } from "../search.ts";
 
 export interface BoardCtx {
@@ -27,10 +27,16 @@ const stageSchema = z.object({
   provider: z.string().min(1).max(40).optional(),
 });
 
-/** Mode a new task in this project may have: autonomous needs both policy switches allowed. */
-export function allowedMode(project: Project, wanted: Mode): Mode {
-  if (wanted === "autonomous" && (project.policy.autonomous === "forbidden" || project.policy.worktrees === "forbidden")) return "supervised";
-  return wanted;
+/**
+ * Mode a new task in this project may have: autonomous needs both policy switches allowed. A lookup
+ * (`pipeline` all answer stages) needs no worktree; it needs the project to let autonomous work
+ * outside a sandbox, where the live system it reads from can be reached (D352).
+ */
+export function allowedMode(project: Project, wanted: Mode, pipeline?: Stage[]): Mode {
+  if (wanted !== "autonomous") return wanted;
+  if (project.policy.autonomous === "forbidden") return "supervised";
+  if (pipeline && isAnswerPipeline(pipeline)) return accessOf(project.policy) === "full" ? "autonomous" : "supervised";
+  return project.policy.worktrees === "forbidden" ? "supervised" : wanted;
 }
 
 export function defaultPipeline(repo: Repo, project: Project): Stage[] {

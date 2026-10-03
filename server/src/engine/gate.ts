@@ -1113,6 +1113,22 @@ function hasOpenWildcard(tokens: string[]): boolean {
 }
 
 /**
+ * A command the board can read word for word: the text with harmless redirections to nowhere taken
+ * out, or null when something in it could write a file or run a command the board cannot see.
+ */
+function plainShell(text: string): string | null {
+  // Folded in from the public lineage's detector (D228): an escaped or unbalanced quote can make the
+  // tokenizer misread where a command ends, and a script block or a lone `&` runs something else.
+  if (/\\["']/.test(text)) return null;
+  if ((text.match(/"/g) ?? []).length % 2 || (text.match(/'/g) ?? []).length % 2) return null;
+  if (!quotesWrapWords(text)) return null;
+  if (/[{}]|\$\{|(^|[^&>])&($|[^&>])/.test(text.replace(/"[^"]*"|'[^']*'/g, "Q"))) return null;
+  const stripped = text.replace(/\d?>\s*(?:\/dev\/null|\$null|nul)\b/gi, "").replace(/2>&1/g, "");
+  if (/[>`]|\$\(|<\(|<<|\bInvoke-Expression\b|\biex\b|\|\s*Out-File\b|\bSet-Content\b|\bAdd-Content\b/i.test(stripped)) return null;
+  return stripped;
+}
+
+/**
  * True when a shell command can only read — so a supervised run may run it without a card (D202).
  * Deliberately narrow: no redirection into a file, no command substitution, no heredoc, no interpreter,
  * no variable (the board cannot see where `$X` points), no `..` or home folder, every program on the
@@ -1123,15 +1139,8 @@ function hasOpenWildcard(tokens: string[]): boolean {
 export function isReadOnlyShell(cmd: string, cwd: string): boolean {
   const text = cmd.trim();
   if (!text || credentialRisk("Bash", { command: text })) return false;
-  // Folded in from the public lineage's detector (D228): an escaped or unbalanced quote can make the
-  // tokenizer misread where a command ends, and a script block or a lone `&` runs something else.
-  if (/\\["']/.test(text)) return false;
-  if ((text.match(/"/g) ?? []).length % 2 || (text.match(/'/g) ?? []).length % 2) return false;
-  if (!quotesWrapWords(text)) return false;
-  if (/[{}]|\$\{|(^|[^&>])&($|[^&>])/.test(text.replace(/"[^"]*"|'[^']*'/g, "Q"))) return false;
-  // Harmless redirections to nowhere, then anything that could still write or run something else.
-  const stripped = text.replace(/\d?>\s*(?:\/dev\/null|\$null|nul)\b/gi, "").replace(/2>&1/g, "");
-  if (/[>`]|\$\(|<\(|<<|\bInvoke-Expression\b|\biex\b|\|\s*Out-File\b|\bSet-Content\b|\bAdd-Content\b/i.test(stripped)) return false;
+  const stripped = plainShell(text);
+  if (stripped === null) return false;
   if (TRAVERSAL.test(text) || HOME_REF.test(text)) return false;
   // Single quotes keep a `$` literal in both shells (`sed -n '$p'`); anywhere else it is a variable.
   if (/\$[A-Za-z_]|%[A-Za-z_][\w()]{2,}%/.test(stripped.replace(/'[^']*'/g, "Q"))) return false;
@@ -1205,6 +1214,111 @@ export function autonomousGate(toolName: string, input: Record<string, unknown>,
     if (why) {
       return { behavior: "deny", message: `Refused because ${why}. Autonomous runs stay inside ${cwd}; the board handles branches, merges and cleanup.` };
     }
+  }
+  return { behavior: "allow", updatedInput: input };
+}
+
+// ---------------------------------------------------------------- trusted commands (D353)
+
+/** Programs that run the file they are given: the rule names the file, never the program alone. */
+const SCRIPT_RUNNERS = new Set(["bash", "sh", "zsh", "python", "python3", "py", "node", "tsx", "deno", "bun", "pwsh", "powershell", "ruby", "php", "perl"]);
+const PACKAGE_RUNNERS = new Set(["npm", "pnpm", "yarn"]);
+
+/**
+ * What "Always allow" remembers for one simple command: the program and the script or subcommand it
+ * names (`bash scripts/get.sh`, `git push`, `npm run test`), so different arguments still match. Null
+ * when there is nothing lasting to name — `python -c "…"` runs whatever is written after it.
+ */
+function trustRuleOf(tokens: string[]): string | null {
+  if (!tokens.length || /^\w+=/.test(tokens[0])) return null;
+  const program = programOf(tokens[0]);
+  const next = tokens[1];
+  if (SCRIPT_RUNNERS.has(program)) return next && !next.startsWith("-") ? `${tokens[0]} ${next}` : null;
+  // A script run by its own path is the whole rule.
+  if (/[\\/]/.test(tokens[0]) || !next || !/^[a-z][\w:-]*$/i.test(next)) return tokens[0];
+  if (PACKAGE_RUNNERS.has(program) && next === "run" && tokens[2]) return `${tokens[0]} run ${tokens[2]}`;
+  return `${tokens[0]} ${next}`;
+}
+
+/** The simple commands of a shell command that are neither a `cd` inside the project nor read-only. */
+function unreadSegments(stripped: string, cwd: string): string[][] {
+  const out: string[][] = [];
+  for (const segment of shellSegments(stripped)) {
+    const tokens = tokenize(segment).filter(Boolean);
+    if (!tokens.length) continue;
+    if (CD_PROGRAMS.has(programOf(tokens[0])) && !cdViolation(tokens, cwd)) continue;
+    if (isReadOnlyShell(segment, cwd)) continue;
+    out.push(tokens);
+  }
+  return out;
+}
+
+const matchesRule = (tokens: string[], rule: string): boolean => {
+  const line = tokens.join(" ");
+  return line === rule || line.startsWith(`${rule} `);
+};
+
+/** Tools "Always allow" can cover: a command, or a connector's tool by name. Never a file edit. */
+const trustable = (toolName: string) => SHELL_TOOLS.has(toolName) || toolName.startsWith("mcp__");
+
+/**
+ * The rules "Always allow" would add for this call, or null when it cannot be covered: a file edit,
+ * something that shows a credentials file, or a command the board cannot read word for word.
+ */
+export function trustRules(toolName: string, input: Record<string, unknown>, cwd: string): string[] | null {
+  if (!trustable(toolName)) return null;
+  if (!SHELL_TOOLS.has(toolName)) return [toolName];
+  const text = String(input.command ?? "").trim();
+  if (!text || credentialRisk(toolName, { command: text })?.level === "prints") return null;
+  const stripped = plainShell(text);
+  if (stripped === null) return null;
+  const rules = new Set<string>();
+  for (const tokens of unreadSegments(stripped, cwd)) {
+    const rule = trustRuleOf(tokens);
+    if (!rule) return null;
+    rules.add(rule);
+  }
+  return rules.size ? [...rules] : null;
+}
+
+/**
+ * True when the project's trusted list covers this call: every part of the command is read-only, a
+ * `cd` inside the project, or starts with a trusted rule. Showing a credentials file is never covered.
+ */
+export function isTrusted(toolName: string, input: Record<string, unknown>, cwd: string, rules: string[]): boolean {
+  if (!rules.length || !trustable(toolName)) return false;
+  if (!SHELL_TOOLS.has(toolName)) return rules.includes(toolName);
+  const text = String(input.command ?? "").trim();
+  if (!text || credentialRisk(toolName, { command: text })?.level === "prints") return false;
+  const stripped = plainShell(text);
+  if (stripped === null) return false;
+  const rest = unreadSegments(stripped, cwd);
+  return rest.length > 0 && rest.every((tokens) => rules.some((rule) => matchesRule(tokens, rule)));
+}
+
+// ---------------------------------------------------------------- a lookup with nobody asked (D352)
+
+/**
+ * Gate for an autonomous lookup where the project gives it full access: it works in the project's own
+ * folder and reaches what the project reaches, and nothing waits on a card. What is left are the two
+ * things no setting allows: a lookup changing a file, and credentials landing in the transcript.
+ */
+export function handsOffGate(toolName: string, input: Record<string, unknown>): GateResult {
+  if (toolName === "AskUserQuestion") {
+    return { behavior: "deny", message: "No one is watching this run. Make a reasonable choice, say so in your answer, and continue." };
+  }
+  if (PATH_KEYS[toolName]) {
+    return {
+      behavior: "deny",
+      message: "A lookup changes nothing, so it does not write or edit files. Work it out with a command instead of saving a script; if the answer truly needs a file changed, say which and why in your reply.",
+    };
+  }
+  const risk = credentialRisk(toolName, input);
+  if (risk?.level === "prints") {
+    return {
+      behavior: "deny",
+      message: `Refused: that would put what is in ${risk.files.slice(0, 3).join(", ")} (passwords or keys) into the transcript, which the board keeps. Let a script load the file instead of showing it.`,
+    };
   }
   return { behavior: "allow", updatedInput: input };
 }

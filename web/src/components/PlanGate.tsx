@@ -91,6 +91,11 @@ function DebateGate({ d, gate }: { d: TaskDetail; gate: Gate }) {
         {gate.critic ? (
           <span className="text-[11.5px] text-ink-400">critiqued by <span className="font-mono">{modelLabel({ model: gate.critic.model, provider: gate.critic.provider === "anthropic" ? null : gate.critic.provider })}</span> — pick the plan to build from</span>
         ) : null}
+        {(gate.rounds ?? 1) > 1 || gate.agreed ? (
+          <span className={`rounded border px-1.5 py-0.5 text-[10.5px] ${gate.agreed ? "border-iris/40 text-iris" : "border-ink-700 text-ink-400"}`}>
+            {gate.rounds ?? 1} {gate.rounds === 1 ? "round" : "rounds"}{gate.agreed ? " · the critic agreed" : ""}
+          </span>
+        ) : null}
       </div>
 
       {objections.length ? (

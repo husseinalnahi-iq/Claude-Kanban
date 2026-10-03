@@ -1,11 +1,11 @@
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
-import { type StageState, type TaskCard, type TaskStatus } from "../../../server/src/types.ts";
+import { isAnswerPipeline, type TaskCard, type TaskStatus } from "../../../server/src/types.ts";
 import { api, type ProjectWithGit } from "../lib/api.ts";
 import { useWs, useWsReconnect } from "../lib/ws.ts";
 import { navigate } from "../lib/router.ts";
 import { useAppData } from "../lib/store.tsx";
-import { clock, cost, PRIORITY_META, shortModel, STATUS_META, TYPE_META, until } from "../lib/format.ts";
-import { Button, Chip, ModeChip, Select, inputCls } from "../components/ui.tsx";
+import { clock, cost, PRIORITY_META, STATUS_META, TYPE_META, until } from "../lib/format.ts";
+import { Button, Chip, ModeChip, Select, StageDots, inputCls } from "../components/ui.tsx";
 import { NewTaskForm } from "../components/forms.tsx";
 import { LimitBanner, SerialSwitch } from "../components/QueueControls.tsx";
 import { DepGraph } from "../components/DepGraph.tsx";
@@ -16,16 +16,7 @@ import { openTaskOn } from "./TaskDrawer.tsx";
 import { COLUMN_SIZES, setViewPrefs, useViewPrefs } from "../lib/view.ts";
 import { ChecklistLine } from "../components/Checklist.tsx";
 import { phase, stoppedProvider, waitingOn, waitLine } from "../lib/phase.ts";
-import { isAnswerStage, stageLabel } from "../../../server/src/engine/answer.ts";
 
-const DOT: Record<StageState, string> = {
-  idle: "border border-ink-500 bg-transparent",
-  running: "bg-amber breathe",
-  approval: "bg-rose pulse-rose",
-  success: "bg-moss",
-  failed: "bg-rust",
-};
-const STAGE_LETTER = { plan: "P", code: "C", review: "R", custom: "·" } as const;
 
 /**
  * The board's columns. Everything between "queued" and "review" is one In progress column, always on
@@ -190,7 +181,7 @@ const Card = memo(function Card({
         ) : null}
         <span className="ml-auto flex items-center gap-1">
           {card.live ? <Chip className="border-rose/50 text-rose" title="Touches a live system: plan approval is on and review runs on the live review model">prod</Chip> : null}
-          <ModeChip mode={card.mode} ownBranch={card.own_branch} />
+          <ModeChip mode={card.mode} ownBranch={card.own_branch} lookup={isAnswerPipeline(card.pipeline)} />
         </span>
       </div>
       <div className="text-[13px] font-medium leading-snug text-ink-100">{card.title}</div>
@@ -275,14 +266,7 @@ const Card = memo(function Card({
         {/* The stage chips get the row. The hover actions sit over its right end and do not take space
             while hidden: laid out beside the chips, the invisible buttons squeezed them to one letter. */}
         <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
-          {card.pipeline.map((s, i) => (
-            <span key={i} className={`flex items-center gap-1 font-mono text-[10px] ${s.provider ? "text-iris" : "text-ink-400"}`} title={`${stageLabel(s)} · ${s.model}${s.provider ? ` via ${s.provider}` : ""} · ${s.effort} · ${card.stage_states[i]}`}>
-              <span className={`inline-block h-2 w-2 rounded-full ${DOT[card.stage_states[i] ?? "idle"]}`} />
-              <span className="text-ink-500">{isAnswerStage(s) ? "A" : STAGE_LETTER[s.stage]}</span>
-              {shortModel(s.model).split("-")[0]}
-              {s.fast ? <span className="text-amber" title="Fast mode">↯</span> : null}
-            </span>
-          ))}
+          <StageDots card={card} />
         </div>
         {card.cost_usd > 0 ? <span className="shrink-0 font-mono text-[10.5px] text-ink-400">{cost(card.cost_usd)}</span> : null}
         <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center gap-1.5 pl-3 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 bg-ink-850 group-hover:bg-ink-800">

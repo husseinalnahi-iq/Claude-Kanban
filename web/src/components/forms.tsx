@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { DependsOn } from "./DependsOn.tsx";
-import type { Mode, Stage } from "../../../server/src/types.ts";
+import { accessOf, type Mode, type Stage } from "../../../server/src/types.ts";
 import { api, type FolderProbe, type ProjectWithGit } from "../lib/api.ts";
 import type { StageStat } from "../../../server/src/routes/analytics.ts";
 import { useAppData } from "../lib/store.tsx";
@@ -15,6 +15,13 @@ export function autonomousBlocked(p: ProjectWithGit): string | null {
   if (p.policy.autonomous === "forbidden") return "This project's policy forbids autonomous runs.";
   if (p.policy.worktrees === "forbidden") return "This project's policy forbids worktrees (autonomous runs need one).";
   if (!p.isGit) return "Not a git repository — autonomous runs need a worktree.";
+  return null;
+}
+
+/** Why a lookup here cannot run autonomous, or null when it can: it needs no worktree, only the project's say-so (D352). */
+export function lookupAutoBlocked(p: ProjectWithGit): string | null {
+  if (p.policy.autonomous === "forbidden") return "This project's policy forbids autonomous runs.";
+  if (accessOf(p.policy) !== "full") return "This project keeps autonomous inside a sandbox, and a lookup cannot work from there. Change it in Settings → this project → Autonomous access.";
   return null;
 }
 

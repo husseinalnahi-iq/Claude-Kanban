@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AppDeps } from "../app.ts";
 import { mergeSchema, stageSchema } from "./projects.ts";
-import { ANTHROPIC_PROVIDER_ID, EFFORTS, HELPER_MODELS, IMAGE_PROVIDERS, MODEL_SURFACES, type ModelSurface } from "../types.ts";
+import { ANTHROPIC_PROVIDER_ID, DEBATE_MODES, DEBATE_ROUND_CEILING, EFFORTS, HELPER_MODELS, IMAGE_PROVIDERS, MODEL_SURFACES, type DebateMode, type ModelSurface } from "../types.ts";
 import { PROVIDER_PRESETS } from "../engine/providers/presets.ts";
 import { fileURLToPath } from "node:url";
 
@@ -73,7 +73,13 @@ const patchSchema = z.object({
   hiddenModels: z.object(Object.fromEntries(MODEL_SURFACES.map((k) => [k, z.array(z.string().max(300)).max(2000)])) as Record<ModelSurface, z.ZodArray<z.ZodString>>).partial().optional(),
   tiers: z.object({ cheap: tierRef, balanced: tierRef, strong: tierRef }).optional(),
   providers: z.array(providerSchema).max(30).optional(),
-  debate: z.object({ enabled: z.boolean(), critic: tierRef.extend({ effort: z.enum(EFFORTS as [string, ...string[]]) }) }).optional(),
+  debate: z.object({
+    enabled: z.boolean(),
+    critic: tierRef.extend({ effort: z.enum(EFFORTS as [string, ...string[]]) }),
+    // Older clients send only the two fields above; the shipped mode keeps them on one round.
+    mode: z.enum(DEBATE_MODES as [DebateMode, ...DebateMode[]]).default("once"),
+    rounds: z.number().int().min(2).max(DEBATE_ROUND_CEILING).default(3),
+  }).optional(),
   delegateTimeoutMin: z.number().int().min(1).max(240).optional(),
   autoSizing: z.boolean().optional(),
   autoResume: z.boolean().optional(),
@@ -83,6 +89,10 @@ const patchSchema = z.object({
   chatModel: z.string().trim().min(1).max(120).optional(),
   chatEffort: z.enum(EFFORTS as [string, ...string[]]).optional(),
   chatProvider: z.string().trim().min(1).max(64).optional(),
+  chatKeepAlive: z.boolean().optional(),
+  chatKeepAliveMessage: z.string().trim().min(1).max(300).optional(),
+  chatKeepAliveMaxHours: z.number().int().min(1).max(72).optional(),
+  nextStepsSuggestions: z.boolean().optional(),
   specModel: z.string().trim().min(1).max(120).optional(),
   specEffort: z.enum(EFFORTS as [string, ...string[]]).optional(),
   loadUserPlugins: z.boolean().optional(),

@@ -20,7 +20,7 @@ function toolResultText(content: unknown): string {
   return JSON.stringify(content, null, 2);
 }
 
-function inputSummary(name: string, input: any): string {
+export function inputSummary(name: string, input: any): string {
   if (!input || typeof input !== "object") return "";
   if (input.command) return String(input.command);
   if (input.file_path) return String(input.file_path);
@@ -91,6 +91,12 @@ const EventView = memo(function EventView({ ev }: { ev: EventRow }) {
   }
   if (ev.type === "delegate:raw") return null;
   if (ev.type === "debate:skipped") return <div className="font-mono text-[11px] text-ink-500">debate skipped · {p.reason}</div>;
+  if (ev.type === "debate:round") {
+    const where = `debate round ${p.round}${p.of ? ` of ${p.of}` : ""}`;
+    if (p.agreed) return <div className="font-mono text-[11px] text-iris">{where} · no objections left — the critic agrees</div>;
+    if (p.note) return <div className="font-mono text-[11px] text-ink-500">{where} · {p.note}</div>;
+    return <div className="font-mono text-[11px] text-ink-500">{where} · {p.objections} {p.objections === 1 ? "objection" : "objections"}</div>;
+  }
   if (ev.type === "debate:decision") return <div className="font-mono text-[11px] text-iris">plan chosen: {p.choice}</div>;
   if (ev.type === "plan:approved") return <div className="font-mono text-[11px] text-iris">plan approved{p.edited ? " (edited by you)" : ""}</div>;
   if (ev.type === "turns:continued") return <div className="font-mono text-[11px] text-amber">turn limit reached — continued in the same session ({p.n})</div>;

@@ -5,7 +5,7 @@ import type {
   ImageProvider,
   Approval, ApprovalDecision, EventRow, Message, Milestone, Mode, Policy, Project, Run, RunListItem, RunStatus,
   Attachment, Note, MergePolicy, Priority, ProjectEnv, Settings, Stage, StageName, Task, TaskCard, TaskStatus, TaskType, UsageLimit,
-  Provider, RunRole, CostSource, TierRef, Schedule, Chat, ChatMessage, Effort, SpecVersion, ProviderOut, UsageTotals,
+  Provider, RunRole, CostSource, TierRef, Schedule, Chat, ChatFile, ChatFolder, ChatMessage, Effort, SpecVersion, ProviderOut, UsageTotals,
 } from "./types.ts";
 import { ANTHROPIC_PROVIDER_ID, DEFAULT_MERGE, EMPTY_ENV, HELPER_MODELS, type HelperModel } from "./types.ts";
 import { DEFAULT_CHECKLIST } from "./engine/onboarding.ts";
@@ -192,9 +192,34 @@ const toChat = (r: Row): Chat => ({
   effort: r.effort as Effort,
   provider: (r.provider as string) || ANTHROPIC_PROVIDER_ID,
   cost_usd: Number(r.cost_usd ?? 0),
+  folder_id: (r.folder_id as string) ?? null,
+  warm_at: (r.warm_at as string) ?? null,
+  keep_alive: r.keep_alive === undefined || r.keep_alive === null ? true : Number(r.keep_alive) === 1,
+  use_tools: Number(r.use_tools ?? 0) === 1,
+  mode: r.mode === "autonomous" ? "autonomous" : "supervised",
   archived_at: (r.archived_at as string) ?? null,
   created_at: r.created_at as string,
   updated_at: r.updated_at as string,
+});
+
+const toChatFile = (r: Row): ChatFile => ({
+  id: r.id as string,
+  chat_id: r.chat_id as string,
+  message_id: r.message_id === null || r.message_id === undefined ? null : Number(r.message_id),
+  name: r.name as string,
+  media_type: r.media_type as string,
+  bytes: Number(r.bytes),
+  path: r.path as string,
+  created_at: r.created_at as string,
+});
+
+const toChatFolder = (r: Row): ChatFolder => ({
+  id: r.id as string,
+  project_id: r.project_id as string,
+  name: r.name as string,
+  color: (r.color as ChatFolder["color"]) ?? null,
+  position: Number(r.position ?? 0),
+  created_at: r.created_at as string,
 });
 
 const toSpecVersion = (r: Row): SpecVersion => ({
@@ -334,6 +359,7 @@ const readHelperModel = (v: string | undefined): HelperModel => (HELPER_MODELS.i
 
 const str = (v: unknown) => (v === null ? null : String(v));
 const num = (v: unknown) => Number(v);
+const bool = (v: unknown) => (v ? 1 : 0);
 const js = (v: unknown) => JSON.stringify(v);
 
 const TASK_FACTS = "tasks.id, tasks.status, tasks.type, tasks.priority, tasks.depends_on_json, tasks.created_at, tasks.updated_at, tasks.done_at";
@@ -492,6 +518,10 @@ export class Repo {
       chatModel: m.get("chatModel") || "claude-sonnet-5-5",
       chatEffort: (m.get("chatEffort") as Effort) || "medium",
       chatProvider: m.get("chatProvider") || ANTHROPIC_PROVIDER_ID,
+      chatKeepAlive: (m.get("chatKeepAlive") ?? "true") !== "false",
+      chatKeepAliveMessage: m.get("chatKeepAliveMessage") || "Hi, just keeping this chat warm. Reply in one line.",
+      chatKeepAliveMaxHours: Number(m.get("chatKeepAliveMaxHours") ?? 8) || 8,
+      nextStepsSuggestions: (m.get("nextStepsSuggestions") ?? "true") !== "false",
       specModel: m.get("specModel") || "claude-opus-5-5",
       specEffort: (m.get("specEffort") as Effort) || "high",
       loadUserPlugins: (m.get("loadUserPlugins") ?? "true") !== "false",
@@ -766,10 +796,79 @@ export class Repo {
     return this.getChat(id)!;
   }
 
-  updateChat(id: string, patch: Partial<Pick<Chat, "title" | "session_id" | "model" | "effort" | "provider" | "cost_usd" | "archived_at">>): Chat {
-    const { sets, vals } = setClause(patch as Record<string, unknown>, { title: str, session_id: str, model: str, effort: str, provider: str, cost_usd: num, archived_at: str });
-    if (sets.length) this.stmt(`UPDATE chats SET ${sets.join(", ")}, updated_at = ? WHERE id = ?`).run(...vals, nowIso(), id);
+  updateChat(id: string, patch: Partial<Pick<Chat, "title" | "session_id" | "model" | "effort" | "provider" | "cost_usd" | "folder_id" | "warm_at" | "keep_alive" | "use_tools" | "mode" | "archived_at">>): Chat {
+    const { sets, vals } = setClause(patch as Record<string, unknown>, {
+      title: str, session_id: str, model: str, effort: str, provider: str, cost_usd: num, folder_id: str, warm_at: str, keep_alive: bool, use_tools: bool, mode: str, archived_at: str,
+    });
+    // Filing a chat, its switches, or its cache window moving are not activity: it keeps its place in a list sorted by when it was last used.
+    const quiet = new Set(["folder_id", "warm_at", "keep_alive", "use_tools", "mode"]);
+    const filingOnly = Object.keys(patch).every((k) => quiet.has(k) || (patch as Record<string, unknown>)[k] === undefined);
+    if (sets.length && filingOnly) this.stmt(`UPDATE chats SET ${sets.join(", ")} WHERE id = ?`).run(...vals, id);
+    else if (sets.length) this.stmt(`UPDATE chats SET ${sets.join(", ")}, updated_at = ? WHERE id = ?`).run(...vals, nowIso(), id);
     return this.getChat(id)!;
+  }
+
+  /** Chats whose cache window is open (a reply within the hour) and that are not archived: the ones worth watching. */
+  warmChats(): Chat[] {
+    return (this.stmt("SELECT * FROM chats WHERE warm_at IS NOT NULL AND archived_at IS NULL").all() as Row[]).map(toChat);
+  }
+
+  // ---------- chat files (D334) ----------
+  addChatFile(f: Omit<ChatFile, "id" | "created_at">): ChatFile {
+    const id = newId("cfl");
+    this.stmt("INSERT INTO chat_files(id, chat_id, message_id, name, media_type, bytes, path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(id, f.chat_id, f.message_id, f.name, f.media_type, f.bytes, f.path, nowIso());
+    return this.getChatFile(id)!;
+  }
+
+  getChatFile(id: string): ChatFile | undefined {
+    const r = this.stmt("SELECT * FROM chat_files WHERE id = ?").get(id) as Row | undefined;
+    return r && toChatFile(r);
+  }
+
+  listChatFiles(chatId: string): ChatFile[] {
+    return (this.stmt("SELECT * FROM chat_files WHERE chat_id = ? ORDER BY id").all(chatId) as Row[]).map(toChatFile);
+  }
+
+  /** Files attached but not yet sent: they ride with the next message. */
+  pendingChatFiles(chatId: string): ChatFile[] {
+    return (this.stmt("SELECT * FROM chat_files WHERE chat_id = ? AND message_id IS NULL ORDER BY id").all(chatId) as Row[]).map(toChatFile);
+  }
+
+  attachChatFiles(ids: string[], messageId: number): void {
+    for (const id of ids) this.stmt("UPDATE chat_files SET message_id = ? WHERE id = ?").run(messageId, id);
+  }
+
+  deleteChatFile(id: string): void {
+    this.stmt("DELETE FROM chat_files WHERE id = ?").run(id);
+  }
+
+  listChatFolders(projectId: string): ChatFolder[] {
+    return (this.stmt("SELECT * FROM chat_folders WHERE project_id = ? ORDER BY position, created_at").all(projectId) as Row[]).map(toChatFolder);
+  }
+
+  getChatFolder(id: string): ChatFolder | undefined {
+    const r = this.stmt("SELECT * FROM chat_folders WHERE id = ?").get(id) as Row | undefined;
+    return r && toChatFolder(r);
+  }
+
+  createChatFolder(projectId: string, name: string, color: ChatFolder["color"] = null): ChatFolder {
+    const id = newId("cf");
+    const last = this.stmt("SELECT COALESCE(MAX(position), -1) AS p FROM chat_folders WHERE project_id = ?").get(projectId) as { p: number };
+    this.stmt("INSERT INTO chat_folders(id, project_id, name, color, position, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(id, projectId, name, color, Number(last.p) + 1, nowIso());
+    return this.getChatFolder(id)!;
+  }
+
+  updateChatFolder(id: string, patch: { name?: string; color?: ChatFolder["color"]; position?: number }): ChatFolder {
+    const { sets, vals } = setClause(patch as Record<string, unknown>, { name: str, color: str, position: num });
+    if (sets.length) this.stmt(`UPDATE chat_folders SET ${sets.join(", ")} WHERE id = ?`).run(...vals, id);
+    return this.getChatFolder(id)!;
+  }
+
+  /** Removes the folder only: its chats are left unfiled, never deleted. */
+  deleteChatFolder(id: string): void {
+    this.stmt("UPDATE chats SET folder_id = NULL WHERE folder_id = ?").run(id);
+    this.stmt("DELETE FROM chat_folders WHERE id = ?").run(id);
   }
 
   deleteChat(id: string): void {
@@ -785,6 +884,12 @@ export class Repo {
   /** The board's updates in a chat after a message: what its cards did while you were away. */
   chatUpdatesSince(chatId: string, afterId: number): ChatMessage[] {
     return (this.stmt("SELECT * FROM chat_messages WHERE chat_id = ? AND id > ? AND role = 'update' ORDER BY id").all(chatId, afterId) as Row[]).map(toChatMessage);
+  }
+
+  /** Your own newest message in a chat: the board's keep-alives are left out, so they cannot count as activity. */
+  lastOwnChatMessage(chatId: string): ChatMessage | undefined {
+    const r = this.stmt("SELECT * FROM chat_messages WHERE chat_id = ? AND role = 'user' AND json_extract(meta_json, '$.keepalive') IS NULL ORDER BY id DESC LIMIT 1").get(chatId) as Row | undefined;
+    return r && toChatMessage(r);
   }
 
   /** The newest message in a chat of a role, or undefined. */

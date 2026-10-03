@@ -102,7 +102,7 @@ opens that page for you if not). A ZIP copy does not update itself — the one-l
    needs you shows as **needs you**. If a stage cannot do the work from where it runs — an autonomous
    run needs a live system it is sandboxed from, say — the card says **blocked · needs you** with the
    reason, and **Switch to supervised & run** carries on from that stage.
-5. **Review it**: when it reaches **Review**, open the card: the **Result** is on top, with the review's
+5. **Review it**: when it reaches **Review**, open the card: it opens on its **Result** tab, with the review's
    verdict. **Approve** lands the changes in your project; **Reject** keeps them aside with your reason,
    which the next run is told first. You can re-run any stage.
 
@@ -118,11 +118,13 @@ or focus, and **Versions** lists every version to preview or reuse.
 
 Press **✦ Chat** in the top bar (or the **c** key). A panel slides in beside the board: ask how
 something works, what to do next, or ask for something to be done. Claude answers from your project
-when it can; for anything else it makes a **task card** and says so — it never tells you what it
-cannot do.
+when it can — its files, the web, and its git history through read-only commands such as `git log`,
+`git status` or `git diff`, which run from the chat in a second instead of on a card; for anything
+else it makes a **task card** and says so — it never tells you what it cannot do.
 
 - **"Get me the latest purchase order."** — a lookup becomes an **answer card**: one step on Sonnet
-  that reads and reports, changes nothing, runs supervised, and starts at once. Related lookups share
+  that reads and reports, changes nothing, and starts at once. With the chat's switch on *autonomous*
+  it asks you nothing; on *supervised* a command that is not read-only waits for your Allow. Related lookups share
   one card. When it finishes, the answer is posted into the chat by itself, and Claude's next reply
   already knows it.
 - **"Make the header sticky."** — a change becomes a card on the board's usual stages. Claude says how
@@ -160,6 +162,104 @@ Approving, landing or discarding a task's work stays yours: Claude in the chat n
   Claude. Switching starts a fresh conversation that is handed the last 20 messages, so nothing said is
   lost. Codex and Gemini cannot run the chat (they are not Claude Code), but cards the chat makes can
   use them.
+
+### The Studio: the chat as the whole screen
+
+The **✦ Studio** tab (or the **0** key, or **⤢ Studio** in the chat panel) makes the chat the whole
+window. Nothing of the board is on screen until you press **Board** at the top left.
+
+- **Left: your chats** for the project (drag its edge to make the column wider or narrower; double-click
+  the edge to put it back). Switch projects with the list at the top. Group them by
+  **folders** you create and name (**+ folder**) or by **status**: *Needs you*, *Working*, *Quiet*,
+  *Archived*. Each folder is a bold heading in a colour of its own; hover it to change the colour,
+  rename it or remove it (the chats in it stay). Hover a chat for its icons: rename, move to a folder,
+  archive — or, under *Archived*, reopen and delete. Or **drag** a chat onto a folder, onto *Not in a
+  folder*, or onto *Archived*. To move or archive several at once, tick them (Ctrl-click, or Shift-click
+  for a run of them) and use the bar that appears above the list. **+ New chat** starts one; it is made
+  with your first message, so pressing it twice leaves nothing behind.
+- **Middle: the conversation**, the same chat as the panel, with the model, effort and mode pickers. Click
+  the title to rename the chat. The cache bar and **Keep warm** sit on the title row; the 5-hour window
+  is the one in the top bar.
+- **Right: the work this chat started** (its edge drags too). Every card it made, with its stages as
+  dots, what it is doing this minute, Claude's own steps (done, doing, still to do), its subtasks, its
+  one-line result once done, anything waiting on you — **Allow / Deny**, a question's options — and
+  **Start**, **stop**, **Retry** or **open**. Below, the **files** you attached and the cards produced
+  (screenshots, spreadsheets, PDFs): click one to open or download it in the browser, or hover it for
+  two small icons that **open it with its own app** on the computer the board runs on or **show it in
+  its folder** (Explorer, Finder). Then the **links** Claude or its cards mentioned.
+
+### Your chat's hour of cache
+
+Claude keeps a conversation cached for an hour after its last reply. A message within the hour is cheap:
+only the new words are read. A message after it is read again in full, at full price, however short it
+is. So the chat panel shows two thin bars above the conversation (in the Studio, the cache bar sits on
+the title row and the 5-hour window is the top bar's):
+
+- **cache**: how much of the hour is left, counted from Claude's last reply. Fifteen minutes before the
+  end it turns amber, a banner says so, and you get a pop-up and a desktop notification (the *Usage*
+  alert kind in 🔔): send your next idea before then.
+- **5h**: your Claude 5-hour usage window, the same number as the top bar's, with when it resets.
+
+**Keep warm** (the switch on the bar, on by default) sends the chat a short message five minutes before
+the hour ends if you have not written, so the hour starts again. Its reply is one line and shows as a
+quiet grey line, not as something you wrote. It costs one short, cached turn each time. It stops a few
+hours after your own last message in that chat (Settings → *Side chat* → *Stop after*, 8 hours by
+default), and never runs for an archived chat. Settings → *Side chat* also turns it off for every chat
+at once and changes the message it sends. On an API key, or once your subscription is drawing on usage
+credits, Claude's cache lasts five minutes instead of an hour; the bar still counts the hour.
+
+### Files and your own tools in the chat
+
+- **Attach a file**: the **⌲** button under any chat, or drop a file on the message box, or paste an
+  image. Images, PDFs, spreadsheets, Word files, CSV, text: the same kinds a task accepts, up to 10 MB.
+  The file goes with your next message; Claude opens images, PDFs and text itself, and for a spreadsheet
+  or Word file makes an answer card that reads it. A file waiting to go shows above the box with an ×
+  to take it back; a sent one shows on the message, and in the Studio's *Files* pane.
+- **my connectors and skills**: the switch next to it gives this chat your connected systems (Slack,
+  Gmail, Google Drive, your own MCP servers) and your skills, the way a task gets them (Settings → *Runs
+  & limits* decides whether your global plugins load). Off by default: their tool lists ride on every
+  message, so a plain question costs more with them on. Turn it on when you want the chat to look in
+  one of those systems itself instead of making a card; leave it off for questions about the project.
+  A one-line explanation sits under the box until you press *Got it*, and when a message you are
+  typing names a system people connect to Claude (Slack, your inbox, a Google Sheet, Notion, Jira…)
+  while the switch is off, a strip above the box offers to turn it on for this chat. Changing a file is
+  still a card's job either way.
+- **supervised / autonomous**: how the cards this chat makes will run. *Supervised* works in the
+  project's own folder and asks you before each change; *autonomous* works on its own branch without
+  asking and lands when you approve. Saying "autonomous" or "supervised" in a message decides for that
+  one card. A lookup card follows the switch too: under *autonomous* it runs in the project's own
+  folder, reaches what the project reaches (its scripts, its keys, the live system they talk to) and
+  asks nothing — it still changes nothing, an edit is refused, and so is a command that would show a
+  credentials file. A project can keep autonomous inside its sandbox instead (Settings → the project →
+  *Autonomous access* → *sandboxed*), and its lookups then run supervised. The chat tells you which
+  mode a card got and why.
+
+### ✦ What next?
+
+Under any chat, once Claude has answered, **✦ What next?** asks it for the next five things worth doing
+after this work: bugs to fix, security to tighten, follow-up edits once it lands, useful additions. One
+reply at the chat's model, only when you press it, and nothing is created until you say so ("do number
+2" makes the card). Settings → *Side chat* hides the button.
+
+## Know what a command does before you allow it
+
+A card waiting for your OK on a command now says, above the command, what it does in plain words:
+*Looks only · Git shows which files changed and what is staged*, or *Deletes · Deletes "node_modules
+dist", folders and all, without asking*. The icon moves the way the command does: an eye blinks for
+looking, a pen writes, a bin shakes for deleting, arrows travel for the internet, a gear turns for
+changes to the computer. A chain (`cd server && npm ci && npm test`) is explained part by part, and
+wears the highest risk of its parts; on a card in the chat or the Studio the parts and the command
+itself are folded behind *▸ N commands* until you want them. A card that would print credentials
+keeps its warning and a *Review in the task* link, with Allow and Deny beside it. It comes from a fixed table of common commands (git, npm and the
+other package managers, file commands, curl, docker, Python, PowerShell's cmdlets and more), so it is
+free and instant. A command the table does not know says so and offers **Ask Claude what it does**,
+one short answer from Claude's cheapest model, remembered so it is never paid for twice.
+
+Every task also has a **Commands** tab: every shell command it ran, is running or waits to run, newest
+first, each with its explanation, its state (done, failed, waiting for you, denied, running, stopped)
+and how it was let through (you were asked, the board's read-only rule, or the run's own call).
+Autonomous runs show here too, which is the point: they never ask. A card in the Studio's right pane
+has the same list under *Commands it ran, runs or waits to run*.
 
 ## Watch a task use the browser
 
@@ -280,7 +380,7 @@ keep working:
 | Ollama Pro (GLM, Kimi, Qwen… in Ollama's cloud) | $20 a month | **Ollama (agentic)**, then run `ollama signin` |
 | Alibaba Token Plan (Qwen) | $18 a month | **Qwen (Alibaba Token Plan)**. Alibaba allows it for interactive use only, so long unattended runs may break its terms |
 
-1. **Settings → Providers → Add from a preset**, pick the plan, paste its key and press **Test**.
+1. **Settings → Providers → Add a provider**, pick the plan, paste its key and press **Test**.
 2. In a task's pipeline (or the default one), leave **Plan** on Claude and set **Code** to the new provider.
 
 **When it runs out mid-task:** a used-up window (5-hour, weekly) pauses the task, which carries on by
@@ -556,8 +656,10 @@ Every stage runs on Claude through your Claude Code login by default. It does no
 run on a cheaper model, a local one, or another coding agent that is better at some kind of work — and
 a plan can be argued over by a second model before any code is written. Add providers in **Settings →
 Providers**; pick one per stage in any pipeline editor. Keys live in the board's own secrets file
-(`<stateDir>/secrets.json`), never in settings, and are redacted from logs. Every provider has a
-**Test** button that makes one tiny call through the exact path a stage would use.
+(`<stateDir>/secrets.json`), never in settings, and are redacted from logs. Each provider is one
+folded row — on/off switch, whether its key is set, how many models it can run right now — that opens
+to its settings (**Expand all** opens every one), and each has a **Test** button that makes one tiny
+call through the exact path a stage would use.
 
 Three ways to reach another model, each a different trade-off:
 
@@ -664,8 +766,18 @@ up marks it out before any stage fails on it.
 **Plan debate** (Settings → Models, or per stage) sends a finished plan to a second model, which lists
 its objections; the planner then answers each and revises. The task stops and shows you the original
 plan, the objections, and the revised plan side by side — nothing runs until you pick one (or write your
-own). One round, because an unbounded argument just spends money. Linking Codex sets the critic to
-Codex (the newest Sol, or the first model your account lists) at high effort, if you had not picked one.
+own). **How long they argue** is a setting, and both models are told the shape of the debate:
+
+- **One round** (the default): one critique, one revision. The critic is told there is no second
+  chance, so it lists everything that matters now.
+- **A set number of rounds**: the critic reads each revised plan and objects again, and both models
+  know which round is the last. A round with no objections ends it early.
+- **Until they agree**: rounds continue until the critic has no objections left — with a hard stop
+  at 10 rounds, because an unbounded argument just spends money.
+
+Each round is one critique call plus one revision, and the transcript shows every round. Linking
+Codex sets the critic to Codex (the newest Sol, or the first model your account lists) at high effort,
+if you had not picked one.
 
 ## Intake: the board decides how to run a task
 
@@ -936,8 +1048,15 @@ What stops an unattended run from doing damage, in Settings → *Runs & limits*:
   runs ask; a supervised run stops and asks on a card instead (see *Answer Claude's questions*).
 - **Credentials on approval cards** — a card that would print a `.env`, key or secrets file into the
   transcript says so in red, and the Approvals page's `y` shortcut will not allow it.
+- **Always allow** — an approval card for a command or a connector's tool has a third button. It
+  allows the call and adds a rule to the project's *Always allowed* list (Settings → the project): the
+  program and the script or subcommand it runs — `bash scripts/fetch.sh`, `npm run test`, `git push` —
+  so the same command with other arguments never asks again. Every part of a chained command must be
+  read-only or on the list; a redirect into a file, `$(…)`, or a command that shows a credentials file
+  still asks. A file edit, and code written on the spot (`python -c …`), cannot be always allowed.
 - **Fewer cards for reading** — supervised runs run commands that can only read (`grep`, `ls`,
-  `git log` …) inside the project without a card (Settings, on by default); anything that could write asks.
+  `git log` …) inside the project without a card (Settings, on by default), and so does the side chat;
+  anything that could write asks, or in the chat becomes a card.
 - **A shared checkout** — a supervised run notes what was already uncommitted when it started, leaves
   it alone, and lists the files it changed, so you commit only this task's work.
 - **A per-task cost ceiling** on top of the per-stage one. Three stages at $5 was already $15. Reaching
@@ -1006,7 +1125,11 @@ Each chat is one Claude Code session in the project folder, resumed on every mes
 (`resume: session_id`) with `includePartialMessages` so replies stream (`chat.delta`, sent only to the
 socket watching that chat). It loads the project's `CLAUDE.md` (`settingSources: ["project"]`) but not
 your global tool servers (`strictMcpConfig`), so it stays quick and cheap. Read tools are allowed;
-`Edit`, `Write`, `Bash`, subagents and `AskUserQuestion` are not offered, and anything else is refused.
+`Edit`, `Write`, subagents and `AskUserQuestion` are not offered, and anything else is refused. The
+shell is offered, but only a command that can only read passes (`isReadOnlyShell`, the supervised
+rule, under the same *read-only commands without a card* setting; the supervised `forceAsk` hook keeps
+a project settings file from letting a command past `canUseTool`); anything else is told to make a
+card, and the tool line explains the command from the Commands table.
 Reading stays inside the project folder and away from credential files (`.env`, key files): a page or
 file it reads could otherwise talk it into fetching your keys, and no approval card would show it.
 Its own board server can list cards (with a count per status; Done is counted, not listed), read one,
@@ -1031,7 +1154,47 @@ on your words to a task rather than invent instructions. A chat on another provi
 default `Settings.chatProvider`) must be Anthropic-compatible; its options start from the computer's
 environment, its cost is estimated from the provider's prices, and the $1.50 ceiling is metered per
 message (D301). API: `/api/projects/:id/chats`, `/api/chats/:id`
-(`PATCH` title/model/effort/provider/archived, `DELETE`), `/api/chats/:id/messages`, `/send`, `/stop`.
+(`PATCH` title/model/effort/provider/archived/folder_id, `DELETE`), `/api/chats/:id/messages`, `/send`, `/stop`.
+
+The **Studio** (`web/src/views/Studio.tsx`, route `#/studio/<project>`) is the same chat full-screen:
+`ChatThread` holds the conversation and the message box and is shared with the side panel, which only
+adds its header and chat list around it. A chat's `folder_id` names a row in `chat_folders`
+(`/api/projects/:id/chat-folders`, `PATCH`/`DELETE /api/chat-folders/:id`); deleting a folder only
+unfiles its chats, and filing a chat does not move its `updated_at`, so the list keeps its order. The
+server pushes a project's whole folder list on every change (`chat.folders`). The Studio's right pane
+reads the cards with this chat's `chat_id` from the board's live cards, their attachments
+(`/api/tasks/:id/attachments`, kept live by `attachment.added`) and every `http(s)` address in the
+chat's assistant and update messages and the cards' summaries.
+
+**Cache window** (`engine/cacheWindow.ts`, D331–D333): a Claude reply stamps `chats.warm_at`; a chat on
+another provider gets none. `ChatService.tick()` (every 30 s from `index.ts`, or by hand in tests) looks
+at every warm, unarchived chat: at 15 minutes left it publishes `chat.expiring` once per window (the
+web raises a *usage* alert and the bar's banner); at 5 minutes left, if `Settings.chatKeepAlive` and
+`chats.keep_alive` are on and the person's own last message is within `chatKeepAliveMaxHours`, it
+calls `send()` with `{ keepalive: true }`, which stores the user row with `meta.keepalive`, never
+retitles the chat, and puts a one-line-please note in front of `chatKeepAliveMessage`; past the hour it
+clears `warm_at`. Keep-alive rows are left out of `lastOwnChatMessage`, so they cannot keep themselves
+going. Setting `warm_at`, `keep_alive` or `folder_id` does not move `updated_at`.
+
+**Files and tools** (D334, D335): `chat_files` rows point at files under `<state>/chat-files/<chat>/`
+(`POST /api/chats/:id/files`, same extension table and 10 MB cap as attachments; `GET /api/chat-files/:id/raw`;
+`DELETE` only while unsent). `send()` picks up the chat's unsent files, stamps them with the message id,
+lists them in `meta.files`, and puts an `[Attached files]` block with their paths in front of the text;
+`readViolation` gets the chat's files folder as an extra read root. `chats.use_tools` switches the
+options from the lean set (`settingSources: ["project"]`, `strictMcpConfig`, no skills or plugins,
+`ENABLE_CLAUDEAI_MCP_SERVERS=false`) to a task's (`["user","project"]` when `loadUserPlugins`, your MCP
+servers, skills and connectors), and `canUseTool` then allows `mcp__*` and `Skill`; Bash and edits stay
+refused either way. `POST /api/chats/:id/suggest` sends `NEXT_STEPS_PROMPT` as a `meta.suggest` message
+(D338); `Settings.nextStepsSuggestions` only hides the button.
+
+**Command explanations** (D336, D337): `engine/explain.ts` is a pure table (git subcommands, package
+managers, file, network, install, run and system commands, PowerShell cmdlets) with `splitChain` for
+`&&`/`|`/`;` and `shellWords` for quotes; `explainCommand` returns parts, a summary and the highest
+risk. The web imports it directly. `POST /api/explain` (`engine/explainAi.ts`) asks Haiku for a command
+the table does not know, one turn, no tools, cached per process; only a button calls it.
+`GET /api/tasks/:id/commands` (`engine/commands.ts`) reads `tool_use` blocks with a `command` out of the
+task's run events, pairs them with `tool_result` blocks and approvals for their state, and marks how
+each was let through (`approval`, `auto` from the `auto_allowed` event, else `autonomous`).
 
 ## Live browser view
 
@@ -1122,10 +1285,12 @@ the dashboard, and *Tidy the Done column* goes by that date too.
 
 ## Sessions: continue one, or start a new task?
 
-Each stage is its own session. Within a task, stages hand results forward and the **Chat** tab resumes
-the latest one, so you can say "also rename that variable" while the work is fresh.
+Each stage is its own session. Within a task, stages hand results forward and the box at the bottom
+of the **Activity** tab resumes the latest one, so you can say "also rename that variable" while the
+work is fresh. Activity is the live stream of everything the task does, step by step; the box sits
+under it.
 
-**While a stage is running, Chat still works.** Type on the Chat tab and the message is handed to Claude
+**While a stage is running, the box still works.** Type on the Activity tab and the message is handed to Claude
 at its next step — it does not stop, and nothing already done is redone. Use it for "use the header's
 blue", "skip the tests for now", "also rename that". Your message appears in the transcript, so you can
 see it was read. Stages delegated to another provider's CLI or HTTP API cannot take a message mid-run;

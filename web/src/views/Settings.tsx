@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ANTHROPIC_PROVIDER_ID, EFFORTS, type HelperModel, type ImageProvider, type ModelEntry, type ModelSurface, type Note, type Provider, type Settings as SettingsShape, type Stage, type TierRef } from "../../../server/src/types.ts";
+import { ANTHROPIC_PROVIDER_ID, accessOf, DEBATE_ROUND_CEILING, EFFORTS, type DebateMode, type HelperModel, type ImageProvider, type ModelEntry, type ModelSurface, type Note, type Provider, type Settings as SettingsShape, type Stage, type TierRef } from "../../../server/src/types.ts";
 import { api, type ProjectWithGit, type WorktreeRow } from "../lib/api.ts";
 import { ago } from "../lib/format.ts";
 import { useAppData } from "../lib/store.tsx";
@@ -21,6 +21,13 @@ import { SessionToolsPanel } from "./settings/ToolsSettings.tsx";
 import { ImageSettings } from "./settings/ImageSettings.tsx";
 import { COLUMN_SIZES, FONTS, setViewPrefs, THEMES, useViewPrefs, ZOOMS } from "../lib/view.ts";
 import { disableNotifications, enableNotifications, notifyState } from "../lib/notify.ts";
+
+/** What each debate length means, in cost terms: a round is one critique call plus one revision. */
+const DEBATE_MODE_HINTS: Record<DebateMode, string> = {
+  once: "One critique and one revision, then you pick. Both models are told there is no second round, so the critic lists everything that matters now.",
+  rounds: "The critic reads each revised plan and objects again; both models are told which round is the last. A round that ends with no objections ends the debate early. Each round is one critique call plus one revision.",
+  until_agree: `Rounds continue until the critic has no objections left to the revised plan. It stops at ${DEBATE_ROUND_CEILING} rounds regardless, so a stubborn pair cannot spend without end.`,
+};
 
 function Section({ title, hint, children }: { title: string; hint?: string; children: React.ReactNode }) {
   return (
@@ -247,6 +254,57 @@ function ProjectSettings({ project }: { project: ProjectWithGit }) {
         </Field>
         {opt("worktrees")}
         {opt("autonomous")}
+        <div className="flex items-center justify-between rounded-md border border-ink-700 px-3 py-2 md:col-span-2">
+          <span className="flex items-center gap-1.5 text-[12.5px] text-ink-200">
+            Autonomous access
+            <Help width="w-[360px]">
+              What an autonomous <b>lookup</b> (an answer card: it reads and reports, and changes nothing) may reach.
+              <br />
+              <br />
+              <b className="text-amber">Full access</b> — it runs in this project's own folder, uses its scripts and
+              keys, reaches the live systems they reach, and nothing waits for your Allow. Editing a file and showing
+              what is in a credentials file are still refused, and so is anything on your blocked list.
+              <br />
+              <br />
+              <b className="text-cyan">Sandboxed</b> — autonomous never leaves its private copy, so a lookup runs
+              supervised instead and asks before each command that is not read-only.
+              <br />
+              <br />
+              A card that changes something is not affected: autonomous work stays in its own copy until you approve it.
+            </Help>
+          </span>
+          <div className="flex overflow-hidden rounded border border-ink-600 font-mono text-[11px]">
+            {([["full", "full access"], ["sandboxed", "sandboxed"]] as const).map(([v, label]) => (
+              <button key={v} onClick={() => setPolicy({ ...policy, access: v })} className={`px-2 py-0.5 cursor-pointer ${accessOf(policy) === v ? (v === "full" ? "bg-amber/25 text-amber" : "bg-cyan/25 text-cyan") : "text-ink-400"}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="rounded-md border border-ink-700 px-3 py-2 md:col-span-2">
+          <div className="flex items-center gap-1.5 text-[12.5px] text-ink-200">
+            Always allowed
+            <Help width="w-[340px]">
+              Commands that run without a card in this project. “Always allow” on a card adds one: the program and
+              the script or subcommand it runs, so the same command with other arguments is covered too. A command
+              that shows a credentials file still asks, every time.
+            </Help>
+          </div>
+          {(policy.trusted ?? []).length ? (
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              {(policy.trusted ?? []).map((rule) => (
+                <span key={rule} className="flex items-center gap-1.5 rounded border border-ink-600 bg-ink-850 px-1.5 py-0.5 font-mono text-[11px] text-ink-200">
+                  {rule}
+                  <button className="cursor-pointer text-ink-500 hover:text-rust" title="Ask about this command again" aria-label={`Stop always allowing ${rule}`} onClick={() => setPolicy({ ...policy, trusted: (policy.trusted ?? []).filter((r) => r !== rule) })}>
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : (
+            <div className="mt-1 text-[11.5px] text-ink-500">Nothing yet. Press “Always allow” on a card to stop being asked about that command.</div>
+          )}
+        </div>
       </div>
       <div className="mt-4"><ErrorLine error={error} /></div>
       <div className="mt-4 flex justify-between">
@@ -254,7 +312,7 @@ function ProjectSettings({ project }: { project: ProjectWithGit }) {
         <Button variant="danger" busy={busy} onClick={() => void removeProject()}>
           Remove project
         </Button>
-        <Button variant="primary" busy={busy} onClick={() => run(async () => { await api.patchProject(project.id, { name, policy: { worktrees: policy.worktrees, autonomous: policy.autonomous, maxConcurrent: policy.maxConcurrent } }); await reloadProjects(); })}>
+        <Button variant="primary" busy={busy} onClick={() => run(async () => { await api.patchProject(project.id, { name, policy: { worktrees: policy.worktrees, autonomous: policy.autonomous, maxConcurrent: policy.maxConcurrent, access: accessOf(policy), trusted: policy.trusted ?? [] } }); await reloadProjects(); })}>
           Save project
         </Button>
       </div>
@@ -442,6 +500,10 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [chatModel, setChatModel] = useState("claude-sonnet-5-5");
   const [chatEffort, setChatEffort] = useState<SettingsShape["chatEffort"]>("medium");
   const [chatProvider, setChatProvider] = useState(ANTHROPIC_PROVIDER_ID);
+  const [chatKeepAlive, setChatKeepAlive] = useState(true);
+  const [chatKeepAliveMessage, setChatKeepAliveMessage] = useState("");
+  const [chatKeepAliveMaxHours, setChatKeepAliveMaxHours] = useState(8);
+  const [nextSteps, setNextSteps] = useState(true);
   const [hiddenModels, setHiddenModels] = useState<Record<ModelSurface, string[]>>({ chat: [], stages: [], helpers: [], pictures: [] });
   const [specModel, setSpecModel] = useState("claude-opus-5-5");
   const [specEffort, setSpecEffort] = useState<SettingsShape["specEffort"]>("high");
@@ -452,7 +514,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   });
   const [providers, setProviders] = useState<Provider[]>([]);
   const [delegateTimeout, setDelegateTimeout] = useState(30);
-  const [debate, setDebate] = useState<SettingsShape["debate"]>({ enabled: false, critic: { provider: "anthropic", model: "claude-sonnet-5-5", effort: "medium" } });
+  const [debate, setDebate] = useState<SettingsShape["debate"]>({ enabled: false, critic: { provider: "anthropic", model: "claude-sonnet-5-5", effort: "medium" }, mode: "once", rounds: 3 });
   const [maxTaskCost, setMaxTaskCost] = useState(15);
   const [maxRepeats, setMaxRepeats] = useState(8);
   const [retention, setRetention] = useState(30);
@@ -510,6 +572,10 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
     take((s) => s.chatModel, setChatModel);
     take((s) => s.chatEffort, setChatEffort);
     take((s) => s.chatProvider ?? ANTHROPIC_PROVIDER_ID, setChatProvider);
+    take((s) => s.chatKeepAlive ?? true, setChatKeepAlive);
+    take((s) => s.chatKeepAliveMessage ?? "", setChatKeepAliveMessage);
+    take((s) => s.chatKeepAliveMaxHours ?? 8, setChatKeepAliveMaxHours);
+    take((s) => s.nextStepsSuggestions ?? true, setNextSteps);
     take((s) => s.hiddenModels ?? { chat: [], stages: [], helpers: [], pictures: [] }, setHiddenModels);
     take((s) => s.specModel, setSpecModel);
     take((s) => s.specEffort, setSpecEffort);
@@ -549,7 +615,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           models, defaultPipeline: pipeline, globalCap, serial, maxForcedParallel: forced, defaultMaxConcurrent: defMax,
           maxTurnsPerStage: maxTurns, maxCostPerStageUsd: maxCost, autoContinueTurns: autoContinue, planApproval, liveReviewModel, followLatestModels: followLatest, autoUpdateEngine: autoEngine,
           maxSubagentDepth: subDepth, maxConcurrentSubagents: subMax, cacheableSystemPrompt: cacheable,
-          triageModel, chatModel, chatEffort, chatProvider, hiddenModels, imageModel, specModel, specEffort, visionModel: vision.model, visionProvider: vision.provider, autoSizing, tiers,
+          triageModel, chatModel, chatEffort, chatProvider, chatKeepAlive, chatKeepAliveMessage: chatKeepAliveMessage.trim() || undefined, chatKeepAliveMaxHours, nextStepsSuggestions: nextSteps, hiddenModels, imageModel, specModel, specEffort, visionModel: vision.model, visionProvider: vision.provider, autoSizing, tiers,
           providers: providers.map((p) => ({ ...p, models: p.models.filter((m) => m.id.trim()).map((m) => ({ ...m, label: m.label.trim() || m.id })) })),
           delegateTimeoutMin: delegateTimeout,
           debate,
@@ -736,6 +802,24 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
               />
             </div>
           </Field>
+          <Field label="How long they argue" hint={DEBATE_MODE_HINTS[debate.mode]}>
+            <div className="flex flex-wrap items-center gap-2">
+              <Select value={debate.mode} onChange={(e) => setDebate({ ...debate, mode: e.target.value as DebateMode })}>
+                <option value="once">One round</option>
+                <option value="rounds">A set number of rounds</option>
+                <option value="until_agree">Until they agree</option>
+              </Select>
+              {debate.mode === "rounds" ? (
+                <label className="flex items-center gap-2 text-[12.5px] text-ink-300">
+                  <input
+                    type="number" min={2} max={DEBATE_ROUND_CEILING} className={`${inputCls} w-20 font-mono`} value={debate.rounds}
+                    onChange={(e) => setDebate({ ...debate, rounds: Math.max(2, Math.min(DEBATE_ROUND_CEILING, Number(e.target.value) || 2)) })}
+                  />
+                  rounds
+                </label>
+              ) : null}
+            </div>
+          </Field>
         </Section>
         </>) : null}
 
@@ -825,6 +909,49 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
             </Field>
           </div>
           <p className="mt-2 text-[11.5px] text-ink-500">Each chat can switch model and effort from its own panel; this is only where new chats start.</p>
+
+          <div className="mt-4 border-t border-ink-800 pt-4">
+            <div className="flex items-start gap-3">
+              <Switch on={chatKeepAlive} onChange={setChatKeepAlive} title="Keep chats cached" />
+              <div className="min-w-0 flex-1">
+                <div className="text-[13px] text-ink-100">Keep chats warm</div>
+                <p className="mt-0.5 text-[11.5px] leading-relaxed text-ink-400">
+                  Claude keeps a conversation cached for an hour after its last reply; a message after that is read again in full, at full price. Every
+                  chat shows a bar with the time left and warns 15 minutes before the end. With this on, the board sends the message below 5 minutes before
+                  the end, so the hour starts again. Each chat has its own <i>Keep warm</i> switch too; this one turns it off for all of them.
+                </p>
+              </div>
+            </div>
+            {chatKeepAlive ? (
+              <div className="mt-3 grid gap-3 md:grid-cols-[1fr_180px]">
+                <Field label="The message it sends" hint="Keep it short: its reply is one line, and both are cached. It shows in the chat as a quiet line, not as something you wrote.">
+                  <input className={inputCls} value={chatKeepAliveMessage} onChange={(e) => setChatKeepAliveMessage(e.target.value)} placeholder="Hi, just keeping this chat warm. Reply in one line." maxLength={300} />
+                </Field>
+                <Field label="Stop after" hint="Hours since your own last message in a chat. Without a stop, every chat you ever used would get a message an hour, for ever.">
+                  <Select wide value={String(chatKeepAliveMaxHours)} onChange={(e) => setChatKeepAliveMaxHours(Number(e.target.value))}>
+                    {[1, 2, 4, 8, 12, 24, 48, 72].map((h) => (
+                      <option key={h} value={h}>{h === 1 ? "1 hour" : h < 24 ? `${h} hours` : `${h / 24} day${h > 24 ? "s" : ""}`}</option>
+                    ))}
+                  </Select>
+                </Field>
+              </div>
+            ) : null}
+            <p className="mt-2 text-[11.5px] text-ink-500">Archived chats never get one. The 5-hour usage bar next to the cache bar is the same number as the top bar's.</p>
+          </div>
+
+          <div className="mt-4 border-t border-ink-800 pt-4">
+            <div className="flex items-start gap-3">
+              <Switch on={nextSteps} onChange={setNextSteps} title="Offer ✦ What next? in chats" />
+              <div className="min-w-0 flex-1">
+                <div className="text-[13px] text-ink-100">✦ What next? button</div>
+                <p className="mt-0.5 text-[11.5px] leading-relaxed text-ink-400">
+                  A button in every chat, in the panel and the Studio, that asks Claude for the next five things worth doing after this work: bugs to fix,
+                  security to tighten, follow-up edits once it lands, useful additions. One reply at the chat's model, only when you press it; nothing is
+                  created until you say so.
+                </p>
+              </div>
+            </div>
+          </div>
         </Section>
 
         <Section
@@ -1097,11 +1224,11 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
             <input type="checkbox" className="mt-1 accent-amber" checked={readOnlyNoCard} onChange={(e) => setReadOnlyNoCard(e.target.checked)} />
             <span>
-              Supervised tasks run read-only commands without a card
+              Supervised tasks and the side chat run read-only commands without a card
               <span className="block text-[11.5px] text-ink-400">
                 <span className="font-mono">grep</span>, <span className="font-mono">ls</span>, <span className="font-mono">git log</span>,{" "}
                 <span className="font-mono">sed -n</span> and the like, inside the project. Anything that could write a file, run a program or touch a
-                credentials file still asks. They show in the transcript as allowed by the board.
+                credentials file still asks. They show in the transcript as allowed by the board. Off, the side chat makes a card for every command too.
               </span>
             </span>
           </label>

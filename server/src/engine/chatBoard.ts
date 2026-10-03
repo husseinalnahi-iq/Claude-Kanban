@@ -144,9 +144,11 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
       if (built && "error" in built) return fail(built.error);
       const pipeline = built?.pipeline ?? defaultPipeline(repo, project);
       const answer = isAnswerPipeline(pipeline);
-      // A lookup only reads: it needs no worktree, and an autonomous run's sandbox could not reach a live
-      // system to read it from (D284).
-      const mode: Mode = answer ? "supervised" : allowedMode(project, args.mode ?? "supervised");
+      // The message's choice first, then the chat's own switch (D344), then the board's default. A
+      // lookup follows it too: under autonomous it runs in the project's own folder with nobody asked,
+      // where the project gives autonomous that access (D352); otherwise it is supervised (D284).
+      const wanted: Mode = args.mode ?? (chatId ? repo.getChat(chatId)?.mode : undefined) ?? "supervised";
+      const mode: Mode = allowedMode(project, wanted, pipeline);
       const t = repo.createTask({
         project_id: projectId,
         title: args.title.trim(),
@@ -168,14 +170,14 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
         void runner.triage(t.id, "classify", { decided: { pipeline: Boolean(built), live: answer || args.live !== undefined } }).catch(() => {});
       }
       onCard({ id: t.id, title: t.title, action: "created" });
-      const downgraded = args.mode === "autonomous" && mode === "supervised";
+      const downgraded = wanted === "autonomous" && mode === "supervised";
       return text({
         created: brief(t),
         note: [
           answer
-            ? "An answer card: one stage that reads and reports, supervised, and it lands in Done with its answer. Start it now if the user asked for the result."
+            ? `An answer card: one stage that reads and reports, and it lands in Done with its answer. ${mode === "autonomous" ? "It runs autonomous: in the project's own folder, and nothing is asked." : "It runs supervised: a command that is not read-only waits for the user's Allow."} Start it now if the user asked for the result.`
             : "It is in Backlog. Tell the user how it will run (mode, and why) and offer to start it now or schedule it.",
-          downgraded ? (answer ? "It runs supervised: a lookup needs no branch of its own." : "This project does not allow autonomous runs, so it is supervised.") : "",
+          downgraded ? (answer ? "This project keeps autonomous inside a sandbox, which a lookup cannot work from, so it is supervised. Full access is a switch in the project's settings." : "This project does not allow autonomous runs, so it is supervised.") : "",
           "Its result is posted into this chat when it finishes.",
         ].filter(Boolean).join(" "),
       });
@@ -193,8 +195,10 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
       if (built && "error" in built) return fail(built.error);
       const pipeline = built?.pipeline;
       const answer = isAnswerPipeline(pipeline ?? t.pipeline);
-      // An answer card is always supervised on the main checkout (D284); anything else asks the project.
-      const mode: Mode | undefined = answer ? (t.mode === "supervised" ? undefined : "supervised") : args.mode && allowedMode(project, args.mode);
+      // A lookup may be autonomous only where the project gives autonomous full access (D352): one
+      // that was autonomous as a change card is checked again when it becomes a lookup.
+      const allowed = allowedMode(project, args.mode ?? t.mode, pipeline ?? t.pipeline);
+      const mode: Mode | undefined = answer ? (allowed === t.mode ? undefined : allowed) : args.mode && allowed;
       const ownBranch = answer ? (t.own_branch ? false : undefined) : args.own_branch;
       try {
         runner.assertReconfigurable(t, { mode, pipeline, own_branch: ownBranch });
@@ -216,7 +220,7 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
       else publish(updated);
       onCard({ id: t.id, title: updated.title, action: "updated" });
       const refused = args.mode === "autonomous" && updated.mode !== "autonomous";
-      return text({ updated: brief(updated), ...(refused ? { note: answer ? "An answer card runs supervised." : "This project does not allow autonomous runs, so it stays supervised." } : {}) });
+      return text({ updated: brief(updated), ...(refused ? { note: answer ? "This project keeps autonomous inside a sandbox, which a lookup cannot work from, so it stays supervised." : "This project does not allow autonomous runs, so it stays supervised." } : {}) });
     },
 
     queueTask(args: { task_id: string }) {
@@ -386,9 +390,9 @@ export function createChatBoardServer(deps: ChatBoardDeps, projectId: string, ch
       tool("board_get_task", "Read one card: its spec, status, summary and pipeline.", { task_id: z.string() }, async (a) => h.getTask(a)),
       tool("board_create_task",
         "Create a card in Backlog: a short title and a spec that says what done looks like, in the user's terms. " +
-          'stages: [{stage:"answer"}] for a lookup, question or report: one stage that reads and reports, changes nothing, runs supervised and lands in Done with its answer. ' +
+          'stages: [{stage:"answer"}] for a lookup, question or report: one stage that reads and reports, changes nothing and lands in Done with its answer. ' +
           "For work that changes something, leave stages out for the board's default, or list plan/code/review with the model and effort the user asked for. " +
-          "mode: supervised unless the user chose autonomous. live: true only when the card will change a live system.",
+          "mode: only when the user named one in their message; left out, the chat's own mode switch applies. live: true only when the card will change a live system.",
         {
           title: z.string().min(1).max(200),
           spec_md: z.string().max(20_000),

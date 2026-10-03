@@ -1,6 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode, type RefObject, type SelectHTMLAttributes } from "react";
 import { createPortal } from "react-dom";
 import { pageZoom } from "../lib/view.ts";
+import type { StageState, TaskCard } from "../../../server/src/types.ts";
+import { isAnswerStage, stageLabel } from "../../../server/src/engine/answer.ts";
+import { shortModel } from "../lib/format.ts";
 
 type Variant = "primary" | "ghost" | "danger" | "outline" | "go";
 
@@ -77,12 +80,19 @@ export function ModeHelp({ align = "left" }: { align?: "left" | "right" }) {
       <b className="text-cyan">Supervised</b> — Claude works directly in your project folder, and every
       single file write or command becomes a card you Allow or Deny. Nothing happens without you.
       Slower, but it is the only mode for a repo where an unreviewed write is unacceptable.
+      <br />
+      <br />
+      <b className="text-ink-100">A lookup</b> (an answer card) changes nothing, so under autonomous it
+      runs in your project folder, reaches what the project reaches, and asks nothing — when the
+      project's <i>autonomous access</i> is Full access.
     </Help>
   );
 }
 
-export function ModeChip({ mode, ownBranch }: { mode: "autonomous" | "supervised"; ownBranch?: boolean }) {
-  return mode === "autonomous" ? (
+export function ModeChip({ mode, ownBranch, lookup }: { mode: "autonomous" | "supervised"; ownBranch?: boolean; lookup?: boolean }) {
+  return mode === "autonomous" && lookup ? (
+    <Chip className="border-amber/40 text-amber bg-amber/5" title="Autonomous lookup: runs in the project's own folder and asks nothing. It reads and reports; it changes nothing">auto</Chip>
+  ) : mode === "autonomous" ? (
     <Chip className="border-amber/40 text-amber bg-amber/5" title="Autonomous: runs in its own git worktree, merged on Approve">auto</Chip>
   ) : ownBranch ? (
     <Chip className="border-cyan/40 text-cyan bg-cyan/5" title="Supervised on its own branch: every write is an approval card, and the work lands only when you approve">supervised · branch</Chip>
@@ -227,6 +237,67 @@ export function Chevron({ className = "" }: { className?: string }) {
   );
 }
 
+const ICON = { fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+
+/** A box with its lid: put away, kept. */
+export function ArchiveIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg aria-hidden viewBox="0 0 16 16" width="13" height="13" className={`shrink-0 ${className}`} {...ICON}>
+      <path d="M2 3.5h12v3H2zM3 6.5v6h10v-6M6.5 9.5h3" />
+    </svg>
+  );
+}
+
+/** An arrow turning back: bring it out again. */
+export function RestoreIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg aria-hidden viewBox="0 0 16 16" width="13" height="13" className={`shrink-0 ${className}`} {...ICON}>
+      <path d="M3 7.5h7a3 3 0 0 1 0 6H6M5.5 5 3 7.5 5.5 10" />
+    </svg>
+  );
+}
+
+export function FolderIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg aria-hidden viewBox="0 0 16 16" width="13" height="13" className={`shrink-0 ${className}`} {...ICON}>
+      <path d="M2 4.5a1 1 0 0 1 1-1h3.5l1.5 1.5H13a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z" />
+    </svg>
+  );
+}
+
+export function TrashIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg aria-hidden viewBox="0 0 16 16" width="13" height="13" className={`shrink-0 ${className}`} {...ICON}>
+      <path d="M3 4.5h10M6.5 4.5v-1h3v1M4.5 4.5l.6 8h5.8l.6-8M6.8 7v3.5M9.2 7v3.5" />
+    </svg>
+  );
+}
+
+export function PaperclipIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg aria-hidden viewBox="0 0 16 16" width="15" height="15" className={`shrink-0 ${className}`} {...ICON}>
+      <path d="M10.5 5.5 6.2 9.8a1.3 1.3 0 0 0 1.8 1.8l5-5a2.8 2.8 0 0 0-4-4l-5 5a4.2 4.2 0 0 0 6 6l4-4" />
+    </svg>
+  );
+}
+
+/** An arrow leaving a box: open it outside the board, on this computer. */
+export function OpenIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg aria-hidden viewBox="0 0 16 16" width="13" height="13" className={`shrink-0 ${className}`} {...ICON}>
+      <path d="M7 3H3.5v9.5H13V9M9.5 2.5H13.5V6.5M13.5 2.5 7.5 8.5" />
+    </svg>
+  );
+}
+
+export function PencilIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg aria-hidden viewBox="0 0 16 16" width="13" height="13" className={`shrink-0 ${className}`} {...ICON}>
+      <path d="M3 13h3l7-7-3-3-7 7zM9 4l3 3" />
+    </svg>
+  );
+}
+
 /**
  * Whether this browser lets the page style the open list of a <select> (Chrome and Edge 135+). Where
  * it does, an option can carry a second line (`data-note`); where it does not, the list is the
@@ -362,3 +433,29 @@ export function AnchoredPanel({
     document.body,
   );
 }
+
+const STAGE_DOT: Record<StageState, string> = {
+  idle: "border border-ink-500 bg-transparent",
+  running: "bg-amber breathe",
+  approval: "bg-rose pulse-rose",
+  success: "bg-moss",
+  failed: "bg-rust",
+};
+const STAGE_LETTER = { plan: "P", code: "C", review: "R", custom: "·" } as const;
+
+/** A card's stages as dots: which ran, which runs, which failed; the letter says which stage, the word which model. */
+export function StageDots({ card }: { card: Pick<TaskCard, "pipeline" | "stage_states"> }) {
+  return (
+    <>
+      {card.pipeline.map((s, i) => (
+        <span key={i} className={`flex items-center gap-1 font-mono text-[10px] ${s.provider ? "text-iris" : "text-ink-400"}`} title={`${stageLabel(s)} · ${s.model}${s.provider ? ` via ${s.provider}` : ""} · ${s.effort} · ${card.stage_states[i] ?? "idle"}`}>
+          <span className={`inline-block h-2 w-2 rounded-full ${STAGE_DOT[card.stage_states[i] ?? "idle"]}`} />
+          <span className="text-ink-500">{isAnswerStage(s) ? "A" : STAGE_LETTER[s.stage]}</span>
+          {shortModel(s.model).split("-")[0]}
+          {s.fast ? <span className="text-amber" title="Fast mode">↯</span> : null}
+        </span>
+      ))}
+    </>
+  );
+}
+

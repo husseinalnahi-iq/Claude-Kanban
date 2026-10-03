@@ -22,14 +22,14 @@ type RateLimitInfo = {
 };
 import { RunQueue } from "./queue.ts";
 import { buildStagePrompt, type PromptCtx } from "./prompts.ts";
-import { autonomousGate, blockedCommand, escalationHint, isReadOnlyShell, isSafeMcp, killsByName, markitdownRead, READ_ONLY_TOOLS, readViolation, serverRule } from "./gate.ts";
+import { autonomousGate, blockedCommand, escalationHint, handsOffGate, isReadOnlyShell, isSafeMcp, isTrusted, killsByName, markitdownRead, READ_ONLY_TOOLS, readViolation, serverRule, trustRules } from "./gate.ts";
 import { credentialRisk } from "./credentials.ts";
 import { allowedMode, createBoardServer } from "./boardMcp.ts";
 import { CONFIDENCE_TO_APPLY, serialiseFileConflicts, triageTask, type Sizing, type TriageResult, type TriageSubtask } from "./triage.ts";
 import { describeImage, describeImageVia } from "./vision.ts";
 import { LEAN } from "./lean.ts";
 import { applyOnboardingResult } from "./onboarding.ts";
-import { buildCriticPrompt, buildRevisionPrompt, extractRevisedPlan, parseCritique } from "./debate.ts";
+import { buildCriticPrompt, buildRevisionPrompt, debateRoundLimit, extractRevisedPlan, extractRevisionAnswers, parseCritique } from "./debate.ts";
 import { BROWSER_SERVER, PLAYWRIGHT_PLUGIN_TOOLS, browserCaption, browserDecision, browserServer } from "./browser.ts";
 import { BrowserWatch } from "./browserWatch.ts";
 import { CLOUDFLARE_TOKEN_REF, IMAGE_PREFIX, IMAGE_SERVER, POLLINATIONS_KEY_REF, claudeCodeCommand, createImageServer, generateImage, imageMakerLine, imageReadiness, type FetchFn, type ImageConfig, type ImageStatus } from "./images.ts";
@@ -48,7 +48,7 @@ import { QuotaReader, type LiveQuota } from "./providers/usage.ts";
 import type { Resolved, StageInvocation } from "./providers/types.ts";
 import { saveAttachment } from "../routes/attachments.ts";
 import { pickBrowser, realProbe } from "../setup/probe.ts";
-import { ANTHROPIC_PROVIDER_ID, ARTIFACT_EXTS, EFFORTS, MARKITDOWN_TOOL, usesWorktree, MAX_ATTACHMENT_BYTES, attachmentKind, supportsFastMode, type ClaudeModelsResult, type FastModeStatus } from "../types.ts";
+import { ANTHROPIC_PROVIDER_ID, ARTIFACT_EXTS, DEBATE_ROUND_CEILING, EFFORTS, MARKITDOWN_TOOL, accessOf, isHandsOff, usesWorktree, MAX_ATTACHMENT_BYTES, attachmentKind, supportsFastMode, type ClaudeModelsResult, type FastModeStatus } from "../types.ts";
 import { claudeUpgrades, fromSdk, type SdkModelInfo } from "./claudeModels.ts";
 import { BROWSER_AGENT, helperAgents, usesHelper } from "./helpers.ts";
 import { applyChecklistTool } from "./checklist.ts";
@@ -358,7 +358,7 @@ function eventType(msg: SDKMessage): string {
  * Supervised runs: force every non-read-only tool through the approval card, even when a settings
  * file pre-allows it (a PreToolUse "ask" overrides allow rules). See docs/DECISIONS.md D20.
  */
-function forceAsk(readsFree: boolean, cwd: string): HookCallbackMatcher[] {
+export function forceAsk(readsFree: boolean, cwd: string): HookCallbackMatcher[] {
   // A read-only command skips the forced "ask" too, or a settings file's own "ask" would still put it
   // on a card; canUseTool then applies the same rule and records it (D202, D240).
   const freeShellRead = (name: string, input: unknown) =>
@@ -582,7 +582,15 @@ export class TaskRunner {
     if (!existsSync(project.path)) throw new PolicyError(`Project path does not exist: ${project.path}`);
     // Every stage's provider must exist, be switched on, and be allowed on that kind of stage.
     this.providers.assertPipeline(task.pipeline, task.mode);
-    if (task.mode === "autonomous") {
+    if (isHandsOff(task)) {
+      // A lookup under autonomous works in the project's own folder with nobody asked, so it needs no
+      // worktree; what it needs is the project saying autonomous may reach that far (D352).
+      if (project.policy.autonomous === "forbidden" || accessOf(project.policy) !== "full") {
+        throw new PolicyError(
+          `Project "${project.name}" does not let an autonomous lookup work outside a sandbox. Switch this card to supervised, or set the project's autonomous access to "Full access" in Settings.`,
+        );
+      }
+    } else if (task.mode === "autonomous") {
       if (project.policy.autonomous === "forbidden") {
         throw new PolicyError(
           `Project "${project.name}" forbids autonomous runs (policy.autonomous = "forbidden"). Switch this task to supervised mode — it will run in the main checkout with every write as an approval card.`,
@@ -1033,57 +1041,100 @@ export class TaskRunner {
   }
 
   /**
-   * One round: a critic run lists objections, the planner revises in its own session, and the task
-   * waits in Approval for the human to pick. Returns true when the pipeline must stop here (gated).
-   * A broken or silent critic never blocks work: the plan stands and the pipeline continues.
+   * A critic run lists objections, the planner revises in its own session, and the task waits in
+   * Approval for the human to pick. Settings → debate decides how many such rounds run (D339): one,
+   * a fixed number, or until the critic has no objections left — under a ceiling either way.
+   * Returns true when the pipeline must stop here (gated). A broken or silent critic never blocks
+   * work: the plan stands and the pipeline continues.
    */
   private async debate(a: { task: Task; project: Project; planRun: Run; stageIndex: number; cwd: string; ctl: PipelineCtl; critic: { provider: string; model: string; effort: Run["effort"] } }): Promise<boolean> {
     const { task, project, stageIndex, cwd, ctl, critic } = a;
     const planRun = this.repo.getRun(a.planRun.id)!;
     const original = planRun.result_md ?? "";
-    const skip = (reason: string) => {
-      const event = this.repo.insertEvent(planRun.id, "debate:skipped", { type: "debate_skipped", reason });
+    const publish = (type: string, payload: Record<string, unknown>) => {
+      const event = this.repo.insertEvent(planRun.id, type, payload);
       this.bus.publish({ type: "event", runId: planRun.id, taskId: task.id, event });
+    };
+    const skip = (reason: string) => {
+      publish("debate:skipped", { type: "debate_skipped", reason });
       return false;
     };
     if (!original.trim()) return skip("the plan stage produced no text to critique");
     if (ctl.stopped) return false;
 
-    const criticRun = this.repo.createRun({
-      task_id: task.id, stage: "plan", stage_index: stageIndex, model: critic.model, effort: critic.effort, role: "critic",
-      provider: critic.provider && critic.provider !== ANTHROPIC_PROVIDER_ID ? critic.provider : null,
-    });
-    this.bus.publish({ type: "run.updated", run: criticRun });
+    const settings = this.repo.getSettings().debate;
+    const limit = debateRoundLimit(settings);
     const earlier = this.promptCtx(task, stageIndex, project).earlierResults;
-    const criticOutcome = await this.runQuery({
-      task, project, run: criticRun, cwd, ctl, stageStatus: "planning", disallowedTools: PLAN_DISALLOWED, verifyCommand: null,
-      prompt: buildCriticPrompt({ title: task.title, spec_md: task.spec_md, plan: original, earlier }),
-    });
-    if (ctl.stopped) return false;
-    if (!criticOutcome.ok) return skip(`the critic failed: ${criticOutcome.error ?? "no result"}`);
-    const critique = parseCritique(this.repo.getRun(criticRun.id)?.result_md ?? "");
-    if (!critique.objections.length) return skip("the critic had no objections");
-
-    // The planner answers in its own session when it has one; otherwise the plan travels with the critique.
     const planner = this.providers.resolve(planRun.provider);
-    const revision = await this.runQuery({
-      task, project, run: planRun, cwd, ctl, stageStatus: "planning", disallowedTools: PLAN_DISALLOWED, verifyCommand: null,
-      accumulate: true, promptEvent: true,
-      resume: planner.adapter.canResume ? planRun.session_id ?? undefined : undefined,
-      prompt: buildRevisionPrompt(critique.raw, planner.adapter.canResume && planRun.session_id ? undefined : original),
-    });
-    if (ctl.stopped) return false;
-    const revised = revision.ok ? extractRevisedPlan(this.repo.getRun(planRun.id)?.result_md) : "";
-    // A failed revision must not leave the stage marked failed: the original plan still stands.
-    if (!revision.ok) this.setRun(planRun.id, { status: "success", error: null, result_md: original });
+    // The planner answers in its own session when it has one; otherwise the plan travels with the critique.
+    const resumable = planner.adapter.canResume && !!planRun.session_id;
+
+    let plan = original;
+    let critique: ReturnType<typeof parseCritique> | undefined;
+    let criticRunId: string | undefined;
+    let previousAnswers = "";
+    let rounds = 0;
+    let agreed = false;
+    for (let n = 1; n <= (limit ?? DEBATE_ROUND_CEILING); n++) {
+      const round = { n, of: limit, last: n === (limit ?? DEBATE_ROUND_CEILING) };
+      const criticRun = this.repo.createRun({
+        task_id: task.id, stage: "plan", stage_index: stageIndex, model: critic.model, effort: critic.effort, role: "critic",
+        provider: critic.provider && critic.provider !== ANTHROPIC_PROVIDER_ID ? critic.provider : null,
+      });
+      this.bus.publish({ type: "run.updated", run: criticRun });
+      const criticOutcome = await this.runQuery({
+        task, project, run: criticRun, cwd, ctl, stageStatus: "planning", disallowedTools: PLAN_DISALLOWED, verifyCommand: null,
+        prompt: buildCriticPrompt({ title: task.title, spec_md: task.spec_md, plan, earlier, round, previousAnswers }),
+      });
+      if (ctl.stopped) return false;
+      if (!criticOutcome.ok) {
+        // A critic that breaks on a later round does not undo the rounds before it: the gate shows what was argued so far.
+        if (!rounds) return skip(`the critic failed: ${criticOutcome.error ?? "no result"}`);
+        publish("debate:round", { type: "debate_round", round: n, of: limit ?? null, objections: 0, note: `the critic failed: ${criticOutcome.error ?? "no result"}` });
+        break;
+      }
+      const parsed = parseCritique(this.repo.getRun(criticRun.id)?.result_md ?? "");
+      if (!parsed.objections.length) {
+        if (!rounds) return skip("the critic had no objections");
+        agreed = true;
+        publish("debate:round", { type: "debate_round", round: n, of: limit ?? null, objections: 0, agreed: true });
+        break;
+      }
+      critique = parsed;
+      criticRunId = criticRun.id;
+      publish("debate:round", { type: "debate_round", round: n, of: limit ?? null, objections: parsed.objections.length });
+
+      const revision = await this.runQuery({
+        task, project, run: planRun, cwd, ctl, stageStatus: "planning", disallowedTools: PLAN_DISALLOWED, verifyCommand: null,
+        accumulate: true, promptEvent: true,
+        resume: resumable ? planRun.session_id ?? undefined : undefined,
+        prompt: buildRevisionPrompt(parsed.raw, resumable ? undefined : plan, round),
+      });
+      if (ctl.stopped) return false;
+      rounds = n;
+      if (!revision.ok) {
+        // A failed revision must not leave the stage marked failed: the plan so far still stands.
+        this.setRun(planRun.id, { status: "success", error: null, result_md: plan });
+        break;
+      }
+      const answer = this.repo.getRun(planRun.id)?.result_md;
+      const revised = extractRevisedPlan(answer);
+      if (!revised.trim()) break;
+      plan = revised;
+      previousAnswers = extractRevisionAnswers(answer);
+    }
     if (usesWorktree(task)) await this.commitWorktree(task, `kanban(debate): ${task.title}`);
 
     this.setTask(task.id, {
       status: "approval",
-      note: "The plan was debated — pick the plan to build from.",
+      note: agreed
+        ? `The plan was debated until the critic agreed (${rounds} ${rounds === 1 ? "round" : "rounds"}) — pick the plan to build from.`
+        : limit === undefined
+          ? `The debate stopped after ${rounds} rounds without agreement — pick the plan to build from.`
+          : "The plan was debated — pick the plan to build from.",
       plan_gate: {
-        stage_index: stageIndex, critic_run_id: criticRun.id, critic: { provider: critic.provider, model: critic.model },
-        created_at: nowIso(), original, critique, revised,
+        stage_index: stageIndex, critic_run_id: criticRunId, critic: { provider: critic.provider, model: critic.model },
+        created_at: nowIso(), original, critique, revised: plan === original ? "" : plan, rounds, agreed,
       },
     });
     return true;
@@ -1141,6 +1192,7 @@ export class TaskRunner {
       stage: stage.stage,
       customPrompt: stage.prompt,
       mode: task.mode,
+      handsOff: isHandsOff(task),
       task: { id: task.id, title: task.title, spec_md: task.spec_md },
       branch: task.branch,
       baseSha: task.base_sha,
@@ -1293,6 +1345,8 @@ export class TaskRunner {
 
     const settings = this.repo.getSettings();
     const autonomous = task.mode === "autonomous";
+    // A lookup under autonomous: the project's own folder, its own gate, and nothing on a card (D352).
+    const handsOff = isHandsOff(task);
     // The board's own browser, one per session; see browser.ts for why not the Playwright plugin's.
     const browserDir = join(tmpdir(), "claude-kanban-browser", run.id);
     // Outside its worktree an autonomous run may read only these: this task's attachments, its own
@@ -1340,6 +1394,11 @@ export class TaskRunner {
       if (note) this.log(run.id, `\n[board] ${note}\n  ${command}\n`);
       return note;
     };
+    const handsOffDecision = (toolName: string, input: Record<string, unknown>) => {
+      const decision = handsOffGate(toolName, input);
+      if (decision.behavior === "deny") this.log(run.id, `\n[board] ${decision.message}\n`);
+      return decision;
+    };
     // Board tools are always allowed; handled here rather than via allowedTools so nothing shadows this callback.
     const canUseTool: CanUseTool = async (toolName, input, o) => {
       if (toolName.startsWith("mcp__board__")) return { behavior: "allow", updatedInput: input };
@@ -1358,6 +1417,7 @@ export class TaskRunner {
       // An image from the board's own tool lands inside the task's folder (the tool refuses any other
       // path): a card in a supervised run, like any new file; free in an autonomous one (D262).
       if (toolName.startsWith(IMAGE_PREFIX)) return autonomous ? { behavior: "allow", updatedInput: input } : this.askApproval(run, task.id, toolName, input, o);
+      if (handsOff) return handsOffDecision(toolName, input);
       // MarkItDown reads a document: free where a Read would be, otherwise refused or a card (D316).
       if (toolName === MARKITDOWN_TOOL && settings.markitdownInTasks) {
         const read = markitdownRead(input, a.cwd, readRoots);
@@ -1382,6 +1442,12 @@ export class TaskRunner {
         if (settings.autoAllowReadOnly && (readsKnownFolder || ((toolName === "Bash" || toolName === "PowerShell") && isReadOnlyShell(command, a.cwd)))) {
           const what = command || String((input as { file_path?: unknown; path?: unknown }).file_path ?? (input as { path?: unknown }).path ?? toolName);
           const event = this.repo.insertEvent(run.id, "board:auto-allowed", { type: "auto_allowed", tool: toolName, command: what });
+          this.bus.publish({ type: "event", runId: run.id, taskId: task.id, event });
+          return { behavior: "allow", updatedInput: input };
+        }
+        // What "Always allow" on an earlier card covers, read fresh: a card in this very run may have added it (D353).
+        if (isTrusted(toolName, input, a.cwd, this.repo.getProject(task.project_id)?.policy.trusted ?? [])) {
+          const event = this.repo.insertEvent(run.id, "board:auto-allowed", { type: "auto_allowed", tool: toolName, command: command || toolName, trusted: true });
           this.bus.publish({ type: "event", runId: run.id, taskId: task.id, event });
           return { behavior: "allow", updatedInput: input };
         }
@@ -1413,6 +1479,10 @@ export class TaskRunner {
             if (name.startsWith("mcp__board__") || name === QUESTION_TOOL || name.startsWith(IMAGE_PREFIX)) return {};
             const outright = refusedOutright(String(input.command ?? ""));
             if (outright) return deny(outright);
+            if (handsOff) {
+              const decision = handsOffDecision(name, input);
+              return decision.behavior === "deny" ? deny(decision.message) : {};
+            }
             const browser = browserDecision(name, input, true, a.cwd, browserDir);
             if (browser?.behavior === "allow") return {};
             if (browser?.behavior === "deny") return deny(refuse(browser.message).message);
@@ -1449,7 +1519,8 @@ export class TaskRunner {
       ...(lean ? { strictMcpConfig: true } : {}),
       ...(Object.keys(helpers).length ? { agents: helpers } : {}),
 
-      permissionMode: autonomous ? "acceptEdits" : "default",
+      // A lookup edits nothing, so there are no edits to accept: every call goes to its gate.
+      permissionMode: autonomous && !handsOff ? "acceptEdits" : "default",
       canUseTool,
       hooks: {
         PreToolUse: autonomous ? autonomousGuard : forceAsk(settings.autoAllowReadOnly, a.cwd),
@@ -2937,6 +3008,22 @@ export class TaskRunner {
     });
   }
 
+  /** Adds what this card asks for to the project's trusted commands, and says so in the transcript. */
+  private trustApproved(approval: Approval): void {
+    const { task, project } = this.load(approval.task_id);
+    const cwd = usesWorktree(task) && task.worktree_path ? task.worktree_path : project.path;
+    const rules = trustRules(approval.tool_name, (approval.input ?? {}) as Record<string, unknown>, cwd);
+    if (!rules) {
+      throw new ConflictError(
+        "The board cannot always allow this one: it changes a file, shows a credentials file, or runs something written on the spot, so there is nothing lasting to remember. Press Allow to let it through this once.",
+      );
+    }
+    const trusted = [...new Set([...(project.policy.trusted ?? []), ...rules])];
+    const updated = this.repo.updateProject(project.id, { policy: { ...project.policy, trusted } });
+    this.bus.publish({ type: "project.updated", project: updated });
+    this.log(approval.run_id, `\n[board] Always allowed in this project from now on: ${rules.join(", ")}. Remove it in Settings → this project.\n`);
+  }
+
   /** Answer a question card: question text → the option label(s) you chose, or what you typed. */
   answerApproval(id: string, answers: Record<string, string>): Approval {
     const approval = this.repo.getApproval(id);
@@ -2945,11 +3032,16 @@ export class TaskRunner {
     return this.decideApproval(id, "answered", null, answers);
   }
 
-  decideApproval(id: string, decision: "allow" | "deny" | "answered", note: string | null = null, answers?: Record<string, string>): Approval {
+  /**
+   * `always`: also stop asking for this command in this project (D353). Refused, with the card left
+   * waiting, when there is nothing lasting to remember — the person then presses plain Allow.
+   */
+  decideApproval(id: string, decision: "allow" | "deny" | "answered", note: string | null = null, answers?: Record<string, string>, always = false): Approval {
     const approval = this.repo.getApproval(id);
     if (!approval) throw new NotFoundError(`No approval ${id}`);
     if (approval.decision) throw new ConflictError(`Approval already ${approval.decision}.`);
     if (approval.tool_name === QUESTION_TOOL && decision === "allow") throw new ConflictError("A question needs an answer, not Allow.");
+    if (always && decision === "allow" && this.resolvers.has(id)) this.trustApproved(approval);
     const resolve = this.resolvers.get(id);
     if (!resolve) {
       const expired = this.repo.decideApproval(id, "expired", "no live run waiting for this approval");
@@ -3012,6 +3104,8 @@ export class TaskRunner {
       );
     }
     if (task.status === "approval") throw new ConflictError("This task is waiting for your decision — answer that first, then message it.");
+    // The project's access may have been tightened since this lookup last ran (D352).
+    if (isHandsOff(task)) this.assertRunnable(task, project);
     const last = this.repo.latestRun(taskId);
     if (!last?.session_id) throw new ConflictError("No session to continue yet — queue the task first.");
     if (!this.providers.resolve(last.provider).adapter.canResume) {

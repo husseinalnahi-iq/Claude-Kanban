@@ -86,11 +86,22 @@ export function BlockedPanel({ d }: { d: TaskDetail }) {
  * answer to what they asked — "show me how to do it myself" — used to be one tab and one click
  * away, under a review saying "no action needed" (docs/DECISIONS.md D197).
  */
-export function ResultPanel({ d }: { d: TaskDetail }) {
+function resultOf(d: TaskDetail) {
   const runs = stageRuns(d).filter((r) => r.status === "success");
   const work = lastOf(runs, (r) => r.stage === "code" || r.stage === "custom") ?? lastOf(runs, (r) => r.stage !== "review");
   const review = lastOf(runs, (r) => r.stage === "review");
-  const v = verdictOf(review?.result_md);
+  return { work, v: verdictOf(review?.result_md) };
+}
+
+/** Whether a task in Review or Done has a report or a verdict to show: the Result tab is listed only then (D347). */
+export function hasResult(d: TaskDetail): boolean {
+  if (!["review", "done"].includes(d.task.status)) return false;
+  const { work, v } = resultOf(d);
+  return Boolean(work?.result_md?.trim() || v);
+}
+
+export function ResultPanel({ d }: { d: TaskDetail }) {
+  const { work, v } = resultOf(d);
   if (!work?.result_md?.trim() && !v) return null;
   const tone = v?.verdict === "APPROVE" ? "border-lime/50 text-lime" : "border-rust/50 text-rust";
   return (

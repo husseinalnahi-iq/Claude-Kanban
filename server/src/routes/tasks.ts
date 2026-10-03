@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { commandsForTask } from "../engine/commands.ts";
 import { z } from "zod";
 import type { AppDeps } from "../app.ts";
 import { ConflictError, NotFoundError } from "../engine/runner.ts";
@@ -316,6 +317,12 @@ export async function taskRoutes(app: FastifyInstance, { repo, bus, runner }: Ap
     return runner.chat(idOf(req), body.body);
   });
   app.get("/tasks/:id/diff", async (req) => runner.diff(idOf(req)));
+
+  /** Every shell command the task ran, is running or waits to run, read off its transcripts (D337). */
+  app.get("/tasks/:id/commands", async (req) => {
+    const id = idOf(req);
+    return commandsForTask(repo.runsForTask(id), (runId) => repo.eventsAfter(runId, 0, 5000), repo.approvalsForTask(id));
+  });
 
   /** A new task that continues this one, with its outcome written into the new spec. */
   app.post("/tasks/:id/follow-up", async (req) => {

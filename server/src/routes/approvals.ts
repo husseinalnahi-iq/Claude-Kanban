@@ -7,8 +7,9 @@ export async function approvalRoutes(app: FastifyInstance, { repo, runner }: App
 
   app.post("/approvals/:id", async (req) => {
     const { id } = req.params as { id: string };
-    const body = z.object({ decision: z.enum(["allow", "deny"]), note: z.string().nullable().optional() }).parse(req.body);
-    return runner.decideApproval(id, body.decision, body.note?.trim() || null);
+    // `always`: Allow, and stop asking for this command in this project (D353).
+    const body = z.object({ decision: z.enum(["allow", "deny"]), note: z.string().nullable().optional(), always: z.boolean().optional() }).parse(req.body);
+    return runner.decideApproval(id, body.decision, body.note?.trim() || null, undefined, body.always ?? false);
   });
 
   /** Answer a question Claude asked mid-task. Skipping it is a plain "deny" on the route above. */

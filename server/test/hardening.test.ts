@@ -330,7 +330,7 @@ test("a critic that cannot run never blocks the work: the plan stands and the co
   const s = setup(f.fn);
   try {
     // The critic's provider was switched off after debate was set up; nothing checks that at queue time.
-    s.repo.updateSettings({ providers: [{ ...ZAI, enabled: false }], debate: { enabled: true, critic: { provider: "zai", model: "glm-5.3", effort: "medium" } } });
+    s.repo.updateSettings({ providers: [{ ...ZAI, enabled: false }], debate: { enabled: true, critic: { provider: "zai", model: "glm-5.3", effort: "medium" }, mode: "once", rounds: 3 } });
     const task = s.repo.createTask({ project_id: s.project.id, title: "x", mode: "supervised", pipeline: PLAN_CODE });
     s.runner.queueTask(task.id);
     await until(() => ["review", "failed"].includes(s.repo.getTask(task.id)!.status) && !s.runner.isBusy(task.id));

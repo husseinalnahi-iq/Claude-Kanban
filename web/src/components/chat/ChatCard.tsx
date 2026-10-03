@@ -15,8 +15,11 @@ import { RunSuggestions } from "../Suggestions.tsx";
 import { QuestionCard } from "../QuestionCard.tsx";
 import { CredentialWarning, riskOf } from "../CredentialWarning.tsx";
 import { ChecklistLine } from "../Checklist.tsx";
-import { autonomousBlocked, branchBlocked } from "../forms.tsx";
+import { autonomousBlocked, branchBlocked, lookupAutoBlocked } from "../forms.tsx";
+import { AlwaysAllow } from "../AlwaysAllow.tsx";
 import { openTaskOn } from "../../views/TaskDrawer.tsx";
+import { CommandExplainer } from "../CommandExplainer.tsx";
+import { explainCommand } from "../../../../server/src/engine/explain.ts";
 
 type CardAction = NonNullable<ChatMessage["meta"]["cards"]>[number]["action"];
 /** The chip's word for what the chat did with a card. */
@@ -36,7 +39,7 @@ const IN_PROGRESS = new Set(["approval", "planning", "running", "paused"]);
 const small = "cursor-pointer rounded border px-1.5 py-px font-mono text-[10.5px] disabled:cursor-default disabled:opacity-40";
 
 /** Where a card stands, in the board's own words and colours. */
-function StatusPill({ card, asking, waits }: { card: TaskCard; asking: boolean; waits?: boolean }) {
+export function StatusPill({ card, asking, waits }: { card: TaskCard; asking: boolean; waits?: boolean }) {
   if (card.status === "queued" && waits) return <Chip className="border-slate/60 text-slate" title="It starts by itself once the tasks it waits for are done">waiting</Chip>;
   if (IN_PROGRESS.has(card.status)) {
     const p = phase(card, asking);
@@ -54,26 +57,42 @@ function OpenButton({ id }: { id: string }) {
   );
 }
 
-/** A command or a change waiting on you, compact: what it is, then Allow or Deny. */
-function ToolApproval({ a }: { a: Approval }) {
+/**
+ * A command or a change waiting on you, compact: what it is in a line, then Allow or Deny. The command
+ * itself and its part-by-part explanation are folded until asked for (D345). A card that would print
+ * credentials keeps its warning and offers the whole task a click away, but Allow is here too.
+ */
+export function ToolApproval({ a }: { a: Approval }) {
   const { busy, error, run } = useAction();
   const i = (a.input ?? {}) as Record<string, unknown>;
-  // A card that would print credentials is never allowed without a look at the whole card (D280).
   const prints = riskOf(a)?.level === "prints";
+  const command = typeof i.command === "string" ? i.command : null;
+  const parts = command ? explainCommand(command).parts.length : 0;
+  const [shown, setShown] = useState(false);
   return (
     <div className="rounded-md border border-rose/40 bg-rose/5 px-2.5 py-1.5">
-      <div className="text-[11.5px] text-rose">Waiting for you: {a.title && a.title !== a.tool_name ? a.title : a.tool_name}</div>
-      <pre className="mt-1 max-h-28 overflow-auto rounded bg-ink-950 px-2 py-1 font-mono text-[11px] text-ink-300 whitespace-pre-wrap">
-        {typeof i.command === "string" ? `$ ${i.command}` : inputSummary(a) || a.tool_name}
-      </pre>
+      <div className="flex items-center gap-2">
+        <span className="min-w-0 flex-1 truncate text-[11.5px] text-rose">Waiting for you: {a.title && a.title !== a.tool_name ? a.title : a.tool_name}</span>
+        <button className="shrink-0 cursor-pointer font-mono text-[10.5px] text-ink-400 hover:text-ink-100" onClick={() => setShown((v) => !v)} aria-expanded={shown} title={shown ? "Fold it away" : "See exactly what it wants to run"}>
+          {shown ? "▾ hide" : `▸ ${parts > 1 ? `${parts} commands` : command ? "the command" : "the details"}`}
+        </button>
+      </div>
+      {command ? <div className="mt-1"><CommandExplainer command={command} open={shown} /></div> : null}
+      {shown ? (
+        <pre className="mt-1 max-h-40 overflow-auto rounded bg-ink-950 px-2 py-1 font-mono text-[11px] text-ink-300 whitespace-pre-wrap">
+          {command ? `$ ${command}` : inputSummary(a) || a.tool_name}
+        </pre>
+      ) : null}
       <CredentialWarning a={a} />
-      <div className="mt-1.5 flex justify-end gap-2">
-        <Button size="sm" variant="danger" busy={busy} onClick={() => run(() => api.decide(a.id, "deny"))}>Deny</Button>
+      <div className="mt-1.5 flex items-center justify-end gap-2">
         {prints ? (
-          <Button size="sm" onClick={() => navigate({ taskId: a.task_id })}>Review</Button>
-        ) : (
-          <Button size="sm" variant="go" busy={busy} onClick={() => run(() => api.decide(a.id, "allow"))}>Allow</Button>
-        )}
+          <button className="mr-auto cursor-pointer text-[11px] text-ink-400 underline-offset-2 hover:text-ink-100 hover:underline" onClick={() => navigate({ taskId: a.task_id })} title="Open the task and read the whole card before deciding">
+            Review in the task
+          </button>
+        ) : null}
+        <Button size="sm" variant="danger" busy={busy} onClick={() => run(() => api.decide(a.id, "deny"))}>Deny</Button>
+        <AlwaysAllow a={a} busy={busy} run={run} size="sm" />
+        <Button size="sm" variant="go" busy={busy} onClick={() => run(() => api.decide(a.id, "allow"))}>Allow</Button>
       </div>
       <ErrorLine error={error} />
     </div>
@@ -86,7 +105,7 @@ function RunSetup({ card, project }: { card: TaskCard; project: ProjectWithGit }
   const [editing, setEditing] = useState<Stage[] | null>(null);
   const { busy, error, run } = useAction();
   const answer = isAnswerPipeline(card.pipeline);
-  const noAuto = answer ? "An answer card only reads, so it runs supervised." : autonomousBlocked(project);
+  const noAuto = answer ? lookupAutoBlocked(project) : autonomousBlocked(project);
   const noBranch = branchBlocked(project);
   return (
     <div className="space-y-1.5">
@@ -95,7 +114,11 @@ function RunSetup({ card, project }: { card: TaskCard; project: ProjectWithGit }
           <button
             key={m}
             disabled={busy || card.mode === m || (m === "autonomous" && !!noAuto)}
-            title={m === "autonomous" ? noAuto ?? "Works on its own branch without asking; lands when you approve" : "Works in the project's folder and asks you before each change"}
+            title={
+              m === "autonomous"
+                ? noAuto ?? (answer ? "Runs in the project's folder and asks nothing; it reads and reports, and changes nothing" : "Works on its own branch without asking; lands when you approve")
+                : answer ? "Runs in the project's folder; a command that is not read-only waits for your Allow" : "Works in the project's folder and asks you before each change"
+            }
             onClick={() => run(() => api.patchTask(card.id, { mode: m }))}
             className={`${small} ${card.mode === m ? (m === "autonomous" ? "border-amber/60 bg-amber/10 text-amber" : "border-cyan/60 bg-cyan/10 text-cyan") : "border-ink-700 text-ink-400 hover:text-ink-200"}`}
           >

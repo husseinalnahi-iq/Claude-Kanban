@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 
-export type View = "board" | "dashboard" | "roadmap" | "approvals" | "sessions" | "skills" | "settings" | "tour" | "setup";
+export type View = "board" | "dashboard" | "roadmap" | "approvals" | "sessions" | "skills" | "settings" | "tour" | "setup" | "studio";
 
 export interface Route {
   view: View;
@@ -8,7 +8,7 @@ export interface Route {
   taskId: string | null;
 }
 
-const VIEWS: View[] = ["board", "dashboard", "roadmap", "approvals", "sessions", "skills", "settings", "tour", "setup"];
+const VIEWS: View[] = ["board", "dashboard", "roadmap", "approvals", "sessions", "skills", "settings", "tour", "setup", "studio"];
 
 /** Hash routes: #/<view>/<projectId>?task=<taskId> */
 function parse(): Route {
@@ -28,6 +28,9 @@ window.addEventListener("hashchange", () => {
   current = parse();
   listeners.forEach((l) => l());
 });
+
+/** The route right now, outside React (keyboard handlers). */
+export const getRoute = (): Route => current;
 
 export function useRoute(): Route {
   return useSyncExternalStore(

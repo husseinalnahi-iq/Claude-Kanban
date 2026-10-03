@@ -50,7 +50,7 @@ export function recordLines(e: EventRow): string[] {
     case "user_chat": return [`- \`${at}\` **You:** ${clip(p.text, 1500)}`];
     case "steer": return [`- \`${at}\` _Your message reached Claude mid-run._`];
     case "verify": return [`- \`${at}\` **Check** \`${clip(p.command, 120)}\`: ${p.ok ? "passed" : "failed"}`];
-    case "auto_allowed": return [`- \`${at}\` _Allowed without a card (read-only):_ \`${clip(p.command, 160)}\``];
+    case "auto_allowed": return [`- \`${at}\` _Allowed without a card:_ \`${clip(p.command, 160)}\``];
     case "turns_continued": return [`- \`${at}\` _Reached the turn limit and carried on in the same session._`];
     case "provider_switch": return [`- \`${at}\` _${clip(p.text, 300)}_`];
     case "result": return [`- \`${at}\` **${p.is_error ? "Stage failed" : "Stage finished"}**`];

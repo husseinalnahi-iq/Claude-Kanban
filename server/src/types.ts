@@ -17,8 +17,22 @@ export type RunStatus = "running" | "approval" | "success" | "failed";
 export type ApprovalDecision = "allow" | "deny" | "expired" | "answered";
 
 export const TASK_STATUSES: TaskStatus[] = ["backlog", "queued", "planning", "running", "approval", "paused", "review", "done", "failed"];
-/** Whether a task works in its own git worktree: every autonomous task, and a supervised one with own_branch (D234). */
-export const usesWorktree = (t: { mode: Mode; own_branch?: boolean }): boolean => t.mode === "autonomous" || Boolean(t.own_branch);
+/** The first line of an answer stage's prompt: what makes a `custom` stage an answer (D284). */
+export const ANSWER_HEAD = "Answer the request below: find what it asks for and report it.";
+type StageKind = { stage: StageName; prompt?: string };
+export const isAnswerStage = (s: StageKind): boolean => s.stage === "custom" && Boolean(s.prompt?.startsWith(ANSWER_HEAD));
+export const isAnswerPipeline = (p: StageKind[]): boolean => p.length > 0 && p.every(isAnswerStage);
+/**
+ * A lookup under autonomous: it runs in the project's own folder with nobody asked, because a sandboxed
+ * copy could not reach the live system it reads from (D352). Only where the project's access says so.
+ */
+export const isHandsOff = (t: { mode: Mode; pipeline: StageKind[] }): boolean => t.mode === "autonomous" && isAnswerPipeline(t.pipeline);
+/**
+ * Whether a task works in its own git worktree: an autonomous task that changes something, and a
+ * supervised one with own_branch (D234). A lookup changes nothing, so it never needs one.
+ */
+export const usesWorktree = (t: { mode: Mode; own_branch?: boolean; pipeline?: StageKind[] }): boolean =>
+  (t.mode === "autonomous" && !isAnswerPipeline(t.pipeline ?? [])) || Boolean(t.own_branch);
 
 export const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
 
@@ -265,9 +279,23 @@ export interface ProviderUsage {
 
 export type TierRef = { provider: string; model: string };
 
+/**
+ * How long a plan debate goes on. `once`: one critique and one revision, and both models are told
+ * there is no second round. `rounds`: up to `rounds` critique–revision rounds, the models told which
+ * round is the last. `until_agree`: rounds until the critic has no objections left, under a fixed
+ * ceiling so a stubborn pair cannot spend without end (D339).
+ */
+export type DebateMode = "once" | "rounds" | "until_agree";
+export const DEBATE_MODES: DebateMode[] = ["once", "rounds", "until_agree"];
+/** No debate runs past this many rounds, whatever the mode: an unbounded argument just spends money. */
+export const DEBATE_ROUND_CEILING = 10;
+
 export interface DebateSettings {
   enabled: boolean;
   critic: { provider: string; model: string; effort: Effort };
+  mode: DebateMode;
+  /** The number of rounds in `rounds` mode (2–10). Ignored by the other modes. */
+  rounds: number;
 }
 
 export interface Objection {
@@ -291,6 +319,10 @@ export interface PlanGate {
   critic?: { provider: string; model: string };
   critique?: { raw: string; objections: Objection[] };
   revised?: string;
+  /** How many critique–revision rounds ran before the gate (absent = one). */
+  rounds?: number;
+  /** True when the debate ended because the critic had no objections left to the revised plan. */
+  agreed?: boolean;
 }
 
 /**
@@ -401,7 +433,18 @@ export interface Policy {
   autonomous: "allowed" | "forbidden";
   maxConcurrent: number;
   defaultPipeline?: Stage[];
+  /** What an autonomous lookup may reach (D352). Absent on older projects: read it with `accessOf`. */
+  access?: AutonomousAccess;
+  /** Commands that run without a card in this project: what "Always allow" on a card adds (D353). */
+  trusted?: string[];
 }
+
+/**
+ * `sandboxed`: autonomous stays in its own copy, and a lookup that needs a live system runs supervised.
+ * `full`: an autonomous lookup runs in the project's own folder and nothing is asked.
+ */
+export type AutonomousAccess = "sandboxed" | "full";
+export const accessOf = (p: Pick<Policy, "access">): AutonomousAccess => p.access ?? "full";
 
 /** How a task's workspace is prepared and checked. All optional; empty means "do nothing". */
 export interface ProjectEnv {
@@ -588,11 +631,57 @@ export interface Chat {
   /** Where the model runs: "anthropic" (Claude) or a Claude-compatible provider's id (D301). */
   provider: string;
   cost_usd: number;
+  /** The folder it is filed in on the Studio's chat list, or null for none. A deleted folder leaves its chats here. */
+  folder_id: string | null;
+  /**
+   * When Claude last answered in this chat: the start of its cache window. Claude keeps a conversation
+   * cached for an hour on a subscription (D331); a message after that is re-read at full price. null
+   * once the hour has passed, or before the first reply.
+   */
+  warm_at: string | null;
+  /** Send the keep-alive message before this chat's cache window ends (Settings → Side chat says whether any chat does). */
+  keep_alive: boolean;
+  /**
+   * Give this chat your own skills, MCP servers and connectors, the way a task gets them (D335). Off by
+   * default: their tool lists ride on every message, so a plain question costs more with them.
+   */
+  use_tools: boolean;
+  /** How the cards this chat makes will run unless the message says otherwise (D344). An answer card is always supervised. */
+  mode: Mode;
   archived_at: string | null;
   created_at: string;
   updated_at: string;
   /** True while a reply is being written (not stored). */
   busy?: boolean;
+}
+
+/** A file you attached to a chat (D334): an image, a PDF, a spreadsheet, a document. Claude is given its path. */
+export interface ChatFile {
+  id: string;
+  chat_id: string;
+  /** The message it went with, or null while it waits for your next one. */
+  message_id: number | null;
+  name: string;
+  media_type: string;
+  bytes: number;
+  /** Absolute path on disk, under the board's state dir. */
+  path: string;
+  created_at: string;
+}
+
+/** The colours a chat folder can wear: the board's own signal colours, so a folder reads as part of the board. */
+export const FOLDER_COLORS = ["amber", "cyan", "moss", "iris", "rose", "rust", "lime", "slate"] as const;
+export type FolderColor = (typeof FOLDER_COLORS)[number];
+
+/** A folder on the Studio's chat list: a name you gave a group of chats, in a colour. Nothing runs on it. */
+export interface ChatFolder {
+  id: string;
+  project_id: string;
+  name: string;
+  /** null: no colour chosen — drawn neutral. */
+  color: FolderColor | null;
+  position: number;
+  created_at: string;
 }
 
 /** What a card the chat made did by itself, posted into that chat by the board — no model call (D285). */
@@ -618,7 +707,17 @@ export interface ChatMessage {
   chat_id: string;
   role: "user" | "assistant" | "tool" | "error" | "update";
   text: string;
-  meta: { cards?: { id: string; title: string; action: "created" | "updated" | "queued" | "scheduled" | "messaged" | "answered" | "stopped" | "retried" }[]; cost_usd?: number; update?: ChatUpdate };
+  meta: {
+    cards?: { id: string; title: string; action: "created" | "updated" | "queued" | "scheduled" | "messaged" | "answered" | "stopped" | "retried" }[];
+    cost_usd?: number;
+    update?: ChatUpdate;
+    /** A user message the board sent by itself to keep the conversation cached (D332), shown as a quiet line. */
+    keepalive?: boolean;
+    /** A user message the board sent when you pressed ✦ What next? (D338), shown as a quiet line. */
+    suggest?: boolean;
+    /** The files that went with a user message (D334). */
+    files?: Pick<ChatFile, "id" | "name" | "media_type" | "bytes">[];
+  };
   ts: string;
 }
 
@@ -911,6 +1010,18 @@ export interface Settings {
   chatEffort: Effort;
   /** Where the default chat model runs: "anthropic" (Claude) or a Claude-compatible provider's id (D301). */
   chatProvider: string;
+  /**
+   * Keep chats cached: five minutes before a chat's hour-long cache window ends, the board sends it a
+   * short message so the next real one is not re-read at full price (D332). Each chat has its own
+   * switch too; this one turns the whole thing on or off.
+   */
+  chatKeepAlive: boolean;
+  /** The message the board sends. Short: its reply is one line, and both are cached. */
+  chatKeepAliveMessage: string;
+  /** Stop keeping a chat warm this many hours after your last own message in it: an hourly message for ever would be a bill. */
+  chatKeepAliveMaxHours: number;
+  /** Offer the ✦ What next? button in every chat: five suggested next steps, on request, at the chat's model (D338). */
+  nextStepsSuggestions: boolean;
   /** The Spec section's ✦ Rewrite: Opus by default — it reads the code first, and a good spec saves a whole run. */
   specModel: string;
   specEffort: Effort;
@@ -1070,6 +1181,10 @@ export type WsMessage =
   /** A task's browser opened or closed: the board shows a "watch" chip on its card while live. */
   | { type: "browser.live"; taskId: string; live: boolean }
   | { type: "chat.deleted"; id: string; project_id: string }
+  /** A project's chat folders, whole: they change rarely and the list is short. */
+  | { type: "chat.folders"; project_id: string; folders: ChatFolder[] }
+  /** A chat's cache window ends in `minutes`: sent once per window, when it reaches the warning line (D331). */
+  | { type: "chat.expiring"; chat: Chat; minutes: number }
   | { type: "chat.message"; message: ChatMessage }
   /** Words of a reply as they are written; only sent to clients watching that chat. */
   | { type: "chat.delta"; chatId: string; text: string }

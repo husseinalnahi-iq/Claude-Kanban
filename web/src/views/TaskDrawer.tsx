@@ -26,17 +26,30 @@ import { CostPanel } from "../components/CostPanel.tsx";
 import { PlanGate } from "../components/PlanGate.tsx";
 import { SafetyOptions } from "../components/SafetyOptions.tsx";
 import { OutOfUsage } from "../components/OutOfUsage.tsx";
-import { autonomousBlocked, branchBlocked, NewTaskForm } from "../components/forms.tsx";
+import { autonomousBlocked, branchBlocked, lookupAutoBlocked, NewTaskForm } from "../components/forms.tsx";
+import { AlwaysAllow } from "../components/AlwaysAllow.tsx";
+import { isAnswerPipeline } from "../../../server/src/engine/answer.ts";
 import { useAsk } from "../components/Ask.tsx";
-import { BlockedPanel, CheckoutNote, QuestionsPanel, ResultPanel } from "../components/Outcome.tsx";
+import { BlockedPanel, CheckoutNote, QuestionsPanel, ResultPanel, hasResult } from "../components/Outcome.tsx";
 import { CredentialWarning } from "../components/CredentialWarning.tsx";
+import { CommandExplainer, CommandList, useTaskCommands } from "../components/CommandExplainer.tsx";
 import { ChecklistPanel } from "../components/Checklist.tsx";
 import { RunSuggestions } from "../components/Suggestions.tsx";
 import { DependsOn } from "../components/DependsOn.tsx";
 import { effortsFor, useClaudeModels } from "../lib/claudeModels.ts";
 
-type Tab = "spec" | "plan" | "pipeline" | "transcript" | "approvals" | "browser" | "diff" | "subtasks" | "files" | "messages" | "chat";
-const TABS: Tab[] = ["spec", "plan", "pipeline", "transcript", "approvals", "browser", "diff", "subtasks", "files", "messages", "chat"];
+type Tab = "result" | "spec" | "plan" | "pipeline" | "activity" | "commands" | "approvals" | "browser" | "diff" | "subtasks" | "files" | "messages";
+/** Result is listed only once there is one (D347); Activity is the live stream of what the task does, with the box to talk to it. */
+const TABS: Tab[] = ["result", "spec", "plan", "pipeline", "activity", "commands", "approvals", "browser", "diff", "subtasks", "files", "messages"];
+const TAB_LABEL: Record<Tab, string> = {
+  result: "Result", spec: "Spec", plan: "Plan", pipeline: "Pipeline", activity: "Activity", commands: "Commands",
+  approvals: "Approvals", browser: "Browser", diff: "Changes", subtasks: "Subtasks", files: "Files", messages: "Messages",
+};
+const TAB_HINT: Partial<Record<Tab, string>> = {
+  result: "What it delivered: the report, with the review's verdict",
+  activity: "Everything it does as it works, step by step, and a box to talk to it",
+  diff: "The files it changed, line by line",
+};
 
 /** Open a task's drawer on a given tab (the board's "live" chip opens the Browser tab). */
 let requestedTab: { taskId: string; tab: Tab } | null = null;
@@ -111,7 +124,13 @@ function ApprovalInput({ a }: { a: Approval }) {
         </div>
       </div>
     );
-  if (a.tool_name === "Bash") return <pre className="rounded bg-ink-950 px-2.5 py-2 font-mono text-[12px] text-amber whitespace-pre-wrap">$ {input.command}</pre>;
+  if (typeof input.command === "string" && (a.tool_name === "Bash" || a.tool_name === "PowerShell"))
+    return (
+      <div>
+        <CommandExplainer command={input.command} open />
+        <pre className="rounded bg-ink-950 px-2.5 py-2 font-mono text-[12px] text-amber whitespace-pre-wrap">$ {input.command}</pre>
+      </div>
+    );
   if (a.tool_name === "Write")
     return (
       <div>
@@ -151,6 +170,7 @@ function PendingToolApproval({ a }: { a: Approval }) {
       <div className="mt-2.5 flex items-center gap-2">
         <input className={inputCls} placeholder="Note to Claude (optional, sent with Deny)" value={note} onChange={(e) => setNote(e.target.value)} />
         <Button variant="danger" busy={busy} onClick={() => run(() => api.decide(a.id, "deny", note))}>Deny</Button>
+        <AlwaysAllow a={a} busy={busy} run={run} />
         <Button variant="go" busy={busy} onClick={() => run(() => api.decide(a.id, "allow", note))}>Allow</Button>
       </div>
       <div className="mt-2"><ErrorLine error={error} /></div>
@@ -162,14 +182,14 @@ function SpecTab({ d }: { d: TaskDetail }) {
   const { projects, settings } = useAppData();
   const project = projects.find((p) => p.id === d.task.project_id);
   const { busy, error, run } = useAction();
-  const blocked = project ? autonomousBlocked(project) : null;
+  // A lookup needs no worktree: what decides is the project's autonomous access (D352).
+  const blocked = project ? (isAnswerPipeline(d.task.pipeline) ? lookupAutoBlocked(project) : autonomousBlocked(project)) : null;
   const branchBlockedReason = project ? branchBlocked(project) : null;
   const [refining, setRefining] = useState(false);
   const t = d.task;
   const sug = t.suggestion;
   return (
     <div className="space-y-5">
-      {["review", "done"].includes(t.status) ? <ResultPanel d={d} /> : null}
       <CheckoutNote d={d} />
       <div className="flex flex-wrap items-center gap-2">
         <Select className="font-mono text-[12px]" aria-label="Type" value={t.type} onChange={(e) => run(() => api.patchTask(t.id, { type: e.target.value as typeof t.type }))}>
@@ -408,17 +428,30 @@ function planStepsOf(md: string): string | null {
   return m && m[1].trim() ? m[1].trim() : null;
 }
 
-function TranscriptTab({ d, chat }: { d: TaskDetail; chat?: boolean }) {
+/**
+ * Activity: the live stream of what a run does, one run at a time, with the box to talk to the task
+ * under it (D347). A message goes to the task's latest session whichever run is on show: a running
+ * stage reads it at its next step (D215); a finished one picks its session up again (D9).
+ */
+function ActivityTab({ d }: { d: TaskDetail }) {
   const [selected, setSelected] = useState<string | null>(null);
-  const latest = d.runs.at(-1);
-  const runId = chat ? latest?.id : selected ?? latest?.id;
+  // The session a message continues is the latest stage run's, as the server sees it: a critic's run is not it (D132).
+  const latest = [...d.runs].reverse().find((r) => r.role !== "critic") ?? d.runs.at(-1);
+  const runId = selected ?? d.runs.at(-1)?.id;
   const run = d.runs.find((r) => r.id === runId);
   const [text, setText] = useState("");
   const { busy, error, run: act } = useAction();
-  if (!d.runs.length) return <Empty>No runs yet. Queue the task to start its first stage.</Empty>;
+  const canSend = d.busy || Boolean(latest?.session_id);
+  const send = () => {
+    if (!text.trim()) return;
+    void act(async () => {
+      await api.chat(d.task.id, text);
+      setText("");
+    });
+  };
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
-      {!chat ? (
+      {d.runs.length ? (
         <div className="flex flex-wrap gap-1.5">
           {d.runs.map((r, i) => (
             <button
@@ -432,47 +465,48 @@ function TranscriptTab({ d, chat }: { d: TaskDetail; chat?: boolean }) {
             </button>
           ))}
         </div>
-      ) : (
-        <div className="text-[12px] text-ink-400">
-          {d.busy ? (
+      ) : null}
+      {run?.error ? <div className="font-mono text-[11.5px] text-rust">{run.error}</div> : null}
+      <div className="min-h-0 flex-1">
+        {runId ? <Transcript runId={runId} meta={run} /> : <Empty>Nothing yet. Start the task and every step it takes shows up here as it works.</Empty>}
+      </div>
+      <form
+        className="border-t border-ink-800 pt-3"
+        onSubmit={(e) => {
+          e.preventDefault();
+          send();
+        }}
+      >
+        <div className="mb-1.5 text-[12px] text-ink-400">
+          {!d.runs.length ? (
+            "Start the task to talk to it: once it runs, what you type here is read at its next step."
+          ) : d.busy ? (
             <>
-              It is working right now. <b className="text-ink-200">Type what you want it to know</b> — "use the header's blue", "skip the
-              tests for now" — and it reads it at its next step and carries on. Your message shows below once sent.
+              It is working right now. <b className="text-ink-200">Type what you want it to know</b> — "use the header's blue", "skip the tests for now" — and it reads it at its next step and carries on. Your message shows above once sent.
+            </>
+          ) : canSend ? (
+            <>
+              Continue this session (<span className="font-mono">{latest?.stage}{latest ? ` · ${modelLabel(latest)}` : ""}</span>) with your message.
             </>
           ) : (
-            <>
-              Continue this session (<span className="font-mono">{run?.stage} · {run && modelLabel(run)}</span>) with your message.
-            </>
+            "This session cannot be continued from here: queue the task, or use ↪ Follow-up task."
           )}
         </div>
-      )}
-      {run?.error ? <div className="font-mono text-[11.5px] text-rust">{run.error}</div> : null}
-      <div className="min-h-0 flex-1">{runId ? <Transcript runId={runId} meta={run} /> : null}</div>
-      {chat ? (
-        <form
-          className="flex gap-2 border-t border-ink-800 pt-3"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (!text.trim()) return;
-            void act(async () => {
-              await api.chat(d.task.id, text);
-              setText("");
-            });
-          }}
-        >
+        <div className="flex gap-2">
           <textarea
             className={`${inputCls} min-h-[44px] flex-1`}
-            placeholder={d.busy ? "Tell it something while it works… (Ctrl+Enter to send)" : "Continue this session… (Ctrl+Enter to send)"}
+            placeholder={!d.runs.length ? "Start the task first" : d.busy ? "Tell it something while it works… (Ctrl+Enter to send)" : "Continue this session… (Ctrl+Enter to send)"}
             value={text}
+            disabled={!canSend}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) (e.currentTarget.form as HTMLFormElement).requestSubmit();
+              if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send();
             }}
           />
-          <Button type="submit" variant="primary" busy={busy} disabled={!d.busy && !latest?.session_id}>Send</Button>
-        </form>
-      ) : null}
-      {chat ? <ErrorLine error={error} /> : null}
+          <Button type="submit" variant="primary" busy={busy} disabled={!canSend || !text.trim()}>Send</Button>
+        </div>
+      </form>
+      <ErrorLine error={error} />
     </div>
   );
 }
@@ -760,7 +794,11 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
   const [tab, setTab] = useState<Tab | null>(() => takeRequested(taskId));
   const [showCost, setShowCost] = useState(false);
   const pending = d?.approvals.filter((a) => !a.decision) ?? [];
-  const current: Tab = tab ?? (d?.task.plan_gate ? (d.task.plan_gate.kind === "approval" ? "plan" : "spec") : pending.length ? "approvals" : d && ["planning", "running"].includes(d.task.status) ? "transcript" : "spec");
+  // For the tab's count; the tab itself keeps its own live list.
+  const commands = useTaskCommands(taskId);
+  const result = Boolean(d && hasResult(d));
+  const current: Tab =
+    tab ?? (d?.task.plan_gate ? (d.task.plan_gate.kind === "approval" ? "plan" : "spec") : pending.length ? "approvals" : d && ["planning", "running"].includes(d.task.status) ? "activity" : result ? "result" : "spec");
 
   // Another task opened in the same drawer: its own default tab, or the one it was opened on.
   const shownTask = useRef(taskId);
@@ -801,7 +839,7 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
                   <span className={`text-[11px] font-semibold uppercase tracking-[0.08em] ${costPaused ? "text-rose" : STATUS_META[d.task.status].text}`}>
                     {creditOut ? "Needs you · out of credit" : costPaused ? "Needs you · cost" : STATUS_META[d.task.status].label}
                   </span>
-                  <ModeChip mode={d.task.mode} ownBranch={d.task.own_branch} />
+                  <ModeChip mode={d.task.mode} ownBranch={d.task.own_branch} lookup={isAnswerPipeline(d.task.pipeline)} />
                   {d.task.live ? <Chip className="border-rose/50 text-rose" title="Touches a live system: plan approval is on and review runs on the live review model">prod</Chip> : null}
                   <Chip className={PRIORITY_META[d.task.priority].tone} title={PRIORITY_META[d.task.priority].title}>{d.task.priority}</Chip>
                   <Chip className={TYPE_META[d.task.type].tone}>{TYPE_META[d.task.type].short}</Chip>
@@ -834,27 +872,36 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
             {d.task.checklist?.length && !["done", "review", "backlog"].includes(d.task.status) ? <ChecklistPanel list={d.task.checklist} live={d.busy} /> : null}
             <Actions d={d} />
             <nav className="flex shrink-0 gap-0.5 overflow-x-auto overflow-y-hidden border-b border-ink-800 px-3">
-              {TABS.map((t) => {
-                const badge = t === "approvals" ? pending.length : t === "subtasks" ? d.children.length : t === "files" ? d.attachments.length : t === "messages" ? d.messages.length : t === "transcript" ? d.runs.length : 0;
+              {TABS.filter((t) => t !== "result" || result).map((t) => {
+                const badge = t === "approvals" ? pending.length : t === "subtasks" ? d.children.length : t === "files" ? d.attachments.length : t === "messages" ? d.messages.length : t === "activity" ? d.runs.length : t === "commands" ? commands.length : 0;
                 return (
                   <button
                     key={t}
                     onClick={() => setTab(t)}
-                    className={`relative whitespace-nowrap px-3 py-2.5 text-[12.5px] capitalize transition-colors cursor-pointer ${current === t ? "text-ink-100" : "text-ink-400 hover:text-ink-200"}`}
+                    title={TAB_HINT[t]}
+                    className={`relative whitespace-nowrap px-3 py-2.5 text-[12.5px] transition-colors cursor-pointer ${current === t ? "text-ink-100" : "text-ink-400 hover:text-ink-200"} ${t === "result" ? "font-semibold" : ""}`}
                   >
-                    {t}
+                    {TAB_LABEL[t]}
                     {badge ? <span className={`ml-1.5 font-mono text-[10.5px] ${t === "approvals" ? "text-rose" : "text-ink-500"}`}>{badge}</span> : null}
                     {current === t ? <span className="absolute inset-x-2 -bottom-px h-0.5 rounded bg-amber" /> : null}
                   </button>
                 );
               })}
             </nav>
-            <div className={`min-h-0 flex-1 px-5 py-4 ${current === "transcript" || current === "chat" ? "flex flex-col" : "overflow-y-auto"}`}>
+            <div className={`min-h-0 flex-1 px-5 py-4 ${current === "activity" ? "flex flex-col" : "overflow-y-auto"}`}>
+              {current === "result" ? <ResultPanel d={d} /> : null}
               {current === "spec" ? <SpecTab d={d} /> : null}
               {current === "plan" ? <PlanTab d={d} /> : null}
               {current === "pipeline" ? <PipelineTab d={d} /> : null}
-              {current === "transcript" ? <TranscriptTab d={d} /> : null}
-              {current === "chat" ? <TranscriptTab d={d} chat /> : null}
+              {current === "activity" ? <ActivityTab d={d} /> : null}
+              {current === "commands" ? (
+                <div className="-mx-5 -my-4">
+                  <p className="border-b border-ink-800 px-5 py-2.5 text-[12px] text-ink-400">
+                    Every shell command this task ran, is running or waits to run, newest first, with what it does in plain words. Autonomous runs show here too: they never ask, so this is where to see what they did.
+                  </p>
+                  <CommandList taskId={d.task.id} />
+                </div>
+              ) : null}
               {current === "approvals" ? (
                 <div className="space-y-3">
                   {pending.map((a) => <PendingApproval key={a.id} a={a} />)}

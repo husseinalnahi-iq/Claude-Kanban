@@ -29,6 +29,8 @@ const policySchema = z.object({
   autonomous: z.enum(["allowed", "forbidden"]),
   maxConcurrent: z.number().int().min(1).max(8),
   defaultPipeline: z.array(stageSchema).optional(),
+  access: z.enum(["sandboxed", "full"]).optional(),
+  trusted: z.array(z.string().trim().min(1).max(300)).max(200).optional(),
 });
 
 const envSchema = z.object({

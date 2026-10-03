@@ -36,6 +36,8 @@ export interface PromptCtx {
   stage: StageName;
   customPrompt?: string;
   mode: Mode;
+  /** An autonomous lookup in the project's own folder, with nobody asked (D352). */
+  handsOff?: boolean;
   task: { id: string; title: string; spec_md: string };
   branch?: string | null;
   baseSha?: string | null;
@@ -414,6 +416,13 @@ export function buildStagePrompt(ctx: PromptCtx): string {
         "When the spec or plan says a step needs the user's go-ahead — a live write, a deploy, a migration, sending something — " +
         "ask for it by proposing that exact command with a clear description, after any dry-run it calls for. The card is the approval; " +
         "do not end the stage and leave the step for later. A denied card comes back with the user's reason: follow it.",
+    );
+  }
+  if (ctx.handsOff) {
+    out.push(
+      "\n## Nobody is asked\nThis lookup runs in the project's own folder, and your commands run as you write them: no one approves them first. " +
+        "That makes the rule above yours to keep. Read and query only; before running a script or a request, be sure it only reads. " +
+        "Editing a file is refused, and so is showing what is in a credentials file: let a script load it instead.",
     );
   }
   if ((ctx.capabilities ?? "sdk") === "sdk") {

@@ -6,6 +6,7 @@ import type { AppDeps } from "../app.ts";
 import { ConflictError, NotFoundError } from "../engine/runner.ts";
 import { ATTACHMENT_TYPES, MAX_ATTACHMENT_BYTES, attachmentKind } from "../types.ts";
 import type { Attachment } from "../types.ts";
+import { revealPath } from "../openPath.ts";
 
 /** How much of a text file is kept as its preview: enough to see the shape, not enough to bloat a prompt. */
 export const PREVIEW_CHARS = 4000;
@@ -125,6 +126,15 @@ export async function attachmentRoutes(app: FastifyInstance, { repo, bus, runner
       .type("text/plain; charset=utf-8")
       .header("x-content-type-options", "nosniff")
       .send(readFileSync(a.path).toString("utf8").slice(0, 400_000));
+  });
+
+  /** Opens the file on this computer with its default app, or shows it selected in its folder (D351). */
+  app.post("/attachments/:id/open", async (req) => {
+    const a = repo.getAttachment((req.params as { id: string }).id);
+    if (!a || !existsSync(a.path)) throw new NotFoundError("That file is no longer on disk.");
+    const body = z.object({ where: z.enum(["file", "folder"]).default("file") }).parse(req.body ?? {});
+    revealPath(a.path, body.where);
+    return { ok: true };
   });
 
   app.delete("/attachments/:id", async (req) => {

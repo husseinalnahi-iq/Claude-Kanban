@@ -457,6 +457,16 @@ export function watchAlerts(m: WsMessage) {
     reviewing.delete(m.taskId);
     for (const [key, a] of [...needsYou]) if (a.taskId === m.taskId) resolveNeed(key, "handled");
   } else if (m.type === "limits.updated") onLimits(m.limits);
+  else if (m.type === "chat.expiring") {
+    // The hour Claude keeps a chat cached is nearly up (D331): one word now saves re-reading it all at full price.
+    raise({
+      kind: "usage",
+      label: "Chat cache resets soon",
+      title: m.chat.title,
+      body: `Cached for ${m.minutes} more min. Send your next idea before then, or the whole conversation is read again at full price.`,
+      projectId: m.chat.project_id,
+    });
+  }
   else if (m.type === "approval.requested") {
     // Before the board has learned what is already waiting, a card is recorded but not announced.
     if (seeded) raise(approvalAlert(m.approval));

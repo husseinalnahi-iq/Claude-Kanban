@@ -181,7 +181,7 @@ export class SpecWriter {
         } else if (msg.type === "result") {
           cost = Number(msg.total_cost_usd ?? 0);
           structured = msg.structured_output;
-          if (msg.is_error) failure = (msg.errors ?? []).join("; ") || String(msg.subtype ?? "the rewrite failed");
+          if (msg.is_error) failure = msg.subtype === "success" ? msg.result || "the rewrite failed" : (msg.errors ?? []).join("; ") || String(msg.subtype ?? "the rewrite failed");
         }
       }
     } catch (err) {

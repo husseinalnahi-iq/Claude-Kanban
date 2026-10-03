@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Provider, ProviderModel, ProviderTestResult } from "../../../../server/src/types.ts";
 import { api, type ProviderPreset, type ProviderRow } from "../../lib/api.ts";
-import { Button, ErrorLine, Field, inputCls, Select, useAction } from "../../components/ui.tsx";
+import { Button, Chevron, ErrorLine, Field, inputCls, Select, Switch, useAction } from "../../components/ui.tsx";
 import { useCatalog } from "../../lib/catalog.ts";
 import { useAppData } from "../../lib/store.tsx";
 import { isLocal } from "../../../../server/src/engine/providers/catalog.ts";
@@ -98,9 +98,8 @@ function RunsOut({ p, onChange }: { p: Provider; onChange: (p: Provider) => void
   const others = settings.providers.filter((x) => x.id !== p.id);
   const fb = p.fallback ?? null;
   return (
-    <div className="mt-3">
-      <div className="text-[11px] uppercase tracking-wider text-ink-500">When it runs out</div>
-      <div className="mt-1 flex flex-col gap-1.5 text-[12px] text-ink-200">
+    <div>
+      <div className="flex flex-col gap-1.5 text-[12px] text-ink-200">
         <label className="flex cursor-pointer items-start gap-2">
           <input type="radio" className="mt-0.5 accent-amber" checked={!fb} onChange={() => onChange({ ...p, fallback: null })} />
           <span>
@@ -133,7 +132,59 @@ function RunsOut({ p, onChange }: { p: Provider; onChange: (p: Provider) => void
   );
 }
 
-function ProviderCard({ p, hasSecret, onChange, onRemove, onSecretChanged }: { p: Provider; hasSecret: boolean; onChange: (p: Provider) => void; onRemove: () => void; onSecretChanged: () => void }) {
+/** A short name for what kind of provider this is, for the folded card's header. */
+function kindShort(p: Provider): string {
+  if (p.kind === "cli") return `${p.cli?.preset ?? "custom"} CLI`;
+  if (p.kind === "openai-compatible") return "text only";
+  return isLocal(p) ? "on this computer" : "Claude Code";
+}
+
+/** What the key looks like at a glance: set, missing, or not needed at all. */
+function keyState(p: Provider, hasSecret: boolean): { text: string; tone: string; title: string } {
+  if (!p.authRef) return { text: "own sign-in", tone: "text-ink-400 border-ink-700", title: "This provider uses its own login — no key to paste" };
+  if (isLocal(p)) return { text: "no key needed", tone: "text-ink-400 border-ink-700", title: "It runs on this computer" };
+  return hasSecret
+    ? { text: "key set", tone: "text-moss border-moss/40", title: `Stored as ${p.authRef}` }
+    : { text: "no key yet", tone: "text-amber border-amber/50", title: `Paste it under Key, or set ${p.authRef} in the environment` };
+}
+
+/** How many models it can run, and whether it is answering — from the same list the stage pickers read. */
+function ModelsState({ p }: { p: Provider }) {
+  const { result } = useCatalog(p.enabled ? p : undefined);
+  if (!p.enabled) return <Pill tone="text-ink-500 border-ink-800">off</Pill>;
+  if (!result) return <Pill tone="text-ink-500 border-ink-800">checking…</Pill>;
+  if (result.error) return <Pill tone="text-amber border-amber/50" title={result.error}>not answering</Pill>;
+  const n = result.models.filter((m) => m.installed !== false).length;
+  if (!n) return <Pill tone="text-amber border-amber/50" title="It answers, but has no model a stage could run — download or pull one first">no models yet</Pill>;
+  return (
+    <Pill tone="text-ink-300 border-ink-700" title={result.source === "live" ? "Read from the provider just now" : "From the list on this card"}>
+      {n} model{n === 1 ? "" : "s"}{result.source === "live" ? " · live" : ""}
+    </Pill>
+  );
+}
+
+function Pill({ children, tone, title }: { children: React.ReactNode; tone: string; title?: string }) {
+  return <span title={title} className={`whitespace-nowrap rounded border px-1.5 py-px text-[10.5px] ${tone}`}>{children}</span>;
+}
+
+/** One labelled block inside an open card. */
+function Block({ title, hint, children }: { title: string; hint?: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <div className="border-t border-ink-800 pt-3">
+      <div className="mb-1.5 flex flex-wrap items-baseline gap-x-2">
+        <span className="text-[11px] font-medium uppercase tracking-wider text-ink-400">{title}</span>
+        {hint ? <span className="text-[11px] text-ink-500">{hint}</span> : null}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function ProviderCard({
+  p, hasSecret, open, onToggle, onChange, onRemove, onSecretChanged,
+}: {
+  p: Provider; hasSecret: boolean; open: boolean; onToggle: () => void; onChange: (p: Provider) => void; onRemove: () => void; onSecretChanged: () => void;
+}) {
   const usage = useProviderUsage().rows?.find((u) => u.provider_id === p.id);
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<ProviderTestResult | null>(null);
@@ -146,145 +197,184 @@ function ProviderCard({ p, hasSecret, onChange, onRemove, onSecretChanged }: { p
   const testIds = p.models.length ? p.models.map((m) => m.id).filter(Boolean) : (live?.models ?? []).filter((m) => m.installed !== false).map((m) => m.id);
   const setModel = (i: number, patch: Partial<ProviderModel>) => onChange({ ...p, models: p.models.map((m, j) => (j === i ? { ...m, ...patch } : m)) });
   const num = (v: string) => (v.trim() === "" ? undefined : Math.max(0, Number(v) || 0));
+  const key = keyState(p, hasSecret);
+  const bodyId = `provider-${p.id}`;
   return (
-    <div className={`rounded-lg border p-3 ${p.enabled ? "border-ink-700 bg-ink-850/60" : "border-ink-800 bg-ink-900/40 opacity-70"}`}>
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="font-mono text-[12px] text-iris">{p.id}</span>
-        <input className={`${inputCls} max-w-[200px]`} value={p.label} onChange={(e) => onChange({ ...p, label: e.target.value })} />
-        <span className="text-[11px] text-ink-500" title={KIND_LABEL[p.kind]}>{p.kind}</span>
-        <label className="ml-auto flex cursor-pointer items-center gap-1.5 text-[12px] text-ink-300">
-          <input type="checkbox" className="accent-amber" checked={p.enabled} onChange={(e) => onChange({ ...p, enabled: e.target.checked })} /> enabled
-        </label>
-        <button className="px-1.5 text-ink-400 hover:text-rust cursor-pointer" onClick={onRemove} title="Remove provider">×</button>
-      </div>
-      <p className="mt-1 text-[11.5px] text-ink-500">{KIND_LABEL[p.kind]}.</p>
-
-      <div className="mt-3 grid gap-3 md:grid-cols-2">
-        {p.kind !== "cli" ? (
-          <Field label="Base URL">
-            <input className={`${inputCls} font-mono`} value={p.baseUrl ?? ""} onChange={(e) => onChange({ ...p, baseUrl: e.target.value.trim() })} />
-          </Field>
-        ) : (
-          <Field label="CLI preset">
-            <Select wide className="font-mono" value={p.cli?.preset ?? "custom"} onChange={(e) => onChange({ ...p, cli: { ...(p.cli ?? {}), preset: e.target.value as NonNullable<Provider["cli"]>["preset"] } })}>
-              {["codex", "gemini", "kimi", "opencode", "custom"].map((k) => <option key={k} value={k}>{k}</option>)}
-            </Select>
-          </Field>
-        )}
-        <Field label="Secret name" hint="The name the key is stored under (and the env var that can supply it).">
-          <input className={`${inputCls} font-mono`} value={p.authRef} placeholder="e.g. ZAI_API_KEY" onChange={(e) => onChange({ ...p, authRef: e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "") })} />
-        </Field>
-      </div>
-      {p.kind === "cli" && p.cli?.preset === "custom" ? (
-        <Field label="Command" hint="Placeholders: {prompt_file} {cwd} {model} {mode}. stdout is the result.">
-          <input className={`${inputCls} font-mono`} value={p.cli.command ?? ""} onChange={(e) => onChange({ ...p, cli: { ...p.cli!, command: e.target.value } })} />
-        </Field>
-      ) : null}
-      {p.kind === "cli" && (p.cli?.preset === "custom" || p.cli?.preset === "opencode") ? (
-        <Field label="Pass these environment variables through" hint="Comma-separated names the CLI needs (e.g. OPENROUTER_API_KEY). Never an ANTHROPIC_* one.">
-          <input
-            className={`${inputCls} font-mono`}
-            value={(p.cli?.envPassthrough ?? []).join(", ")}
-            onChange={(e) => onChange({ ...p, cli: { ...p.cli!, envPassthrough: e.target.value.split(",").map((x) => x.trim().toUpperCase().replace(/[^A-Z0-9_]/g, "")).filter(Boolean) } })}
-          />
-        </Field>
-      ) : null}
-      {p.kind === "cli" ? (
-        <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
-          <input type="checkbox" className="mt-1 accent-amber" checked={p.mayEditFiles} onChange={(e) => onChange({ ...p, mayEditFiles: e.target.checked })} />
-          <span>
-            May edit files (run code stages)
-            <span className="block text-[11.5px] text-ink-400">
-              Off: this CLI only runs plan and review stages, launched read-only. On: it may run code stages, but only for autonomous tasks
-              (in a worktree) — the board cannot approve or block what another CLI does.
-            </span>
-          </span>
-        </label>
-      ) : null}
-
-      <div className="mt-3">
-        <div className="text-[11px] uppercase tracking-wider text-ink-500">Key</div>
-        <SecretField provider={p} hasSecret={hasSecret} onChanged={onSecretChanged} />
-        {p.kind === "anthropic-compatible" && !isLocal(p) ? (
-          <label className="mt-1.5 flex items-center gap-2 text-[11.5px] text-ink-400">
-            Sent as
-            <Select className="h-7 py-0 text-[11.5px]" value={p.authStyle ?? "bearer"} onChange={(e) => onChange({ ...p, authStyle: e.target.value as Provider["authStyle"] })}>
-              <option value="bearer">a bearer token (most providers)</option>
-              <option value="api-key">an API key (Kimi Code)</option>
-            </Select>
-          </label>
-        ) : null}
-      </div>
-
-      <RunsOut p={p} onChange={onChange} />
-      {usage ? (
-        <div className="mt-3">
-          <div className="mb-1 flex items-center gap-2">
-            <span className="text-[11px] uppercase tracking-wider text-ink-500">Usage</span>
-            <OutChip out={usage.out} />
-            {usage.plan ? <span className="font-mono text-[10.5px] text-ink-500">{usage.plan}</span> : null}
-          </div>
-          <ProviderUsageCard u={usage} compact />
-        </div>
-      ) : null}
-
-      <div className="mt-3">
-        <div className="mb-1 flex items-baseline gap-2">
-          <span className="text-[11px] uppercase tracking-wider text-ink-500">Models</span>
-          <span className="text-[11px] text-ink-500">USD per million tokens; leave prices empty for a subscription (shown as such, tokens still counted).</span>
-        </div>
-        {!p.models.length ? (
-          <p className="mb-1 text-[11.5px] text-ink-400">None listed: the stage picker shows what this provider says it has. Add one here only to pin it or give it a price.</p>
-        ) : null}
-        <div className="space-y-1">
-          {p.models.map((m, i) => (
-            <div key={i} className="grid grid-cols-[1fr_130px_80px_80px_90px_auto] items-center gap-1.5">
-              <input className={`${inputCls} font-mono`} value={m.id} onChange={(e) => setModel(i, { id: e.target.value.trim() })} />
-              <input className={inputCls} value={m.label} onChange={(e) => setModel(i, { label: e.target.value })} />
-              <input className={`${inputCls} font-mono`} type="number" min={0} step={0.01} placeholder="in $" value={m.inputPer1M ?? ""} onChange={(e) => setModel(i, { inputPer1M: num(e.target.value) })} />
-              <input className={`${inputCls} font-mono`} type="number" min={0} step={0.01} placeholder="out $" value={m.outputPer1M ?? ""} onChange={(e) => setModel(i, { outputPer1M: num(e.target.value) })} />
-              <input className={`${inputCls} font-mono`} type="number" min={0} step={1000} placeholder="context" value={m.contextWindow ?? ""} onChange={(e) => setModel(i, { contextWindow: num(e.target.value) })} />
-              <button className="px-1.5 text-ink-400 hover:text-rust cursor-pointer" onClick={() => onChange({ ...p, models: p.models.filter((_, j) => j !== i) })} title="Remove">×</button>
-            </div>
-          ))}
-          <button type="button" className="text-[11px] text-ink-400 hover:text-ink-200 cursor-pointer" onClick={() => onChange({ ...p, models: [...p.models, { id: "", label: "" }] })}>
-            + model
-          </button>
-        </div>
-      </div>
-
-      <div className="mt-3 flex items-center gap-2">
-        <Select wide wrapClassName="max-w-[220px]" className="font-mono" value={testModel} onChange={(e) => setTestModel(e.target.value)}>
-          {testIds.length ? null : <option value="">first model it reports</option>}
-          {testIds.map((id) => <option key={id} value={id}>{id}</option>)}
-        </Select>
-        <Button
-          size="sm"
-          busy={testing}
-          disabled={!p.enabled || unsaved}
-          title={unsaved ? "Click Save settings (top right) first" : "One tiny call through exactly the path a stage would use."}
-          onClick={() =>
-            void (async () => {
-              setTesting(true);
-              try {
-                setResult(await api.testProvider(p.id, testModel || undefined));
-              } catch (err) {
-                setResult({ ok: false, latencyMs: 0, modelEcho: null, usageReported: false, costReported: false, error: err instanceof Error ? err.message : String(err) });
-              } finally {
-                setTesting(false);
-              }
-            })()
-          }
+    <div className={`rounded-lg border transition-colors ${p.enabled ? "border-ink-700 bg-ink-850/60" : "border-ink-800 bg-ink-900/40"} ${open ? "" : "hover:border-ink-600"}`}>
+      <div className="flex items-center gap-2 px-3 py-2.5">
+        {/* The whole left side opens the card; the switch beside it stays its own control. */}
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-controls={bodyId}
+          onClick={onToggle}
+          className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 text-left"
         >
-          Test
-        </Button>
-        {unsaved ? (
-          <span className="text-[11px] text-amber">Unsaved changes: click <b>Save settings</b> (top right) first.</span>
-        ) : (
-          <span className="text-[11px] text-ink-500">sends one tiny message</span>
-        )}
+          <Chevron className={`text-ink-400 transition-transform ${open ? "" : "-rotate-90"}`} />
+          <span className={`truncate text-[13px] font-medium ${p.enabled ? "text-ink-100" : "text-ink-400"}`}>{p.label || p.id}</span>
+          <span className="hidden font-mono text-[11px] text-iris sm:inline">{p.id}</span>
+          <span className="hidden text-[11px] text-ink-500 md:inline" title={KIND_LABEL[p.kind]}>· {kindShort(p)}</span>
+          <span className="ml-auto flex flex-wrap items-center justify-end gap-1.5">
+            {unsaved ? <Pill tone="text-amber border-amber/50" title="Click Save settings (top right) to keep it">unsaved</Pill> : null}
+            {usage ? <OutChip out={usage.out} /> : null}
+            {p.enabled ? <Pill tone={key.tone} title={key.title}>{key.text}</Pill> : null}
+            <ModelsState p={p} />
+          </span>
+        </button>
+        <Switch on={p.enabled} onChange={(v) => onChange({ ...p, enabled: v })} title={p.enabled ? "On — stages can run here. Click to turn off." : "Off — no stage runs here. Click to turn on."} />
       </div>
-      {result ? <TestResult r={result} /> : null}
+
+      {open ? (
+        <div id={bodyId} className="space-y-3 px-3 pb-3">
+          <p className="text-[11.5px] text-ink-500">{KIND_LABEL[p.kind]}.</p>
+
+          <Block title="Connection">
+            <div className="grid gap-3 md:grid-cols-2">
+              <Field label="Name">
+                <input className={inputCls} value={p.label} onChange={(e) => onChange({ ...p, label: e.target.value })} />
+              </Field>
+              {p.kind !== "cli" ? (
+                <Field label="Base URL">
+                  <input className={`${inputCls} font-mono`} value={p.baseUrl ?? ""} onChange={(e) => onChange({ ...p, baseUrl: e.target.value.trim() })} />
+                </Field>
+              ) : (
+                <Field label="CLI preset">
+                  <Select wide className="font-mono" value={p.cli?.preset ?? "custom"} onChange={(e) => onChange({ ...p, cli: { ...(p.cli ?? {}), preset: e.target.value as NonNullable<Provider["cli"]>["preset"] } })}>
+                    {["codex", "gemini", "kimi", "opencode", "custom"].map((k) => <option key={k} value={k}>{k}</option>)}
+                  </Select>
+                </Field>
+              )}
+            </div>
+            {p.kind === "cli" && p.cli?.preset === "custom" ? (
+              <div className="mt-3">
+                <Field label="Command" hint="Placeholders: {prompt_file} {cwd} {model} {mode}. stdout is the result.">
+                  <input className={`${inputCls} font-mono`} value={p.cli.command ?? ""} onChange={(e) => onChange({ ...p, cli: { ...p.cli!, command: e.target.value } })} />
+                </Field>
+              </div>
+            ) : null}
+            {p.kind === "cli" && (p.cli?.preset === "custom" || p.cli?.preset === "opencode") ? (
+              <div className="mt-3">
+                <Field label="Pass these environment variables through" hint="Comma-separated names the CLI needs (e.g. OPENROUTER_API_KEY). Never an ANTHROPIC_* one.">
+                  <input
+                    className={`${inputCls} font-mono`}
+                    value={(p.cli?.envPassthrough ?? []).join(", ")}
+                    onChange={(e) => onChange({ ...p, cli: { ...p.cli!, envPassthrough: e.target.value.split(",").map((x) => x.trim().toUpperCase().replace(/[^A-Z0-9_]/g, "")).filter(Boolean) } })}
+                  />
+                </Field>
+              </div>
+            ) : null}
+            {p.kind === "cli" ? (
+              <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
+                <input type="checkbox" className="mt-1 accent-amber" checked={p.mayEditFiles} onChange={(e) => onChange({ ...p, mayEditFiles: e.target.checked })} />
+                <span>
+                  May edit files (run code stages)
+                  <span className="block text-[11.5px] text-ink-400">
+                    Off: this CLI only runs plan and review stages, launched read-only. On: it may run code stages, but only for autonomous tasks
+                    (in a worktree) — the board cannot approve or block what another CLI does.
+                  </span>
+                </span>
+              </label>
+            ) : null}
+          </Block>
+
+          <Block title="Key">
+            <SecretField provider={p} hasSecret={hasSecret} onChanged={onSecretChanged} />
+            {p.kind === "anthropic-compatible" && !isLocal(p) ? (
+              <label className="mt-1.5 flex items-center gap-2 text-[11.5px] text-ink-400">
+                Sent as
+                <Select className="h-7 py-0 text-[11.5px]" value={p.authStyle ?? "bearer"} onChange={(e) => onChange({ ...p, authStyle: e.target.value as Provider["authStyle"] })}>
+                  <option value="bearer">a bearer token (most providers)</option>
+                  <option value="api-key">an API key (Kimi Code)</option>
+                </Select>
+              </label>
+            ) : null}
+            {/* The name the key is stored under is rarely touched, so it sits behind the key, not beside the URL. */}
+            {p.authRef || p.kind !== "cli" ? (
+              <details className="mt-2 text-[11.5px] text-ink-500">
+                <summary className="cursor-pointer select-none hover:text-ink-300">Where the key is stored</summary>
+                <div className="mt-1.5 max-w-[360px]">
+                  <Field label="Secret name" hint="The name the key is stored under (and the environment variable that can supply it).">
+                    <input className={`${inputCls} font-mono`} value={p.authRef} placeholder="e.g. ZAI_API_KEY" onChange={(e) => onChange({ ...p, authRef: e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "") })} />
+                  </Field>
+                </div>
+              </details>
+            ) : null}
+          </Block>
+
+          <Block title="Models" hint="US dollars per million tokens (pieces of words). Leave prices empty for a subscription; tokens are still counted.">
+            {!p.models.length ? (
+              <p className="mb-1 text-[11.5px] text-ink-400">None listed: the stage picker shows what this provider says it has. Add one here only to pin it or give it a price.</p>
+            ) : (
+              <div className="mb-1 grid grid-cols-[1fr_130px_80px_80px_90px_24px] gap-1.5 text-[10.5px] uppercase tracking-wider text-ink-500">
+                <span>Model id</span><span>Shown as</span><span>In $</span><span>Out $</span><span>Context</span><span />
+              </div>
+            )}
+            <div className="space-y-1">
+              {p.models.map((m, i) => (
+                <div key={i} className="grid grid-cols-[1fr_130px_80px_80px_90px_24px] items-center gap-1.5">
+                  <input className={`${inputCls} font-mono`} value={m.id} placeholder="model id" onChange={(e) => setModel(i, { id: e.target.value.trim() })} />
+                  <input className={inputCls} value={m.label} placeholder="name" onChange={(e) => setModel(i, { label: e.target.value })} />
+                  <input className={`${inputCls} font-mono`} type="number" min={0} step={0.01} placeholder="—" value={m.inputPer1M ?? ""} onChange={(e) => setModel(i, { inputPer1M: num(e.target.value) })} />
+                  <input className={`${inputCls} font-mono`} type="number" min={0} step={0.01} placeholder="—" value={m.outputPer1M ?? ""} onChange={(e) => setModel(i, { outputPer1M: num(e.target.value) })} />
+                  <input className={`${inputCls} font-mono`} type="number" min={0} step={1000} placeholder="—" value={m.contextWindow ?? ""} onChange={(e) => setModel(i, { contextWindow: num(e.target.value) })} />
+                  <button className="cursor-pointer text-ink-400 hover:text-rust" onClick={() => onChange({ ...p, models: p.models.filter((_, j) => j !== i) })} title="Remove this model" aria-label={`Remove ${m.id || "model"}`}>×</button>
+                </div>
+              ))}
+              <button type="button" className="cursor-pointer text-[11.5px] text-ink-400 hover:text-ink-200" onClick={() => onChange({ ...p, models: [...p.models, { id: "", label: "" }] })}>
+                + Add a model
+              </button>
+            </div>
+          </Block>
+
+          <Block title="When it runs out">
+            <RunsOut p={p} onChange={onChange} />
+          </Block>
+
+          {usage ? (
+            <Block title="Usage" hint={usage.plan ?? undefined}>
+              <ProviderUsageCard u={usage} compact />
+            </Block>
+          ) : null}
+
+          <Block title="Try it" hint="Sends one tiny message through exactly the path a stage would use.">
+            <div className="flex flex-wrap items-center gap-2">
+              <Select wide wrapClassName="max-w-[260px]" className="font-mono" value={testModel} onChange={(e) => setTestModel(e.target.value)}>
+                {testIds.length ? null : <option value="">first model it reports</option>}
+                {testIds.map((id) => <option key={id} value={id}>{id}</option>)}
+              </Select>
+              <Button
+                size="sm"
+                busy={testing}
+                disabled={!p.enabled || unsaved}
+                title={unsaved ? "Click Save settings (top right) first" : !p.enabled ? "Turn it on first" : undefined}
+                onClick={() =>
+                  void (async () => {
+                    setTesting(true);
+                    try {
+                      setResult(await api.testProvider(p.id, testModel || undefined));
+                    } catch (err) {
+                      setResult({ ok: false, latencyMs: 0, modelEcho: null, usageReported: false, costReported: false, error: err instanceof Error ? err.message : String(err) });
+                    } finally {
+                      setTesting(false);
+                    }
+                  })()
+                }
+              >
+                Test
+              </Button>
+              {unsaved ? <span className="text-[11px] text-amber">Unsaved changes: click <b>Save settings</b> (top right) first.</span> : null}
+              {!unsaved && !p.enabled ? <span className="text-[11px] text-ink-500">Turn it on to test it.</span> : null}
+            </div>
+            {result ? <TestResult r={result} /> : null}
+          </Block>
+
+          <div className="flex justify-end border-t border-ink-800 pt-3">
+            <Button size="sm" variant="danger" onClick={onRemove} title="Takes it off the board when you click Save settings">
+              Remove provider
+            </Button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -293,15 +383,25 @@ export function ProviderSettings({ providers, onChange }: { providers: Provider[
   const [rows, setRows] = useState<ProviderRow[]>([]);
   const [presets, setPresets] = useState<ProviderPreset[]>([]);
   const [pick, setPick] = useState("");
+  // Every card starts folded: the page is a list to scan, and one card open is a long form.
+  const [openIds, setOpenIds] = useState<Set<string>>(new Set());
   const reload = () => void api.providers().then(setRows).catch(() => null);
   useEffect(() => {
     reload();
     void api.providerPresets().then(setPresets).catch(() => null);
   }, []);
   const has = (id: string) => rows.find((r) => r.id === id)?.hasSecret ?? false;
+  const toggle = (id: string) => setOpenIds((s) => {
+    const next = new Set(s);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    return next;
+  });
+  const allOpen = providers.length > 0 && providers.every((p) => openIds.has(p.id));
+  const preset = presets.find((p) => p.id === pick);
+  const on = providers.filter((p) => p.enabled).length;
 
   const add = async () => {
-    const preset = presets.find((p) => p.id === pick);
     if (!preset) return;
     let id = preset.id;
     for (let n = 2; providers.some((p) => p.id === id); n++) id = `${preset.id}-${n}`;
@@ -309,6 +409,8 @@ export function ProviderSettings({ providers, onChange }: { providers: Provider[
     const next = [...providers, { ...rest, id, enabled: true }];
     onChange(next);
     setPick("");
+    // The one just added opens: its key is usually the next thing to fill in.
+    setOpenIds((s) => new Set(s).add(id));
     // Saved straight away, so Test and the stage pickers work without hunting for the Save button.
     // A preset with a placeholder token (Ollama, LM Studio) gets it stored server-side on this save.
     await api.patchSettings({ providers: next }).catch(() => null);
@@ -323,21 +425,30 @@ export function ProviderSettings({ providers, onChange }: { providers: Provider[
       >
         <CodexCard />
         <LocalModelsGuide providers={providers} presets={presets} />
-        <div className="flex items-center gap-2">
-          <Select wide wrapClassName="max-w-[320px]" value={pick} onChange={(e) => setPick(e.target.value)}>
-            <option value="">Add from a preset…</option>
-            {presets.map((p) => <option key={p.id} value={p.id}>{p.label} — {p.kind}</option>)}
-          </Select>
-          <Button size="sm" disabled={!pick} onClick={() => void add()}>Add</Button>
+
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <h3 className="text-[12.5px] font-semibold text-ink-100">On the board</h3>
+          {providers.length ? <span className="text-[11.5px] text-ink-500">{on} of {providers.length} on</span> : null}
+          {providers.length > 1 ? (
+            <button
+              type="button"
+              className="ml-auto cursor-pointer text-[11.5px] text-ink-400 hover:text-ink-100"
+              onClick={() => setOpenIds(allOpen ? new Set() : new Set(providers.map((p) => p.id)))}
+            >
+              {allOpen ? "Collapse all" : "Expand all"}
+            </button>
+          ) : null}
         </div>
-        {pick ? <p className="mt-2 text-[11.5px] text-ink-400">{presets.find((p) => p.id === pick)?.blurb} <span className="text-ink-500">{presets.find((p) => p.id === pick)?.help}</span></p> : null}
+
         {providers.length ? (
-          <div className="mt-4 space-y-3">
+          <div className="mt-2 space-y-2">
             {providers.map((p, i) => (
               <ProviderCard
                 key={p.id}
                 p={p}
                 hasSecret={has(p.id)}
+                open={openIds.has(p.id)}
+                onToggle={() => toggle(p.id)}
                 onChange={(np) => onChange(providers.map((x, j) => (j === i ? np : x)))}
                 onRemove={() => onChange(providers.filter((_, j) => j !== i))}
                 onSecretChanged={reload}
@@ -345,16 +456,32 @@ export function ProviderSettings({ providers, onChange }: { providers: Provider[
             ))}
           </div>
         ) : (
-          <p className="mt-4 text-[12px] text-ink-500">None yet. Every stage runs on Claude through your Claude Code login.</p>
+          <p className="mt-2 text-[12px] text-ink-500">None yet. Every stage runs on Claude through your Claude Code login.</p>
         )}
-        <p className="mt-4 text-[11.5px] text-ink-500">
-          <b className="text-ink-400">What stays the same:</b> Claude Code on another endpoint keeps the board tools, approvals, worktrees and
-          blocked-command list. <b className="text-ink-400">What changes:</b> costs are estimated from the prices you enter, Claude's usage
-          windows do not apply, and fast mode is Claude-only; effort is sent to Claude and to Codex (each Codex model offers its own levels), not to other providers. A text-only provider gets the diff or the file list in its
-          prompt instead of tools, so it can plan or review but not implement. <b className="text-ink-400">Usage:</b> z.ai, Kimi Code,
-          OpenRouter and the Kimi API report what is left of your plan or credit, shown here and in the top bar's usage panel; for the others
-          the board counts what it sent.
-        </p>
+
+        <div className="mt-3 rounded-lg border border-dashed border-ink-700 p-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[12px] text-ink-300">Add a provider</span>
+            <Select wide wrapClassName="max-w-[360px] grow basis-[220px]" value={pick} onChange={(e) => setPick(e.target.value)}>
+              <option value="">Pick one…</option>
+              {presets.map((p) => <option key={p.id} value={p.id}>{p.label} — {p.kind}</option>)}
+            </Select>
+            <Button size="sm" variant={pick ? "primary" : undefined} disabled={!pick} onClick={() => void add()}>Add</Button>
+          </div>
+          {preset ? <p className="mt-2 text-[11.5px] text-ink-400">{preset.blurb} <span className="text-ink-500">{preset.help}</span></p> : null}
+        </div>
+
+        <details className="mt-4 text-[11.5px] text-ink-500">
+          <summary className="cursor-pointer select-none text-ink-400 hover:text-ink-200">How other providers differ from Claude</summary>
+          <p className="mt-1.5">
+            <b className="text-ink-400">What stays the same:</b> Claude Code on another endpoint keeps the board tools, approvals, worktrees and
+            blocked-command list. <b className="text-ink-400">What changes:</b> costs are estimated from the prices you enter, Claude's usage
+            windows do not apply, and fast mode is Claude-only; effort is sent to Claude and to Codex (each Codex model offers its own levels), not to other providers. A text-only provider gets the diff or the file list in its
+            prompt instead of tools, so it can plan or review but not implement. <b className="text-ink-400">Usage:</b> z.ai, Kimi Code,
+            OpenRouter and the Kimi API report what is left of your plan or credit, shown here and in the top bar's usage panel; for the others
+            the board counts what it sent.
+          </p>
+        </details>
       </Section>
     </>
   );

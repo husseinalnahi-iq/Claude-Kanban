@@ -9,6 +9,7 @@ import { TaskRunner } from "./engine/runner.ts";
 import { buildApp } from "./app.ts";
 import { openBrowser } from "./openBrowser.ts";
 import { Scheduler } from "./engine/scheduler.ts";
+import { ChatService } from "./engine/chat.ts";
 import { acquireInstanceLock } from "./instanceLock.ts";
 
 // Before the database is touched: starting up rewrites the state of everything that was running.
@@ -49,10 +50,13 @@ runner.pollUsage();
 const webDist = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "web", "dist");
 // Scheduled starts and repeating schedules. Its first tick catches up on anything missed while the board was off.
 const scheduler = new Scheduler({ repo, bus, runner });
-const app = await buildApp({ repo, bus, runner, scheduler, webDist, logger: process.env.KANBAN_LOG === "1" });
+// The side chat, with its watch on each chat's cache window (D331).
+const chat = new ChatService({ repo, bus, runner, scheduler });
+const app = await buildApp({ repo, bus, runner, scheduler, chat, webDist, logger: process.env.KANBAN_LOG === "1" });
 await app.listen({ host: HOST, port: PORT });
 console.log(`Claude Kanban server on http://${HOST}:${PORT}  (db: ${DB_PATH})`);
 scheduler.start();
+chat.startWatch();
 // Ask Claude Code which models this login has now, and again a few times a day: a newer model of a
 // family the settings name is picked up without anyone opening Settings. Free: no prompt is sent.
 void runner.claudeModels();
@@ -63,6 +67,7 @@ if (process.env.KANBAN_OPEN_BROWSER === "1") openBrowser(`http://${HOST}:${PORT}
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, async () => {
     scheduler.stop();
+    chat.stopWatch();
     await app.close();
     repo.db.close();
     process.exit(0);

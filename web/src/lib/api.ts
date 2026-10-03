@@ -1,9 +1,9 @@
+import type { TaskCommand } from "../../../server/src/engine/commands.ts";
 import type {
   ImageStatus,
   Approval, Attachment, DiffFile, EventRow, FastModeStatus, Message, MergePolicy, Milestone, Mode, Note, Policy, Project, ProjectEnv, Run, RunListItem, SessionTools, Settings, SkillInfo, Stage, Task, TaskCard, UsageLimit,
-  Provider, ProviderTestResult, SetupCheckResult, ModelCatalogResult, Schedule, Chat, ChatMessage, Effort, ClaudeModelsResult, SpecVersion,
-  ProviderUsage, ProviderOut, WsMessage, SuggestedSkill,
-} from "../../../server/src/types.ts";
+  Provider, ProviderTestResult, SetupCheckResult, ModelCatalogResult, Schedule, Chat, ChatFile, ChatFolder, ChatMessage, Effort, ClaudeModelsResult, SpecVersion,
+  ProviderUsage, ProviderOut, WsMessage, SuggestedSkill, FolderColor } from "../../../server/src/types.ts";
 import type { ProviderPreset } from "../../../server/src/engine/providers/presets.ts";
 import type { LocalModelsStatus } from "../../../server/src/setup/local.ts";
 export type { LocalModelsStatus };
@@ -151,7 +151,18 @@ export const api = {
 
   chats: (projectId: string) => req<Chat[]>("GET", `/projects/${projectId}/chats`),
   createChat: (projectId: string) => req<Chat>("POST", `/projects/${projectId}/chats`, {}),
-  patchChat: (id: string, b: { title?: string; model?: string; effort?: Effort; provider?: string; archived?: boolean }) => req<Chat>("PATCH", `/chats/${id}`, b),
+  patchChat: (id: string, b: { title?: string; model?: string; effort?: Effort; provider?: string; archived?: boolean; folder_id?: string | null; keep_alive?: boolean; use_tools?: boolean; mode?: Mode }) => req<Chat>("PATCH", `/chats/${id}`, b),
+  suggestNext: (id: string) => req<ChatMessage>("POST", `/chats/${id}/suggest`, {}),
+  chatFiles: (id: string) => req<ChatFile[]>("GET", `/chats/${id}/files`),
+  addChatFile: (id: string, b: { name: string; data: string }) => req<ChatFile>("POST", `/chats/${id}/files`, b),
+  deleteChatFile: (id: string) => req<{ ok: true }>("DELETE", `/chat-files/${id}`),
+  chatFileUrl: (id: string) => `/api/chat-files/${id}/raw`,
+  /** Opens the file on the computer the board runs on, or shows it selected in its folder (D351). */
+  openChatFile: (id: string, where: "file" | "folder") => req<{ ok: true }>("POST", `/chat-files/${id}/open`, { where }),
+  chatFolders: (projectId: string) => req<ChatFolder[]>("GET", `/projects/${projectId}/chat-folders`),
+  createChatFolder: (projectId: string, name: string) => req<ChatFolder>("POST", `/projects/${projectId}/chat-folders`, { name }),
+  patchChatFolder: (id: string, b: { name?: string; color?: FolderColor | null }) => req<ChatFolder>("PATCH", `/chat-folders/${id}`, b),
+  deleteChatFolder: (id: string) => req<{ ok: true }>("DELETE", `/chat-folders/${id}`),
   deleteChat: (id: string) => req<{ ok: true }>("DELETE", `/chats/${id}`),
   chatMessages: (id: string) => req<ChatMessage[]>("GET", `/chats/${id}/messages`),
   sendChat: (id: string, text: string) => req<ChatMessage>("POST", `/chats/${id}/send`, { text }),
@@ -169,9 +180,12 @@ export const api = {
   diff: (id: string) => req<DiffFile[]>("GET", `/tasks/${id}/diff`),
 
   runs: () => req<RunListItem[]>("GET", "/runs"),
+  explainCommand: (command: string) => req<{ text: string }>("POST", "/explain", { command }),
+  taskCommands: (taskId: string) => req<TaskCommand[]>("GET", `/tasks/${taskId}/commands`),
   events: (runId: string, after = 0) => req<EventRow[]>("GET", `/runs/${runId}/events?after=${after}`),
   pendingApprovals: () => req<Approval[]>("GET", "/approvals"),
-  decide: (id: string, decision: "allow" | "deny", note?: string) => req<Approval>("POST", `/approvals/${id}`, { decision, note }),
+  /** `always`: allow, and stop asking for this command in this project (D353). */
+  decide: (id: string, decision: "allow" | "deny", note?: string, always?: boolean) => req<Approval>("POST", `/approvals/${id}`, { decision, note, always }),
   /** Answer a question Claude asked: question text → the option label(s) chosen, or your own words. */
   answer: (id: string, answers: Record<string, string>) => req<Approval>("POST", `/approvals/${id}/answer`, { answers }),
 
@@ -238,6 +252,8 @@ export const api = {
   deleteAttachment: (id: string) => req<{ ok: true }>("DELETE", `/attachments/${id}`),
   /** The bytes: inline for an <img src>, a download for anything else. */
   attachmentUrl: (id: string) => `/api/attachments/${id}/raw`,
+  /** Opens the file on the computer the board runs on, or shows it selected in its folder (D351). */
+  openAttachment: (id: string, where: "file" | "folder") => req<{ ok: true }>("POST", `/attachments/${id}/open`, { where }),
   /** A text file's content, as plain text, for previews. */
   attachmentText: async (id: string) => {
     const r = await fetch(`/api/attachments/${id}/text`);

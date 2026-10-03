@@ -48,7 +48,7 @@ test("linking adds the subscription entry once, moves an untouched critic to the
   const again = linkCodexPatch(repo.getSettings(), ROWS, () => false);
   assert.deepEqual(again.patch, {}, "linking twice changes nothing");
 
-  repo.updateSettings({ debate: { enabled: true, critic: { provider: "anthropic", model: "claude-opus-5-5", effort: "high" } }, imageProvider: "cloudflare" });
+  repo.updateSettings({ debate: { enabled: true, critic: { provider: "anthropic", model: "claude-opus-5-5", effort: "high" }, mode: "once", rounds: 3 }, imageProvider: "cloudflare" });
   const chosen = linkCodexPatch(repo.getSettings(), ROWS, () => false);
   assert.equal(chosen.patch.debate, undefined, "a critic you chose is left alone");
   assert.equal(chosen.patch.imageProvider, undefined, "a picture maker you chose is left alone");

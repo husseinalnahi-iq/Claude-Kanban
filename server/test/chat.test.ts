@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fakeQuery, setup } from "./helpers.ts";
-import { cardsLine, ChatService, CHAT_DISALLOWED, chatPrompt, describeTool, turnContext } from "../src/engine/chat.ts";
+import { cardsLine, ChatService, CHAT_COMMAND_REFUSED, CHAT_COMMANDS_OFF, CHAT_DISALLOWED, chatPrompt, describeTool, turnContext } from "../src/engine/chat.ts";
 import { chatBoardHandlers } from "../src/engine/chatBoard.ts";
+import { connectedSystemIn } from "../src/engine/connected.ts";
 import { isAnswerStage } from "../src/engine/answer.ts";
 import { Scheduler } from "../src/engine/scheduler.ts";
 import type { QueryFn } from "../src/engine/runner.ts";
@@ -66,8 +67,10 @@ test("a chat reply streams, is stored with its tool lines, costs what it cost, a
     assert.equal(opts.cwd, s.project.path);
     assert.equal(opts.includePartialMessages, true);
     assert.deepEqual(opts.settingSources, ["project"]);
-    for (const t of ["Edit", "Write", "Bash", "AskUserQuestion"]) assert.ok(CHAT_DISALLOWED.includes(t) && opts.disallowedTools.includes(t), `${t} is not offered`);
+    for (const t of ["Edit", "Write", "AskUserQuestion"]) assert.ok(CHAT_DISALLOWED.includes(t) && opts.disallowedTools.includes(t), `${t} is not offered`);
     assert.equal(q.denied[0].behavior, "deny", "and refused if tried anyway");
+    assert.ok(!opts.disallowedTools.includes("Bash"), "the shell is offered, for read-only commands (D350)");
+    assert.equal(opts.hooks.PreToolUse.length, 1, "and a settings file's allow rule cannot take a command past canUseTool");
     assert.equal(opts.resume, undefined);
 
     chat.send(c.id, "And where are the costs?");
@@ -160,6 +163,8 @@ test("chat board tools: cards land in Backlog under the project's rules; queue a
 test("tool lines and the chat's instructions read plainly", () => {
   assert.equal(describeTool("Grep", { pattern: "useWs" }, "/p"), "searched the code for “useWs”");
   assert.equal(describeTool("mcp__board__board_create_task", { title: "Dark mode" }, "/p"), "created the card “Dark mode”");
+  assert.equal(describeTool("Bash", { command: "git log --oneline -5" }, "/p"), "ran “git log --oneline -5”: git shows the history of commits", "a command is explained in plain words (D336)");
+  assert.equal(describeTool("Bash", { command: "frobnicate --all" }, "/p"), "ran “frobnicate --all”", "one the table does not know is just shown");
   const p = chatPrompt({ name: "Shop", path: "/p" } as any, {
     models: [{ id: "claude-opus-5-5", label: "Opus 5.5" }],
     defaults: [{ stage: "plan", model: "claude-opus-5-5", effort: "high" }],
@@ -167,6 +172,7 @@ test("tool lines and the chat's instructions read plainly", () => {
   assert.doesNotMatch(p, /cannot edit files|should not offer/, "it never opens with what it cannot do (D283)");
   assert.match(p, /say what you will do/);
   assert.match(p, /stages \[\{stage:"answer"\}\]/, "a lookup is an answer card");
+  assert.match(p, /git log, git status, git diff/, "it knows it may run read-only commands itself (D350)");
   assert.match(p, /Opus 5\.5 \(claude-opus-5-5\)/, "it knows the board's models by name");
   assert.match(p, /Default stages: plan · claude-opus-5-5 · high/);
   assert.match(p, /Never queue or schedule a change card the user did not ask to run/);
@@ -249,6 +255,21 @@ test("the chat reads only inside its project, and never a file that holds keys",
     const keys = await can("Read", { file_path: `${s.dir}/.env` });
     assert.equal(keys.behavior, "deny", "a page it read could ask for your keys, and no card would show it");
     assert.match(keys.message, /passwords or keys/);
+    // Read-only commands run here under the supervised rule (D350); anything else is a card's job.
+    assert.equal((await can("Bash", { command: "git log --oneline -5" })).behavior, "allow", "git history answers 'what changed last' without a card");
+    assert.equal((await can("Bash", { command: "git status && git diff --stat" })).behavior, "allow");
+    assert.equal((await can("Bash", { command: "ls src" })).behavior, "allow");
+    for (const cmd of ["npm test", "git push", "git log > out.txt", "cat .env", "cat ../secrets.json", "echo hi | sh", "rm -rf src"]) {
+      const r = await can("Bash", { command: cmd });
+      assert.equal(r.behavior, "deny", `${cmd} is not read-only`);
+      assert.ok(r.message === CHAT_COMMAND_REFUSED || /passwords or keys/.test(r.message), `${cmd} is sent to a card, never apologised for`);
+    }
+    s.repo.updateSettings({ autoAllowReadOnly: false });
+    chat.send(c.id, "again");
+    await until(() => !chat.isBusy(c.id));
+    const off = await q.calls[1].options.canUseTool("Bash", { command: "git log" }, { signal: new AbortController().signal, toolUseID: "t", requestId: "r" });
+    assert.equal(off.behavior, "deny", "the setting that keeps read-only commands on a card covers the chat too");
+    assert.equal(off.message, CHAT_COMMANDS_OFF);
     assert.match(q.calls[0].prompt, /^\[Local time: .*\]\n\nhello$/, "the clock rides on the message, not the cached system prompt");
   } finally {
     s.cleanup();
@@ -328,7 +349,7 @@ test("a lookup is one answer stage that runs supervised on the main checkout and
   s.repo.updateSettings({ autoTriage: false });
   const h = chatBoardHandlers({ repo: s.repo, bus: s.bus, runner: s.runner }, s.project.id, null, () => {});
   try {
-    const made = read(h.createTask({ title: "Latest PO", spec_md: "The newest purchase order.", stages: [{ stage: "answer" }], mode: "autonomous", own_branch: true, live: true }));
+    const made = read(h.createTask({ title: "Latest PO", spec_md: "The newest purchase order.", stages: [{ stage: "answer" }], own_branch: true, live: true }));
     const t = s.repo.getTask(made.created.id)!;
     assert.equal(t.pipeline.length, 1);
     assert.ok(isAnswerStage(t.pipeline[0]));
@@ -495,4 +516,228 @@ test("switching a chat to another provider starts a fresh session that carries t
   } finally {
     s.cleanup();
   }
+});
+
+test("a card made by a chat set to autonomous runs autonomous unless the message says otherwise (D344)", () => {
+  const s = setup(replying().fn);
+  const chat = new ChatService({ repo: s.repo, bus: s.bus, runner: s.runner });
+  try {
+    const c = chat.create(s.project.id);
+    assert.equal(c.mode, "supervised", "a chat starts supervised");
+    const before = c.updated_at;
+    assert.equal(chat.update(c.id, { mode: "autonomous" }).mode, "autonomous");
+    assert.equal(s.repo.getChat(c.id)!.updated_at, before, "flipping the switch is not activity");
+
+    const h = chatBoardHandlers({ repo: s.repo, bus: s.bus, runner: s.runner }, s.project.id, c.id, () => {});
+    const made = (args: Record<string, unknown>) => s.repo.getTask(JSON.parse(h.createTask(args as never).content[0].text).created.id)!;
+    assert.equal(made({ title: "Dark mode", spec_md: "x" }).mode, "autonomous", "the chat's switch is the default");
+    assert.equal(made({ title: "Dark mode", spec_md: "x", mode: "supervised" }).mode, "supervised", "a mode named in the message wins");
+    assert.equal(made({ title: "Latest PO", spec_md: "x", stages: [{ stage: "answer" }] }).mode, "autonomous", "a lookup follows the switch too: the project's own folder, nothing asked (D352)");
+    assert.match(chatPrompt(s.project, { models: [], defaults: [], mode: "autonomous" }), /mode switch applies \(it is set to autonomous now\)/);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("a new folder gets a colour nobody else has, and it can be changed or taken away", async () => {
+  const s = setup(replying().fn);
+  const chat = new ChatService({ repo: s.repo, bus: s.bus, runner: s.runner });
+  try {
+    const a = chat.createFolder(s.project.id, "Billing");
+    const b = chat.createFolder(s.project.id, "Ideas");
+    assert.ok(a.color && b.color, "every new folder has a colour");
+    assert.notEqual(a.color, b.color, "neighbours never look alike by accident");
+    assert.equal(chat.updateFolder(b.id, { color: "rose" }).color, "rose");
+    assert.equal(chat.updateFolder(b.id, { color: null }).color, null, "a folder can go back to neutral");
+    assert.equal(chat.updateFolder(b.id, { color: a.color }).name, "Ideas", "changing the colour leaves the name alone");
+    const pushed = s.seen.filter((m: WsMessage) => m.type === "chat.folders") as Extract<WsMessage, { type: "chat.folders" }>[];
+    assert.equal(pushed.at(-1)!.folders.find((f) => f.id === b.id)!.color, a.color, "the colour rides on the folder list every open page gets");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("a reply that fails with a 'success' result shows the real error, not the word success", async () => {
+  const session_id = "s_fail";
+  const query: QueryFn = (params) =>
+    (async function* () {
+      for await (const _ of params.prompt) { /* read it through, as the SDK would */ }
+      yield { type: "system", subtype: "init", session_id, model: "m" } as any;
+      yield { type: "result", subtype: "success", is_error: true, result: "API Error: 500 the inference gateway is down", total_cost_usd: 0, session_id, modelUsage: {} } as any;
+    })();
+  const s = setup(query);
+  const chat = new ChatService({ repo: s.repo, bus: s.bus, runner: s.runner });
+  try {
+    const c = chat.create(s.project.id);
+    chat.send(c.id, "hi");
+    await until(() => !chat.isBusy(c.id));
+    const errors = s.repo.chatMessages(c.id).filter((m) => m.role === "error");
+    assert.equal(errors.length, 1);
+    assert.match(errors[0]!.text, /inference gateway is down/);
+    assert.doesNotMatch(errors[0]!.text, /: success/);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("a chat can be filed in a folder, renamed with it, and deleting the folder keeps the chat (D328)", async () => {
+  const s = setup(replying().fn);
+  const chat = new ChatService({ repo: s.repo, bus: s.bus, runner: s.runner });
+  try {
+    const c = chat.create(s.project.id);
+    const f = chat.createFolder(s.project.id, "  Billing  ");
+    assert.equal(f.name, "Billing", "names are trimmed");
+    assert.deepEqual(chat.folders(s.project.id).map((x) => x.id), [f.id]);
+
+    const before = s.repo.getChat(c.id)!.updated_at;
+    const filed = chat.update(c.id, { folder_id: f.id });
+    assert.equal(filed.folder_id, f.id);
+    assert.equal(filed.updated_at, before, "filing a chat is not activity: it keeps its place in the list");
+    assert.throws(() => chat.update(c.id, { folder_id: "cf_missing" }), /folder is gone/);
+
+    assert.equal(chat.updateFolder(f.id, { name: "Invoices" }).name, "Invoices");
+    const pushed = s.seen.filter((m: WsMessage) => m.type === "chat.folders") as Extract<WsMessage, { type: "chat.folders" }>[];
+    assert.equal(pushed.at(-1)!.folders[0]!.name, "Invoices", "every change pushes the project's whole folder list");
+
+    chat.deleteFolder(f.id);
+    assert.equal(chat.folders(s.project.id).length, 0);
+    const after = s.repo.getChat(c.id)!;
+    assert.ok(after, "the chat is still there");
+    assert.equal(after.folder_id, null, "just unfiled");
+    const republished = s.seen.filter((m: WsMessage) => m.type === "chat.updated" && m.chat.id === c.id) as Extract<WsMessage, { type: "chat.updated" }>[];
+    assert.equal(republished.at(-1)!.chat.folder_id, null, "and the board hears that it moved out");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("the cache window: a reply warms the chat, a warning goes out 15 minutes before it ends, a keep-alive is sent 5 minutes before, and archived or switched-off chats are left alone (D331, D332)", async () => {
+  const q = replying();
+  const s = setup(q.fn);
+  const chat = new ChatService({ repo: s.repo, bus: s.bus, runner: s.runner });
+  const min = 60_000;
+  try {
+    const c = chat.create(s.project.id);
+    assert.equal(c.warm_at, null, "no reply yet, no window");
+    assert.equal(c.keep_alive, true, "on by default");
+    chat.send(c.id, "Hello there");
+    await until(() => !chat.isBusy(c.id));
+    const warm = s.repo.getChat(c.id)!.warm_at!;
+    assert.ok(warm, "a reply starts the window");
+    const t0 = Date.parse(warm);
+
+    chat.tick(new Date(t0 + 30 * min));
+    assert.equal(s.seen.filter((m: WsMessage) => m.type === "chat.expiring").length, 0, "nothing to say with half an hour left");
+
+    chat.tick(new Date(t0 + 46 * min));
+    chat.tick(new Date(t0 + 47 * min));
+    const warnings = s.seen.filter((m: WsMessage) => m.type === "chat.expiring") as Extract<WsMessage, { type: "chat.expiring" }>[];
+    assert.equal(warnings.length, 1, "warned once per window, not on every tick");
+    assert.equal(warnings[0].chat.id, c.id);
+    assert.equal(warnings[0].minutes, 14);
+    assert.equal(q.calls.length, 1, "a warning sends nothing to Claude");
+
+    chat.tick(new Date(t0 + 56 * min));
+    await until(() => !chat.isBusy(c.id));
+    assert.equal(q.calls.length, 2, "five minutes before the end, the keep-alive went");
+    assert.ok(q.calls[1].prompt.includes("Automatic keep-alive"), "with the note asking for one line");
+    assert.ok(q.calls[1].prompt.includes("keeping this chat warm"), "and the message from Settings");
+    const msgs = s.repo.chatMessages(c.id);
+    const sent = msgs.filter((m) => m.role === "user");
+    assert.equal(sent.length, 2);
+    assert.equal(sent[1].meta.keepalive, true, "stored as the board's own message");
+    assert.equal(s.repo.getChat(c.id)!.title, "Hello there", "a keep-alive never names the chat");
+    assert.notEqual(s.repo.getChat(c.id)!.warm_at, warm, "its reply opened a new window");
+    assert.equal(s.repo.lastOwnChatMessage(c.id)!.text, "Hello there", "and does not count as your activity");
+
+    // Switched off on the chat: the window closes quietly.
+    chat.update(c.id, { keep_alive: false });
+    const t1 = Date.parse(s.repo.getChat(c.id)!.warm_at!);
+    chat.tick(new Date(t1 + 56 * min));
+    assert.equal(q.calls.length, 2, "no keep-alive for a chat that said no");
+    chat.tick(new Date(t1 + 61 * min));
+    assert.equal(s.repo.getChat(c.id)!.warm_at, null, "a window that has passed is forgotten");
+
+    // On again, but archived: nothing is sent to a chat nobody can see.
+    chat.update(c.id, { keep_alive: true, archived: true });
+    s.repo.updateChat(c.id, { warm_at: new Date(t1).toISOString() });
+    chat.tick(new Date(t1 + 56 * min));
+    assert.equal(q.calls.length, 2, "archived chats are left alone");
+
+    // Reopened, but your last own message is older than the ceiling in Settings.
+    chat.update(c.id, { archived: false });
+    s.repo.updateChat(c.id, { warm_at: new Date(t1).toISOString() });
+    chat.tick(new Date(t1 + 56 * min + 8 * 60 * min));
+    assert.equal(q.calls.length, 2, "not kept warm for ever: it stops hours after your last message");
+
+    // Off in Settings: no chat gets one, whatever its own switch says.
+    s.repo.updateSettings({ chatKeepAlive: false } as never);
+    s.repo.updateChat(c.id, { warm_at: new Date(t1).toISOString() });
+    chat.tick(new Date(t1 + 56 * min));
+    assert.equal(q.calls.length, 2, "the Settings switch wins");
+  } finally {
+    chat.stopWatch();
+    s.cleanup();
+  }
+});
+
+test("files attached to a chat ride with the next message, are readable by the chat, and ✦ What next? is the board's own marked message (D334, D338)", async () => {
+  const q = replying();
+  const s = setup(q.fn);
+  const chat = new ChatService({ repo: s.repo, bus: s.bus, runner: s.runner });
+  try {
+    s.repo.setStateDir(s.dir);
+    const c = chat.create(s.project.id);
+    const f = chat.addFile(c.id, { name: "orders.csv", data: Buffer.from("a,b\n1,2\n") });
+    assert.equal(f.media_type, "text/csv");
+    assert.equal(f.message_id, null, "waits for the next message");
+    assert.throws(() => chat.addFile(c.id, { name: "virus.exe", data: Buffer.from("x") }), /does not handle/);
+
+    chat.send(c.id, "What is in this file?");
+    await until(() => !chat.isBusy(c.id));
+    const sent = s.repo.chatMessages(c.id).find((m) => m.role === "user")!;
+    assert.equal(sent.meta.files?.[0]?.name, "orders.csv", "the message remembers its files");
+    assert.equal(s.repo.getChatFile(f.id)!.message_id, sent.id, "and the file remembers its message");
+    assert.ok(q.calls[0].prompt.includes("[Attached files]") && q.calls[0].prompt.includes(f.path), "Claude is told where the file is");
+    assert.ok(q.calls[0].prompt.includes("open with Read"));
+    const can = q.calls[0].options.canUseTool as (n: string, i: Record<string, unknown>) => Promise<{ behavior: string }>;
+    assert.equal((await can("Read", { file_path: f.path })).behavior, "allow", "the chat may read its own files, outside the project");
+    assert.equal((await can("mcp__slack__send", {})).behavior, "deny", "other servers are not offered without my connectors and skills");
+    assert.equal(q.calls[0].options.strictMcpConfig, true);
+    assert.throws(() => chat.removeFile(f.id), /went with a message/);
+
+    chat.update(c.id, { use_tools: true });
+    chat.send(c.id, "Check Slack");
+    await until(() => !chat.isBusy(c.id));
+    const o = q.calls[1].options;
+    assert.equal(o.strictMcpConfig, undefined, "your MCP servers load");
+    assert.deepEqual(o.settingSources, ["user", "project"], "with your user settings, plugins and skills");
+    assert.equal(o.skills, undefined);
+    const can2 = o.canUseTool as (n: string, i: Record<string, unknown>) => Promise<{ behavior: string }>;
+    assert.equal((await can2("mcp__slack__send", {})).behavior, "allow", "a connector's tool is allowed");
+    assert.equal((await can2("Skill", { skill: "pdf" })).behavior, "allow");
+    assert.equal((await can2("Bash", { command: "rm -rf /" })).behavior, "deny", "but never a command or an edit");
+    assert.ok(q.calls[1].prompt.includes("Check Slack") && !q.calls[1].prompt.includes("[Attached files]"), "a sent file does not ride twice");
+
+    chat.suggest(c.id);
+    await until(() => !chat.isBusy(c.id));
+    const ask = s.repo.chatMessages(c.id).filter((m) => m.role === "user").at(-1)!;
+    assert.equal(ask.meta.suggest, true, "marked as the board's own question");
+    assert.ok(q.calls[2].prompt.includes("suggest the next 5 things"));
+    assert.equal(s.repo.getChat(c.id)!.title, "What is in this file?", "never retitles the chat");
+    assert.ok(s.repo.lastOwnChatMessage(c.id)!.meta.suggest, "but you pressed it, so it counts as your activity for Keep warm");
+  } finally {
+    chat.stopWatch();
+    s.cleanup();
+  }
+});
+
+test("the chat offers its connectors switch only when a message names a system people connect to Claude (D349)", () => {
+  assert.equal(connectedSystemIn("What did the team say in Slack today?"), "Slack");
+  assert.equal(connectedSystemIn("check my inbox for the invoice"), "your email");
+  assert.equal(connectedSystemIn("the numbers are in a Google Sheet"), "Google Sheets");
+  assert.equal(connectedSystemIn("Where would I change the page title?"), null, "a project question is not one");
+  assert.equal(connectedSystemIn("what is in this spreadsheet?"), null, "an attached spreadsheet is read here or by a card, not a connector");
+  assert.equal(connectedSystemIn("fit a linear regression to the sales"), null, "Linear the tracker, not the maths");
+  assert.equal(connectedSystemIn("zoom in on the chart"), null);
 });

@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useState, type ComponentType } from "react";
 import { api } from "./lib/api.ts";
-import { navigate, useRoute, type View } from "./lib/router.ts";
+import { getRoute, navigate, useRoute, type View } from "./lib/router.ts";
 import { useAppData } from "./lib/store.tsx";
 import { useWs, useWsConnected, useWsReconnect } from "./lib/ws.ts";
 import { applyFont, applyTheme, getViewPrefs, setViewPrefs, useViewPrefs, ZOOMS } from "./lib/view.ts";
@@ -27,6 +27,7 @@ import { useSetupCount } from "./lib/setupCount.ts";
 import { ChatPanel } from "./components/chat/ChatPanel.tsx";
 import { ErrorBoundary, StaleServerBanner } from "./components/ErrorBoundary.tsx";
 import { Button, Empty } from "./components/ui.tsx";
+import { useCommandFeed } from "./components/CommandExplainer.tsx";
 
 /**
  * Fetched when first shown, not with the page: the screens you may never open this session, and the
@@ -47,6 +48,7 @@ const Dashboard = later(() => import("./views/Dashboard.tsx").then((m) => ({ def
 const Settings = later(() => import("./views/Settings.tsx").then((m) => ({ default: m.Settings })));
 const Tour = later(() => import("./views/Tour.tsx").then((m) => ({ default: m.Tour })));
 const Setup = later(() => import("./views/Setup.tsx").then((m) => ({ default: m.Setup })));
+const Studio = later(() => import("./views/Studio.tsx").then((m) => ({ default: m.Studio })));
 const TerminalDock = later(() => import("./components/TerminalDock.tsx").then((m) => ({ default: m.TerminalDock })));
 
 const NAV: { view: View; label: string; key: string }[] = [
@@ -59,6 +61,7 @@ const NAV: { view: View; label: string; key: string }[] = [
   { view: "settings", label: "Settings", key: "7" },
   { view: "tour", label: "✦ Tour", key: "8" },
   { view: "setup", label: "Setup", key: "9" },
+  { view: "studio", label: "✦ Studio", key: "0" },
 ];
 
 const initials = (name: string) =>
@@ -107,7 +110,8 @@ export function App() {
       const n = NAV.find((x) => x.key === e.key);
       if (n && !e.ctrlKey && !e.metaKey && !e.altKey) navigate({ view: n.view });
       if (e.key === "a" && !e.ctrlKey && !e.metaKey && !e.altKey) navigate({ view: "approvals" });
-      if (e.key === "c" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      // The Studio is the chat: there is no side panel to open over it.
+      if (e.key === "c" && !e.ctrlKey && !e.metaKey && !e.altKey && getRoute().view !== "studio") {
         e.preventDefault(); // or the "c" lands in the chat box that just took focus
         setChatting((v) => !v);
       }
@@ -156,8 +160,39 @@ export function App() {
 
   // A run waiting on you, or anything you missed, shows on the browser tab itself.
   useTabBadge(pending.length);
+  // Every open list of a task's commands hears that task's moves through one listener.
+  useCommandFeed();
 
   const needsProject = route.view === "board" || route.view === "roadmap";
+
+  // Everything that can open over any screen: the task, the forms, the welcome, the toasts.
+  const overlays = (
+    <>
+      {route.taskId ? (
+        <ErrorBoundary key={route.taskId} onClose={() => navigate({ taskId: null })}>
+          <TaskDrawer taskId={route.taskId} onClose={() => navigate({ taskId: null })} />
+        </ErrorBoundary>
+      ) : null}
+      {adding ? <ErrorBoundary onClose={() => setAdding(false)}><NewProjectForm onClose={() => setAdding(false)} /></ErrorBoundary> : null}
+      {searching ? <ErrorBoundary onClose={() => setSearching(false)}><SearchModal projectId={project?.id} onClose={() => setSearching(false)} /></ErrorBoundary> : null}
+      {welcome ? <ErrorBoundary onClose={closeWelcome}><Welcome hasProjects={projects.length > 0} onAddProject={() => setAdding(true)} /></ErrorBoundary> : null}
+      <Toasts />
+    </>
+  );
+
+  // The Studio takes the whole window: no project rail, no tabs, nothing of the board until its Board button.
+  if (route.view === "studio") {
+    return (
+      <div className="h-full">
+        <ErrorBoundary key={`studio:${route.projectId ?? ""}`} onClose={() => navigate({ view: "board" })}>
+          <Suspense fallback={<div className="p-6 text-[13px] text-ink-400">Loading…</div>}>
+            <Studio project={project} projects={projects} onAddProject={() => setAdding(true)} onSearch={() => setSearching(true)} />
+          </Suspense>
+        </ErrorBoundary>
+        {overlays}
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full">
@@ -304,20 +339,12 @@ export function App() {
         </ErrorBoundary>
       </div>
 
-      {route.taskId ? (
-        <ErrorBoundary key={route.taskId} onClose={() => navigate({ taskId: null })}>
-          <TaskDrawer taskId={route.taskId} onClose={() => navigate({ taskId: null })} />
-        </ErrorBoundary>
-      ) : null}
-      {adding ? <ErrorBoundary onClose={() => setAdding(false)}><NewProjectForm onClose={() => setAdding(false)} /></ErrorBoundary> : null}
-      {searching ? <ErrorBoundary onClose={() => setSearching(false)}><SearchModal projectId={project?.id} onClose={() => setSearching(false)} /></ErrorBoundary> : null}
       {chatting && project ? (
         <ErrorBoundary key={project.id} onClose={() => setChatting(false)}>
           <ChatPanel project={project} onClose={() => setChatting(false)} />
         </ErrorBoundary>
       ) : null}
-      {welcome ? <ErrorBoundary onClose={closeWelcome}><Welcome hasProjects={projects.length > 0} onAddProject={() => setAdding(true)} /></ErrorBoundary> : null}
-      <Toasts />
+      {overlays}
     </div>
   );
 }

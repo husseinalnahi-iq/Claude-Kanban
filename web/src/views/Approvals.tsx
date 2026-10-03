@@ -9,6 +9,8 @@ import { CredentialWarning, riskOf } from "../components/CredentialWarning.tsx";
 import { QuestionCard } from "../components/QuestionCard.tsx";
 import { isQuestion } from "../lib/questions.ts";
 import { inputSummary } from "../lib/approvals.ts";
+import { CommandExplainer } from "../components/CommandExplainer.tsx";
+import { AlwaysAllow } from "../components/AlwaysAllow.tsx";
 
 function Row({ a, focused }: { a: Approval; focused: boolean }) {
   if (isQuestion(a)) return <QuestionCard a={a} focused={focused} />;
@@ -31,12 +33,14 @@ function ToolRow({ a, focused }: { a: Approval; focused: boolean }) {
         <span className="font-mono text-[10.5px] text-ink-500">{ago(a.created_at)}</span>
       </div>
       <CredentialWarning a={a} />
+      {typeof i.command === "string" ? <CommandExplainer command={i.command} open /> : null}
       <pre className="max-h-40 overflow-auto rounded bg-ink-950 px-2.5 py-2 font-mono text-[11.5px] text-ink-300 whitespace-pre-wrap">
         {typeof i.command === "string" ? `$ ${i.command}` : a.tool_name === IMAGE_TOOL ? `Make an image: ${String(i.prompt ?? "")}\n→ ${String(i.file ?? "generated-images/…")}` : JSON.stringify(i, null, 2).slice(0, 2000)}
       </pre>
       <div className="mt-2 flex items-center gap-2">
         <input className={inputCls} placeholder="Note to Claude (sent with Deny)" value={note} onChange={(e) => setNote(e.target.value)} />
         <Button variant="danger" busy={busy} onClick={() => run(() => api.decide(a.id, "deny", note))}>Deny</Button>
+        <AlwaysAllow a={a} busy={busy} run={run} />
         <Button variant="go" busy={busy} onClick={() => run(() => api.decide(a.id, "allow", note))}>Allow</Button>
       </div>
       <div className="mt-2"><ErrorLine error={error} /></div>

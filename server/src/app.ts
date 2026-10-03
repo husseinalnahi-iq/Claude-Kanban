@@ -35,6 +35,8 @@ import { scheduleRoutes } from "./routes/schedules.ts";
 import { Scheduler } from "./engine/scheduler.ts";
 import { ChatService } from "./engine/chat.ts";
 import { chatRoutes } from "./routes/chats.ts";
+import { ExplainService } from "./engine/explainAi.ts";
+import { explainRoutes } from "./routes/explain.ts";
 import { SpecWriter } from "./engine/specWriter.ts";
 import { specRoutes } from "./routes/specs.ts";
 import { recordRoutes } from "./routes/record.ts";
@@ -129,6 +131,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     await providerRoutes(api, deps);
     await scheduleRoutes(api, { ...deps, scheduler });
     await chatRoutes(api, { ...deps, chat });
+    await explainRoutes(api, { explain: new ExplainService(deps.runner) });
     await specRoutes(api, { ...deps, specs });
     await recordRoutes(api, deps);
   }, { prefix: "/api" });

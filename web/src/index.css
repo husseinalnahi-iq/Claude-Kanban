@@ -435,7 +435,24 @@ select:focus-visible {
 @keyframes settle { from { opacity: 0; transform: translateY(4px); filter: blur(2px); } to { opacity: 1; transform: none; filter: none; } }
 .settle { animation: settle 0.45s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 
+/* What a command does, shown as motion before it is read (CommandExplainer, D336). */
+@keyframes kb-ex-blink { 0%, 90%, 100% { transform: scaleY(1); } 95% { transform: scaleY(0.15); } }
+@keyframes kb-ex-run { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(2px); } }
+@keyframes kb-ex-write { 0%, 100% { transform: rotate(0) translate(0, 0); } 25% { transform: rotate(-8deg) translate(-1px, 1px); } 75% { transform: rotate(6deg) translate(1px, 0); } }
+@keyframes kb-ex-travel { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
+@keyframes kb-ex-drop { 0% { transform: translateY(-3px); opacity: 0.4; } 60% { transform: translateY(1px); opacity: 1; } 100% { transform: translateY(0); } }
+@keyframes kb-ex-shake { 0%, 100% { transform: translateX(0); } 20% { transform: translateX(-1.5px) rotate(-4deg); } 40% { transform: translateX(1.5px) rotate(4deg); } 60% { transform: translateX(-1px); } 80% { transform: translateX(1px); } }
+@keyframes kb-ex-spin { to { transform: rotate(360deg); } }
+.kb-ex-blink { animation: kb-ex-blink 3.2s ease-in-out infinite; }
+.kb-ex-run { animation: kb-ex-run 1.1s ease-in-out infinite; }
+.kb-ex-write { animation: kb-ex-write 1.4s ease-in-out infinite; }
+.kb-ex-travel { animation: kb-ex-travel 1.2s ease-in-out infinite; }
+.kb-ex-drop { animation: kb-ex-drop 1.6s ease-out infinite; }
+.kb-ex-shake { animation: kb-ex-shake 1.8s ease-in-out infinite; }
+.kb-ex-spin { animation: kb-ex-spin 4s linear infinite; }
+
 @media (prefers-reduced-motion: reduce) {
+  .kb-ex-blink, .kb-ex-run, .kb-ex-write, .kb-ex-travel, .kb-ex-drop, .kb-ex-shake, .kb-ex-spin { animation: none; }
   .rise, .slide-in, .slide-in-right, .slide-out-right, .fade-in, .fade-out, .dock-in, .settle { animation-duration: 1ms !important; }
   .sweep, .pulse-rose, .breathe { animation: none; }
 }

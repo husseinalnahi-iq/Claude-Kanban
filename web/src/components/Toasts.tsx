@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { kindInfo, onAlert, onResolve, openTask, type Alert, type Outcome } from "../lib/alerts.ts";
 import { inputSummary } from "../lib/approvals.ts";
+import { CommandExplainer } from "./CommandExplainer.tsx";
 import { isQuestion } from "../lib/questions.ts";
 import { navigate } from "../lib/router.ts";
 import { NeedsYouActions, OUTCOME_TEXT } from "./NeedsYouActions.tsx";
@@ -124,10 +125,13 @@ function ToastCard({ t, onClose }: { t: Shown; onClose: () => void }) {
             {t.count > 1 ? t.titles.slice(-3).join(" · ") + (t.count > 3 ? " …" : "") : t.body}
           </span>
           {card && inputSummary(card) && !done ? (
-            <span className="mt-1 block truncate rounded bg-ink-950 px-2 py-1 font-mono text-[11px] text-amber" title={inputSummary(card)}>
-              {card.tool_name === "Bash" ? "$ " : ""}
-              {inputSummary(card)}
-            </span>
+            <>
+              {card.tool_name === "Bash" || card.tool_name === "PowerShell" ? <span className="mt-1 block"><CommandExplainer command={inputSummary(card)} compact /></span> : null}
+              <span className="mt-1 block truncate rounded bg-ink-950 px-2 py-1 font-mono text-[11px] text-amber" title={inputSummary(card)}>
+                {card.tool_name === "Bash" ? "$ " : ""}
+                {inputSummary(card)}
+              </span>
+            </>
           ) : null}
           {done ? (
             <span className="mt-1.5 block text-[12px] font-semibold" style={{ color: done.color }}>{done.text}</span>

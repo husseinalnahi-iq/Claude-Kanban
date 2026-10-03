@@ -259,6 +259,31 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 );
 CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id, id);
 
+-- Folders a project's chats can be filed in (the Studio's left pane). A chat's folder_id names one; deleting
+-- a folder only empties it, the chats stay.
+CREATE TABLE IF NOT EXISTS chat_folders (
+  id          TEXT PRIMARY KEY,
+  project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name        TEXT NOT NULL,
+  position    INTEGER NOT NULL DEFAULT 0,
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_folders_project ON chat_folders(project_id, position);
+
+-- Files attached to a chat (D334): stored under the state dir like a task's attachments. message_id is
+-- null until the message they ride with is sent.
+CREATE TABLE IF NOT EXISTS chat_files (
+  id          TEXT PRIMARY KEY,
+  chat_id     TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+  message_id  INTEGER,
+  name        TEXT NOT NULL,
+  media_type  TEXT NOT NULL,
+  bytes       INTEGER NOT NULL,
+  path        TEXT NOT NULL,
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_files_chat ON chat_files(chat_id, id);
+
 -- A task's spec versions: your own text and each AI rewrite of it, so any of them can come back.
 CREATE TABLE IF NOT EXISTS spec_versions (
   id          TEXT PRIMARY KEY,

@@ -55,6 +55,8 @@ export const DEFAULT_VISION_MODEL = "claude-haiku-4-5-20251001";
 export const SEED_DEBATE: Settings["debate"] = {
   enabled: false,
   critic: { provider: "anthropic", model: "claude-sonnet-5-5", effort: "medium" },
+  mode: "once",
+  rounds: 3,
 };
 
 /**
@@ -133,6 +135,12 @@ const LATER_COLUMNS: { table: string; column: string; ddl: string; backfill?: st
   { table: "tasks", column: "done_at", ddl: "done_at TEXT" },
   { table: "tasks", column: "chat_id", ddl: "chat_id TEXT" },
   { table: "chats", column: "provider", ddl: "provider TEXT NOT NULL DEFAULT 'anthropic'" },
+  { table: "chats", column: "folder_id", ddl: "folder_id TEXT" },
+  { table: "chats", column: "warm_at", ddl: "warm_at TEXT" },
+  { table: "chats", column: "keep_alive", ddl: "keep_alive INTEGER NOT NULL DEFAULT 1" },
+  { table: "chats", column: "use_tools", ddl: "use_tools INTEGER NOT NULL DEFAULT 0" },
+  { table: "chat_folders", column: "color", ddl: "color TEXT" },
+  { table: "chats", column: "mode", ddl: "mode TEXT NOT NULL DEFAULT 'supervised'" },
   {
     table: "notes", column: "kind", ddl: "kind TEXT NOT NULL DEFAULT 'lesson'",
     // Until kinds, the board wrote two notes of its own: each approved task's outcome, and the verify
@@ -213,6 +221,10 @@ export function openDb(file: string): DatabaseSync {
   seed.run("questionWaitMin", "0");
   seed.run("chatModel", "claude-sonnet-5-5");
   seed.run("chatEffort", "medium");
+  seed.run("chatKeepAlive", "true");
+  seed.run("chatKeepAliveMessage", "Hi, just keeping this chat warm. Reply in one line.");
+  seed.run("chatKeepAliveMaxHours", "8");
+  seed.run("nextStepsSuggestions", "true");
   seed.run("specModel", "claude-opus-5-5");
   seed.run("specEffort", "high");
   seed.run("loadUserPlugins", "true");
