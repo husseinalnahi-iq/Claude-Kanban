@@ -108,6 +108,8 @@ function markitdownCheck(home: () => string): SetupCheck {
   // What the last look found, for the one-click fix that follows it.
   let python: string | null = null;
   let registered = false;
+  // The machine the last look ran on: the fix builds its paths for that one, not for whichever runs this code.
+  let platform: NodeJS.Platform = process.platform;
   const claude = () => bundledClaude() ?? "claude";
   const manualFor = (platform: NodeJS.Platform) => {
     const dir = markitdownDir(home(), platform);
@@ -124,7 +126,6 @@ function markitdownCheck(home: () => string): SetupCheck {
     level: "optional",
     why: "A tool rather than a skill: Claude turns PDFs, Word, Excel and PowerPoint files and web pages into text it can read. Added to your Claude Code in a Python environment of its own, so it works in your terminal and in board tasks. Needs Python 3.10 or newer.",
     run: () => {
-      const platform = process.platform;
       const dir = markitdownDir(home(), platform);
       const py = venvPython(dir, platform);
       return [
@@ -143,6 +144,7 @@ function markitdownCheck(home: () => string): SetupCheck {
     manual: { win32: manualFor("win32"), darwin: manualFor("darwin"), linux: manualFor("linux") },
     link: { label: "See it on GitHub", href: "https://github.com/microsoft/markitdown/tree/main/packages/markitdown-mcp" },
     async detect({ probe }) {
+      platform = probe.platform;
       const r = await probe.run(probe.claudeBin, ["mcp", "get", MARKITDOWN_SERVER], { timeoutMs: 60_000 });
       registered = r.code === 0 && !/No MCP server/i.test(r.stdout);
       // `mcp get` starts the server to say whether it answers: "Status: √ Connected" or "✗ Failed to connect".
