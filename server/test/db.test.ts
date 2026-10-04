@@ -57,7 +57,15 @@ test("a board still on a default the board used to ship moves to the new one; a 
       { stage: "review", model: "claude-sonnet-5", effort: "medium" },
     ]);
     assert.deepEqual(pipe(old), SEED_PIPELINE);
-    assert.deepEqual(SEED_PIPELINE.map((s) => `${s.model}/${s.effort}`), ["claude-opus-5-5/high", "claude-opus-5-5/medium", "claude-sonnet-5-5/medium"]);
+    assert.deepEqual(SEED_PIPELINE.map((s) => `${s.model}/${s.effort}`), ["claude-opus-5-5/high", "claude-opus-5-5/high", "claude-sonnet-5-5/high"]);
+    // D270's medium-effort default, never touched, moves up to high (D366).
+    const d270 = join(dir, "d270.db");
+    set(d270, [
+      { stage: "plan", model: "claude-opus-5-5", effort: "high" },
+      { stage: "code", model: "claude-opus-5-5", effort: "medium" },
+      { stage: "review", model: "claude-sonnet-5-5", effort: "medium" },
+    ]);
+    assert.deepEqual(pipe(d270), SEED_PIPELINE);
 
     const mine = join(dir, "mine.db");
     const edited = [

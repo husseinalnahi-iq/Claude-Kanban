@@ -60,13 +60,14 @@ export const SEED_DEBATE: Settings["debate"] = {
 };
 
 /**
- * Opus thinks the plan through at high effort; coding at medium thinks less per step, and a plan
- * already says what to do. The Neon Drift run landed working this way for $3.46 (D270).
+ * Every stage at high effort: the user reviews each planned task's models on its setup card before it
+ * runs, and raises a hard step to extra high or max there, so the default is the one he wants most
+ * often rather than the cheapest that worked (D366; medium was D270's $3.46 Neon Drift choice).
  */
 export const SEED_PIPELINE: Stage[] = [
   { stage: "plan", model: "claude-opus-5-5", effort: "high" },
-  { stage: "code", model: "claude-opus-5-5", effort: "medium" },
-  { stage: "review", model: "claude-sonnet-5-5", effort: "medium" },
+  { stage: "code", model: "claude-opus-5-5", effort: "high" },
+  { stage: "review", model: "claude-sonnet-5-5", effort: "high" },
 ];
 
 /**
@@ -83,6 +84,12 @@ const RETIRED_PIPELINES: Stage[][] = [
   [
     { stage: "plan", model: "claude-fable-5-1", effort: "high" },
     { stage: "code", model: "claude-opus-5-5", effort: "high" },
+    { stage: "review", model: "claude-sonnet-5-5", effort: "medium" },
+  ],
+  // D270's default, before high effort became the default (D366).
+  [
+    { stage: "plan", model: "claude-opus-5-5", effort: "high" },
+    { stage: "code", model: "claude-opus-5-5", effort: "medium" },
     { stage: "review", model: "claude-sonnet-5-5", effort: "medium" },
   ],
 ];
@@ -122,6 +129,8 @@ const LATER_COLUMNS: { table: string; column: string; ddl: string; backfill?: st
   { table: "tasks", column: "onboarding", ddl: "onboarding TEXT" },
   { table: "projects", column: "system", ddl: "system INTEGER NOT NULL DEFAULT 0" },
   { table: "tasks", column: "blocked_json", ddl: "blocked_json TEXT" },
+  { table: "tasks", column: "resolution_json", ddl: "resolution_json TEXT" },
+  { table: "tasks", column: "conflict_risk_json", ddl: "conflict_risk_json TEXT" },
   { table: "tasks", column: "questions_json", ddl: "questions_json TEXT NOT NULL DEFAULT '[]'" },
   { table: "tasks", column: "checkout_json", ddl: "checkout_json TEXT" },
   { table: "tasks", column: "start_at", ddl: "start_at TEXT" },
@@ -131,8 +140,12 @@ const LATER_COLUMNS: { table: string; column: string; ddl: string; backfill?: st
   { table: "tasks", column: "plan_approval", ddl: "plan_approval INTEGER" },
   { table: "tasks", column: "live", ddl: "live INTEGER NOT NULL DEFAULT 0" },
   { table: "tasks", column: "own_branch", ddl: "own_branch INTEGER NOT NULL DEFAULT 0" },
+  { table: "tasks", column: "may_ask", ddl: "may_ask INTEGER NOT NULL DEFAULT 0" },
+  { table: "tasks", column: "setup_pending", ddl: "setup_pending INTEGER NOT NULL DEFAULT 0" },
+  { table: "schedules", column: "may_ask", ddl: "may_ask INTEGER NOT NULL DEFAULT 0" },
   { table: "tasks", column: "checklist_json", ddl: "checklist_json TEXT NOT NULL DEFAULT '[]'" },
   { table: "tasks", column: "done_at", ddl: "done_at TEXT" },
+  { table: "tasks", column: "merged_at", ddl: "merged_at TEXT" },
   { table: "tasks", column: "chat_id", ddl: "chat_id TEXT" },
   { table: "chats", column: "provider", ddl: "provider TEXT NOT NULL DEFAULT 'anthropic'" },
   { table: "chats", column: "folder_id", ddl: "folder_id TEXT" },
@@ -141,6 +154,8 @@ const LATER_COLUMNS: { table: string; column: string; ddl: string; backfill?: st
   { table: "chats", column: "use_tools", ddl: "use_tools INTEGER NOT NULL DEFAULT 0" },
   { table: "chat_folders", column: "color", ddl: "color TEXT" },
   { table: "chats", column: "mode", ddl: "mode TEXT NOT NULL DEFAULT 'supervised'" },
+  { table: "chats", column: "context_tokens", ddl: "context_tokens INTEGER NOT NULL DEFAULT 0" },
+  { table: "chats", column: "context_window", ddl: "context_window INTEGER NOT NULL DEFAULT 0" },
   {
     table: "notes", column: "kind", ddl: "kind TEXT NOT NULL DEFAULT 'lesson'",
     // Until kinds, the board wrote two notes of its own: each approved task's outcome, and the verify
@@ -219,6 +234,7 @@ export function openDb(file: string): DatabaseSync {
   seed.run("claudeFallback", "null");
   seed.run("keepAwake", "true");
   seed.run("questionWaitMin", "0");
+  seed.run("askModeWaitMin", "0");
   seed.run("chatModel", "claude-sonnet-5-5");
   seed.run("chatEffort", "medium");
   seed.run("chatKeepAlive", "true");
@@ -234,6 +250,8 @@ export function openDb(file: string): DatabaseSync {
   seed.run("autoAllowReadOnly", "true");
   seed.run("markitdownInTasks", "true");
   seed.run("planApproval", "false");
+  seed.run("defaultRunStyle", "ask");
+  seed.run("confirmSetup", "true");
   seed.run("autoContinueTurns", "2");
   seed.run("liveReviewModel", "claude-opus-5-5");
   seed.run("followLatestModels", "true");

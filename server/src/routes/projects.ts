@@ -9,7 +9,7 @@ import { probeFolder } from "../engine/onboarding.ts";
 import { answersSchema, queueBootstrapTask, queueInitTask } from "./claudeMd.ts";
 import { removeAttachmentDir } from "./attachments.ts";
 import { busyItems } from "./busy.ts";
-import { EFFORTS, EMPTY_ENV, type MergePolicy, type Policy } from "../types.ts";
+import { EFFORTS, EMPTY_ENV, type Effort, type MergePolicy, type Policy } from "../types.ts";
 
 export const stageSchema = z.object({
   stage: z.enum(["plan", "code", "review", "custom"]),
@@ -47,6 +47,9 @@ export const mergeSchema = z.object({
   strategy: z.enum(["merge", "rebase", "squash"]),
   verifyBeforeMerge: z.boolean(),
   onConflict: z.enum(["ask", "claude"]),
+  // Optional so a board page from before these existed can still save; a missing one reads as the default.
+  autoLandResolved: z.boolean().optional(),
+  resolveReviewer: z.object({ provider: z.string().min(1), model: z.string().trim().min(1), effort: z.enum(EFFORTS as [Effort, ...Effort[]]) }).nullable().optional(),
 });
 
 const createSchema = z.object({

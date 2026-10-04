@@ -38,6 +38,8 @@ export interface PromptCtx {
   mode: Mode;
   /** An autonomous lookup in the project's own folder, with nobody asked (D352). */
   handsOff?: boolean;
+  /** "Autonomous + asks me": an autonomous run whose questions wait on a card for an answer (D361). */
+  mayAsk?: boolean;
   task: { id: string; title: string; spec_md: string };
   branch?: string | null;
   baseSha?: string | null;
@@ -431,11 +433,18 @@ export function buildStagePrompt(ctx: PromptCtx): string {
         "Call `board_set_summary` with a one-line progress note when you start and when you finish. " +
         "Use `board_post_message` to tell the parent or a sibling something they need to know. " +
         // Two ways to ask, one per mode (D239): someone is at the board for a supervised run, nobody is
-        // for an autonomous one, where a waiting question would only stall it.
+        // for an autonomous one, where a waiting question would only stall it. "Autonomous + asks me"
+        // has both: the person chose to be asked, so a question that changes the result waits (D361).
         (ctx.mode === "supervised"
           ? "Ask the person with `AskUserQuestion` when their answer decides how you go on: it waits on a card and the answer comes back in this turn. Do not bury a question in your report — a report is read after the fact. "
-          : "Nobody is watching this run, so every question for the person goes through `board_ask` — with the default you carry on with — not only into your report: a report is read after the fact, the card is seen now. ") +
-        "Use `board_report_blocked` when you cannot do the task from where you run, or cannot go on without an answer: the board stops after this stage and shows your ask, instead of passing unfinished work on as done.",
+          : ctx.mayAsk
+            ? "The person chose to be asked on this task. When their answer changes the result — which approach to take, what they actually want, a choice you would otherwise have to guess — ask with `AskUserQuestion`: the run waits on a card until they answer, and the answer comes back in this turn. " +
+              "Ask before the work that depends on it, and put everything you need to know into one call rather than one question at a time. " +
+              "For a small choice that does not change the result, use `board_ask` with the default you carry on with, so the person is not stopped for it. "
+            : "Nobody is watching this run, so every question for the person goes through `board_ask` — with the default you carry on with — not only into your report: a report is read after the fact, the card is seen now. ") +
+        "Use `board_report_blocked` when you cannot do the task from where you run" +
+        (ctx.mode === "autonomous" && ctx.mayAsk ? "" : ", or cannot go on without an answer") +
+        ": the board stops after this stage and shows your ask, instead of passing unfinished work on as done.",
     );
     if (ctx.imageTool) {
       out.push(

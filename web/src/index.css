@@ -33,6 +33,13 @@
   --color-rust: #e0643c;    /* failed */
   --color-slate: #8d93a8;   /* queued */
   --color-iris: #a394f0;    /* paused by a usage limit */
+
+  /* the Studio's chat lights (chatSignal.ts): hues people already read as "answer me", "plan", "broken" */
+  --color-bulb: #f5cf3d;    /* a question for you */
+  --color-ember: #f08a24;   /* wants your OK */
+  --color-azure: #5b9cf5;   /* a plan to approve */
+  --color-scarlet: #ec4f4f; /* failed */
+  --color-grape: #a371f7;   /* merged: the purple people know from GitHub */
 }
 
 /*
@@ -124,6 +131,11 @@
   --color-rust: #b03f1b;
   --color-slate: #565d73;
   --color-iris: #6450cc;
+  --color-bulb: #a37a00;
+  --color-ember: #c25e00;
+  --color-azure: #1f63d1;
+  --color-scarlet: #c0262d;
+  --color-grape: #8250df;
 
   --kb-scrim-soft: rgb(40 38 32 / 0.26);
   --kb-scrim: rgb(40 38 32 / 0.44);
@@ -185,6 +197,11 @@
   --color-rust: #f26d4d;
   --color-slate: #93a6cc;
   --color-iris: #ab9dff;
+  --color-bulb: #ffd84a;
+  --color-ember: #ff9640;
+  --color-azure: #6aa8ff;
+  --color-scarlet: #ff5a5f;
+  --color-grape: #b78cff;
 
   --kb-scrim-soft: rgb(3 7 16 / 0.5);
   --kb-scrim: rgb(3 7 16 / 0.78);
@@ -235,7 +252,8 @@ body {
   background: var(--color-ink-950);
   color: var(--color-ink-200);
   font-family: var(--font-sans);
-  font-size: 13.5px;
+  /* 12.5px, from 13.5: the board reads denser (D368); the ‹100› zoom still scales it all. */
+  font-size: 12.5px;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -384,6 +402,23 @@ select:focus-visible {
 }
 .breathe { animation: breathe 1.4s ease-in-out infinite; }
 
+/* The checklist step being worked on: a turning ring (D367). */
+@keyframes kb-spin { to { transform: rotate(360deg); } }
+.kb-spin { animation: kb-spin 0.9s linear infinite; }
+
+/* A chat light at work: a ring spreading from the dot, the way Claude shows it is thinking. */
+@keyframes kb-ping {
+  0% { transform: scale(1); opacity: 0.7; }
+  80%, 100% { transform: scale(2.6); opacity: 0; }
+}
+.kb-ping { animation: kb-ping 1.6s cubic-bezier(0, 0, 0.2, 1) infinite; }
+/* A chat light that wants you: lit, and glowing softly in its own colour. */
+@keyframes kb-beacon {
+  0%, 100% { box-shadow: 0 0 2px 0 currentColor; }
+  50% { box-shadow: 0 0 7px 2px currentColor; }
+}
+.kb-beacon { animation: kb-beacon 2s ease-in-out infinite; }
+
 @keyframes rise {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: none; }
@@ -454,7 +489,8 @@ select:focus-visible {
 @media (prefers-reduced-motion: reduce) {
   .kb-ex-blink, .kb-ex-run, .kb-ex-write, .kb-ex-travel, .kb-ex-drop, .kb-ex-shake, .kb-ex-spin { animation: none; }
   .rise, .slide-in, .slide-in-right, .slide-out-right, .fade-in, .fade-out, .dock-in, .settle { animation-duration: 1ms !important; }
-  .sweep, .pulse-rose, .breathe { animation: none; }
+  .sweep, .pulse-rose, .breathe, .kb-ping, .kb-spin { animation: none; }
+  .kb-beacon { animation: none; box-shadow: 0 0 5px 1px currentColor; }
 }
 
 /* rendered markdown */
@@ -464,6 +500,11 @@ select:focus-visible {
 .md h1 { font-size: 1.25em; } .md h2 { font-size: 1.12em; } .md h3 { font-size: 1.02em; }
 .md ul { list-style: disc; padding-left: 1.3em; } .md ol { list-style: decimal; padding-left: 1.4em; }
 .md li + li { margin-top: 0.2em; }
+/* The chat thread reads denser (D368): tighter paragraphs and lists, a lighter line height. */
+.md.md-compact { line-height: 1.45; }
+.md.md-compact > * + * { margin-top: 0.4em; }
+.md.md-compact li + li { margin-top: 0.1em; }
+.md.md-compact pre { padding: 0.5em 0.7em; }
 .md code { font-family: var(--font-mono); font-size: 0.88em; background: var(--color-ink-800); border: 1px solid var(--color-ink-700); border-radius: 4px; padding: 0.05em 0.35em; }
 .md pre { background: var(--color-ink-850); border: 1px solid var(--color-ink-700); border-radius: 6px; padding: 0.7em 0.9em; overflow-x: auto; }
 .md pre code { background: none; border: 0; padding: 0; }

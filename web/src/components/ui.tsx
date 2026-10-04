@@ -1,3 +1,4 @@
+import type { RunStyle } from "../../../server/src/types.ts";
 import { useEffect, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode, type RefObject, type SelectHTMLAttributes } from "react";
 import { createPortal } from "react-dom";
 import { pageZoom } from "../lib/view.ts";
@@ -82,6 +83,11 @@ export function ModeHelp({ align = "left" }: { align?: "left" | "right" }) {
       Slower, but it is the only mode for a repo where an unreviewed write is unacceptable.
       <br />
       <br />
+      <b className="text-iris">Autonomous + asks me</b> — autonomous in every way, except that when
+      Claude has a question that changes the result, it stops and waits for your answer on a question
+      card (options to tick, or your own words). Small choices it still makes itself and notes on the card.
+      <br />
+      <br />
       <b className="text-ink-100">A lookup</b> (an answer card) changes nothing, so under autonomous it
       runs in your project folder, reaches what the project reaches, and asks nothing — when the
       project's <i>autonomous access</i> is Full access.
@@ -89,8 +95,17 @@ export function ModeHelp({ align = "left" }: { align?: "left" | "right" }) {
   );
 }
 
-export function ModeChip({ mode, ownBranch, lookup }: { mode: "autonomous" | "supervised"; ownBranch?: boolean; lookup?: boolean }) {
-  return mode === "autonomous" && lookup ? (
+/** The colour of each way to run, so a picker and a chip agree: amber autonomous, cyan supervised, iris asks me. */
+export const RUN_STYLE_TONE: Record<RunStyle, string> = {
+  supervised: "border-cyan/60 bg-cyan/10 text-cyan",
+  autonomous: "border-amber/60 bg-amber/10 text-amber",
+  ask: "border-iris/60 bg-iris/10 text-iris",
+};
+
+export function ModeChip({ mode, ownBranch, lookup, mayAsk }: { mode: "autonomous" | "supervised"; ownBranch?: boolean; lookup?: boolean; mayAsk?: boolean }) {
+  return mode === "autonomous" && mayAsk ? (
+    <Chip className="border-iris/40 text-iris bg-iris/5" title="Autonomous + asks me: runs in its own git worktree, and stops to ask you when your answer changes the result">auto · asks</Chip>
+  ) : mode === "autonomous" && lookup ? (
     <Chip className="border-amber/40 text-amber bg-amber/5" title="Autonomous lookup: runs in the project's own folder and asks nothing. It reads and reports; it changes nothing">auto</Chip>
   ) : mode === "autonomous" ? (
     <Chip className="border-amber/40 text-amber bg-amber/5" title="Autonomous: runs in its own git worktree, merged on Approve">auto</Chip>

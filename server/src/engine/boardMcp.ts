@@ -2,8 +2,9 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { Repo } from "../repo.ts";
 import type { Bus } from "../bus.ts";
-import type { Blocked, Mode, Project, Run, Stage, Task, TaskQuestion } from "../types.ts";
-import { EFFORTS, accessOf, isAnswerPipeline } from "../types.ts";
+import type { Blocked, Mode, Project, Run, RunStyle, Stage, Task, TaskQuestion } from "../types.ts";
+import { EFFORTS, accessOf, isAnswerPipeline, runStyleFields } from "../types.ts";
+import { isGitRepo } from "../git/worktree.ts";
 import { searchBoard } from "../search.ts";
 
 export interface BoardCtx {
@@ -37,6 +38,18 @@ export function allowedMode(project: Project, wanted: Mode, pipeline?: Stage[]):
   if (project.policy.autonomous === "forbidden") return "supervised";
   if (pipeline && isAnswerPipeline(pipeline)) return accessOf(project.policy) === "full" ? "autonomous" : "supervised";
   return project.policy.worktrees === "forbidden" ? "supervised" : wanted;
+}
+
+/**
+ * The mode and "asks me" a card gets when nobody named one: the board's default run style (D365),
+ * held back to supervised where this project cannot run autonomous — its policy, or a folder that is
+ * no git repository and so has nowhere to make a worktree.
+ */
+export async function defaultRunFields(project: Project, style: RunStyle, pipeline?: Stage[]): Promise<{ mode: Mode; may_ask: boolean }> {
+  const wanted = runStyleFields(style);
+  let mode = allowedMode(project, wanted.mode, pipeline);
+  if (mode === "autonomous" && !(pipeline && isAnswerPipeline(pipeline)) && !(await isGitRepo(project.path))) mode = "supervised";
+  return { mode, may_ask: mode === "autonomous" && wanted.may_ask };
 }
 
 export function defaultPipeline(repo: Repo, project: Project): Stage[] {
@@ -121,6 +134,7 @@ export function boardHandlers(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtasks?: 
           live: parent.live,
           plan_approval: parent.plan_approval,
           own_branch: parent.own_branch,
+          may_ask: parent.may_ask,
           status: "backlog",
         });
         ids.push(task.id);

@@ -27,7 +27,7 @@ export interface AlertKindInfo {
 }
 
 export const ALERT_KINDS: AlertKindInfo[] = [
-  { kind: "approval", label: "Needs you", hint: "A supervised run is waiting on a card, or Claude asked you a question", color: "var(--color-rose)", icon: "✋", defaults: { sound: true, toast: true, desktop: true } },
+  { kind: "approval", label: "Needs you", hint: "A task is waiting on an approval card, or Claude asked you a question", color: "var(--color-rose)", icon: "✋", defaults: { sound: true, toast: true, desktop: true } },
   { kind: "review", label: "Ready for review", hint: "Every stage finished; your turn to look", color: "var(--color-lime)", icon: "◉", defaults: { sound: true, toast: true, desktop: true } },
   { kind: "done", label: "Landed", hint: "Approved and landed", color: "var(--color-moss)", icon: "✓", defaults: { sound: true, toast: true, desktop: false } },
   { kind: "failed", label: "Failed", hint: "A run, a check or a review said no", color: "var(--color-rust)", icon: "✕", defaults: { sound: true, toast: true, desktop: true } },

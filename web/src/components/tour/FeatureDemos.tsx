@@ -110,7 +110,7 @@ function Schedule({ color }: { color: string }) {
 
 function Modes({ color }: { color: string }) {
   return (
-    <div className="absolute inset-0 grid grid-cols-2">
+    <div className="absolute inset-0 grid grid-cols-3">
       <div className="relative border-r border-ink-800 px-3 pt-2">
         <div className="font-mono text-[9px] uppercase tracking-[0.12em]" style={{ color }}>✋ supervised</div>
         <div className="kb-d-at0 mt-1.5 rounded-md border border-ink-700 bg-ink-900 px-2 py-1">
@@ -118,7 +118,7 @@ function Modes({ color }: { color: string }) {
           <div className="mt-1 flex items-center gap-1 font-mono text-[9px]">
             <span className="kb-d-press rounded border border-moss/60 px-1.5 text-moss">Allow</span>
             <span className="rounded border border-ink-700 px-1.5 text-ink-500">Deny</span>
-            <span className="kb-d-at50 ml-auto text-moss">✓ allowed</span>
+            <span className="kb-d-at50 ml-auto text-moss" title="allowed">✓</span>
           </div>
         </div>
       </div>
@@ -143,6 +143,18 @@ function Modes({ color }: { color: string }) {
             style={{ left: `calc(12px + (100% - 24px) * ${x} - 3.5px)`, bottom: `calc(8px + 40px * ${26 / 40} - 3.5px)` }}
           />
         ))}
+      </div>
+      {/* Autonomous + asks me: the same branch, but a question that changes the result waits for you (D361). */}
+      <div className="relative border-l border-ink-800 px-3 pt-2">
+        <div className="font-mono text-[9px] uppercase tracking-[0.12em] text-iris">? asks me</div>
+        <div className="kb-d-at25 mt-1.5 rounded-md border border-iris/40 bg-ink-900 px-2 py-1">
+          <div className="truncate text-[10px] text-ink-200">Blue or green?</div>
+          <div className="mt-1 flex items-center gap-1 font-mono text-[9px]">
+            <span className="kb-d-at50 rounded border border-iris/60 bg-iris/15 px-1.5 text-iris">Blue</span>
+            <span className="rounded border border-ink-700 px-1.5 text-ink-500">Green</span>
+          </div>
+        </div>
+        <div className="kb-d-at75 mt-1 truncate font-mono text-[9px] text-iris">✓ carries on</div>
       </div>
     </div>
   );

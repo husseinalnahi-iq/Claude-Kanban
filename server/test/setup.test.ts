@@ -95,11 +95,11 @@ const LMS = ["lmstudio", "lmstudio-server", "lmstudio-model:google/gemma-4-12b-q
 test("the checklist follows what is switched on and set up", () => {
   const repo = new Repo(openDb(":memory:"));
   const ids = () => buildChecks(repo.getSettings()).map((c) => c.id);
-  assert.deepEqual(ids(), ["node", "claude-login", "claude-engine", "claude-models", "git", "git-identity", "browser", "images", "images-claude-code", ...LMS, "codex", "plugins", "starter-skills", "terminal", ...(process.platform === "win32" ? ["pwsh"] : [])]);
+  assert.deepEqual(ids(), ["node", "claude-login", "claude-engine", "claude-models", "git", "git-identity", "git-conflicts", "browser", "images", "images-claude-code", ...LMS, "codex", "plugins", "starter-skills", "terminal", ...(process.platform === "win32" ? ["pwsh"] : [])]);
   repo.updateSettings({ browserChecks: false });
   assert.ok(!ids().includes("browser"));
   repo.updateSettings({ providers: PROVIDERS });
-  assert.deepEqual(ids(), ["node", "claude-login", "claude-engine", "claude-models", "git", "git-identity", "images", "images-claude-code", "ollama", "ollama-model:qwen3-coder", ...LMS, "codex", "key-zai", "provider-credit", "plugins", "starter-skills", "terminal", ...(process.platform === "win32" ? ["pwsh"] : [])]);
+  assert.deepEqual(ids(), ["node", "claude-login", "claude-engine", "claude-models", "git", "git-identity", "git-conflicts", "images", "images-claude-code", "ollama", "ollama-model:qwen3-coder", ...LMS, "codex", "key-zai", "provider-credit", "plugins", "starter-skills", "terminal", ...(process.platform === "win32" ? ["pwsh"] : [])]);
 });
 
 test("LM Studio gets a server check and no key check; an Ollama model a pipeline picked gets a pull check", async () => {
@@ -155,6 +155,10 @@ test("detectors: git, identity, login, browser", async () => {
   f.o.cmds["git --version"] = OK("git version 2.50.0.windows.1\n");
   f.o.cmds["git config --global user.name"] = OK("Ada\n");
   assert.equal((await get("git")).detail, "git version 2.50.0.windows.1");
+  assert.equal((await get("git-conflicts")).ok, true, "2.50 foresees conflicts");
+  f.o.cmds["git --version"] = OK("git version 2.34.1\n");
+  assert.deepEqual(await get("git-conflicts"), { ok: false, detail: "git version 2.34.1 — conflicts need 2.38 or newer" });
+  f.o.cmds["git --version"] = OK("git version 2.50.0.windows.1\n");
   assert.equal((await get("git-identity")).detail, "Missing email");
   f.o.cmds["git config --global user.email"] = OK("ada@x.io\n");
   assert.deepEqual(await get("git-identity"), { ok: true, detail: "Ada <ada@x.io>" });
@@ -220,7 +224,7 @@ test("setup routes: summary, validation, one-click fix, Claude session", async (
   const checks = async () => (await app.inject({ method: "GET", url: "/api/setup?fresh=1" })).json();
   try {
     const s = await checks();
-    assert.deepEqual(s.summary, { required: 3, recommended: 0 }, "login, git and identity");
+    assert.deepEqual(s.summary, { required: 3, recommended: 1 }, "login, git and identity; and git new enough for conflicts");
     const by = (id: string) => s.checks.find((c: { id: string }) => c.id === id);
     assert.deepEqual(by("claude-login").fixes, ["login"]);
     assert.deepEqual(by("git").fixes, ["claude"]);

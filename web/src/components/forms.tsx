@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 import { DependsOn } from "./DependsOn.tsx";
-import { accessOf, type Mode, type Stage } from "../../../server/src/types.ts";
+import { accessOf, RUN_STYLE_LABEL, RUN_STYLES, runStyleFields, type RunStyle, type Stage } from "../../../server/src/types.ts";
 import { api, type FolderProbe, type ProjectWithGit } from "../lib/api.ts";
 import type { StageStat } from "../../../server/src/routes/analytics.ts";
 import { useAppData } from "../lib/store.tsx";
 import { navigate } from "../lib/router.ts";
-import { Button, ErrorLine, Field, inputCls, Modal, useAction, ModeHelp } from "./ui.tsx";
+import { Button, ErrorLine, Field, inputCls, Modal, useAction, ModeHelp, RUN_STYLE_TONE } from "./ui.tsx";
 import { PipelineEditor, pipelineLine } from "./PipelineEditor.tsx";
 import { modelLabel } from "../lib/format.ts";
 import { SafetyOptions } from "./SafetyOptions.tsx";
@@ -44,7 +44,9 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
   const blocked = autonomousBlocked(project);
   const [title, setTitle] = useState("");
   const [spec, setSpec] = useState("");
-  const [mode, setMode] = useState<Mode>("supervised");
+  // The board's default run style (D365), unless this project cannot run autonomous at all.
+  const [style, setStyle] = useState<RunStyle>(() => (blocked ? "supervised" : settings?.defaultRunStyle ?? "ask"));
+  const { mode, may_ask } = runStyleFields(style);
   const full: Stage[] = project.policy.defaultPipeline?.length ? project.policy.defaultPipeline : settings?.defaultPipeline ?? [];
   const [pipeline, setPipeline] = useState<Stage[]>(full);
   const [when, setWhen] = useState<When>(defaultWhen(initialWhen ?? "now"));
@@ -70,11 +72,11 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
     run(async () => {
       if (when.kind === "repeat") {
         // A repeating schedule is a template: no card now, a fresh one each time it comes round.
-        await api.createSchedule({ project_id: project.id, title, spec_md: spec, mode, pipeline, days: when.days, time: when.time });
+        await api.createSchedule({ project_id: project.id, title, spec_md: spec, mode, may_ask, pipeline, days: when.days, time: when.time });
         onClose();
         return;
       }
-      const t = await api.createTask({ project_id: project.id, title, spec_md: spec, mode, pipeline, parent_id: parentId ?? null, milestone_id: milestoneId ?? null, live, plan_approval: planApproval, own_branch: mode === "supervised" && ownBranch, depends_on: after });
+      const t = await api.createTask({ project_id: project.id, title, spec_md: spec, mode, may_ask, pipeline, parent_id: parentId ?? null, milestone_id: milestoneId ?? null, live, plan_approval: planApproval, own_branch: mode === "supervised" && ownBranch, depends_on: after });
       const startAt = startAtOf(when);
       if (startAt) {
         // A start time means "not now": the scheduler queues it when the time comes, so Create & queue
@@ -115,21 +117,23 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
             <DependsOn projectId={project.id} value={after} onChange={setAfter} />
           </Field>
         ) : null}
-        <Field group label={<span className="flex items-center gap-1.5">Run mode <ModeHelp /></span>} hint={mode === "autonomous" ? "Runs in its own worktree on branch kanban/<id>; Approve merges it." : ownBranch && !noBranch ? "Runs on its own branch kanban/<id>; every write waits for your approval, and Approve merges it." : "Runs in the main checkout; every write waits for your approval."}>
-          <div className="flex gap-2">
-            {(["supervised", "autonomous"] as Mode[]).map((m) => (
+        <Field group label={<span className="flex items-center gap-1.5">Run mode <ModeHelp /></span>} hint={style === "ask" ? "Runs in its own worktree on branch kanban/<id>, and waits for your answer when Claude asks you something; Approve merges it." : mode === "autonomous" ? "Runs in its own worktree on branch kanban/<id>; Approve merges it." : ownBranch && !noBranch ? "Runs on its own branch kanban/<id>; every write waits for your approval, and Approve merges it." : "Runs in the main checkout; every write waits for your approval."}>
+          <div className="grid gap-2 sm:grid-cols-3">
+            {RUN_STYLES.map((m) => (
               <button
                 key={m}
                 type="button"
-                disabled={m === "autonomous" && !!blocked}
-                title={m === "autonomous" && blocked ? blocked : undefined}
-                onClick={() => setMode(m)}
-                className={`flex-1 rounded-md border px-3 py-2 text-left text-[12.5px] transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${
-                  mode === m ? (m === "autonomous" ? "border-amber/70 bg-amber/10 text-amber" : "border-cyan/70 bg-cyan/10 text-cyan") : "border-ink-700 text-ink-300 hover:border-ink-500"
+                disabled={m !== "supervised" && !!blocked}
+                title={m !== "supervised" && blocked ? blocked : undefined}
+                onClick={() => setStyle(m)}
+                className={`rounded-md border px-3 py-2 text-left text-[12.5px] transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${
+                  style === m ? RUN_STYLE_TONE[m] : "border-ink-700 text-ink-300 hover:border-ink-500"
                 }`}
               >
-                <div className="font-semibold capitalize">{m}</div>
-                <div className="text-[11px] opacity-80">{m === "autonomous" ? blocked ?? "worktree · no approvals" : "main checkout · approval cards"}</div>
+                <div className="font-semibold">{RUN_STYLE_LABEL[m]}</div>
+                <div className="text-[11px] opacity-80">
+                  {m === "supervised" ? "main checkout · approval cards" : blocked ?? (m === "ask" ? "worktree · waits for your answers" : "worktree · no approvals")}
+                </div>
               </button>
             ))}
           </div>

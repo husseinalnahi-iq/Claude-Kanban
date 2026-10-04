@@ -227,3 +227,20 @@ test("API: schedule a card, cancel it; create, pause, run and delete a repeating
     b.cleanup();
   }
 });
+
+test("a schedule made as \"Autonomous + asks me\" makes cards that may ask you (D361)", () => {
+  const b = board();
+  try {
+    const sc = b.scheduler.create({
+      project_id: b.project.id, title: "Weekly tidy", spec_md: "tidy", mode: "autonomous", may_ask: true, type: "chore", priority: "p2",
+      pipeline: ONE, skills: [], days: [1], time: "09:00", enabled: false,
+    });
+    assert.equal(sc.may_ask, true);
+    const card = b.scheduler.runNow(sc.id);
+    assert.equal(card.mode, "autonomous");
+    assert.equal(card.may_ask, true);
+    assert.equal(b.scheduler.update(sc.id, { may_ask: false }).may_ask, false, "and it can be switched off again");
+  } finally {
+    b.cleanup();
+  }
+});

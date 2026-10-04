@@ -61,6 +61,70 @@ test("an autonomous run is told to use board_ask instead: no card, no stall (D23
   }
 });
 
+/** Autonomous runs work in a git worktree, so the project must be a repository with a commit. */
+function gitInit(dir: string) {
+  const git = (...a: string[]) => execFileSync("git", a, { cwd: dir });
+  git("init", "-q", "-b", "main");
+  writeFileSync(join(dir, "a.txt"), "a");
+  git("add", "-A");
+  git("-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-qm", "init");
+}
+
+test("an \"Autonomous + asks me\" task stops on a question card and waits for your answer, however long it takes (D361)", async () => {
+  const q = asking();
+  const s = setup(q.fn);
+  try {
+    gitInit(s.dir);
+    assert.equal(s.repo.getSettings().askModeWaitMin, 0, "by default it waits for you");
+    const task = s.repo.createTask({ project_id: s.project.id, title: "ask me", mode: "autonomous", may_ask: true, pipeline: ONE });
+    assert.equal(task.may_ask, true);
+    s.runner.queueTask(task.id);
+    await until(() => s.repo.pendingApprovals(task.id).length === 1);
+    const card = s.repo.pendingApprovals(task.id)[0];
+    assert.equal(card.tool_name, "AskUserQuestion");
+    assert.equal(s.repo.getTask(task.id)!.status, "approval", "the card says it needs you");
+    assert.ok(s.repo.getTask(task.id)!.worktree_path, "it still works in its own worktree, like any autonomous task");
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(q.results.length, 0, "still waiting");
+
+    s.runner.answerApproval(card.id, { "Which colour should the button be?": "Blue, Green" });
+    await until(() => q.results.length === 1);
+    assert.equal(q.results[0].behavior, "allow");
+    assert.deepEqual(q.results[0].updatedInput.answers, { "Which colour should the button be?": "Blue, Green" });
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("an \"Autonomous + asks me\" question follows its own wait setting, not the supervised one (D361)", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const q = asking();
+  const s = setup(q.fn);
+  try {
+    gitInit(s.dir);
+    s.repo.updateSettings({ questionWaitMin: 5, askModeWaitMin: 30 });
+    const task = s.repo.createTask({ project_id: s.project.id, title: "ask me later", mode: "autonomous", may_ask: true, pipeline: ONE });
+    s.runner.queueTask(task.id);
+    // Making the worktree is real git work, so wait on the clock (Date is not mocked), not a count of turns.
+    const deadline = Date.now() + 15_000;
+    while (s.repo.pendingApprovals(task.id).length === 0 && Date.now() < deadline) {
+      t.mock.timers.tick(10);
+      await new Promise((r) => setImmediate(r));
+    }
+    assert.equal(s.repo.pendingApprovals(task.id).length, 1);
+    t.mock.timers.tick(5 * 60_000);
+    for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(q.results.length, 0, "the supervised wait of 5 minutes does not apply");
+    t.mock.timers.tick(25 * 60_000);
+    for (let i = 0; i < 200 && !q.results.length; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(q.results[0].behavior, "deny");
+    assert.match(q.results[0].message, /No answer after 30 minutes/);
+  } finally {
+    t.mock.timers.reset();
+    s.cleanup();
+  }
+});
+
 test("a question in a supervised run becomes a card, and your answer goes back in the tool's own answers field (D218, D239)", async () => {
   for (const mode of ["supervised"] as const) {
     const q = asking();

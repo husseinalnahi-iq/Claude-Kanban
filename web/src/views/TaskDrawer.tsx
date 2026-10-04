@@ -1,9 +1,11 @@
+import { SetupCard } from "../components/RunSetup.tsx";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Approval, Mode, Stage } from "../../../server/src/types.ts";
-import { IMAGE_TOOL } from "../../../server/src/types.ts";
+import type { Approval, Stage } from "../../../server/src/types.ts";
+import { IMAGE_TOOL, RUN_STYLE_LABEL, RUN_STYLES, runStyleFields, runStyleOf } from "../../../server/src/types.ts";
 import { api, type TaskDetail } from "../lib/api.ts";
 import { useWs, useWsReconnect, watchTask } from "../lib/ws.ts";
 import { navigate } from "../lib/router.ts";
+import { ConflictPanel } from "../components/ConflictPanel.tsx";
 import { ScheduleModal, startLabel } from "../components/SchedulesPanel.tsx";
 import { QuestionCard, QuestionHistory } from "../components/QuestionCard.tsx";
 import { isQuestion } from "../lib/questions.ts";
@@ -16,7 +18,7 @@ import type { Stage as PipelineStage } from "../../../server/src/types.ts";
 import { PRIORITIES, TASK_TYPES } from "../../../server/src/types.ts";
 import { RefineModal } from "../components/RefineModal.tsx";
 import { SpecSection } from "../components/SpecSection.tsx";
-import { Button, Chip, Empty, ErrorLine, inputCls, ModeChip, ModeHelp, Select, useAction, useEscape, useFocusTrap } from "../components/ui.tsx";
+import { Button, Chip, Empty, ErrorLine, inputCls, ModeChip, ModeHelp, RUN_STYLE_TONE, Select, useAction, useEscape, useFocusTrap } from "../components/ui.tsx";
 import { PipelineEditor, pipelineLine } from "../components/PipelineEditor.tsx";
 import { Transcript } from "../components/Transcript.tsx";
 import { DiffView } from "../components/DiffView.tsx";
@@ -116,7 +118,7 @@ function ApprovalInput({ a }: { a: Approval }) {
   const input = (a.input ?? {}) as Record<string, any>;
   if (a.tool_name === IMAGE_TOOL)
     return (
-      <div className="rounded bg-ink-950 px-2.5 py-2 text-[12px] text-ink-200">
+      <div className="rounded bg-ink-950 px-2.5 py-2 text-[11px] text-ink-200">
         <div className="mb-0.5 text-[11px] uppercase tracking-wide text-ink-500">Make an image with the picture maker in Settings → Images</div>
         <div className="whitespace-pre-wrap">{String(input.prompt ?? "")}</div>
         <div className="mt-1 font-mono text-[11.5px] text-ink-400">
@@ -128,20 +130,20 @@ function ApprovalInput({ a }: { a: Approval }) {
     return (
       <div>
         <CommandExplainer command={input.command} open />
-        <pre className="rounded bg-ink-950 px-2.5 py-2 font-mono text-[12px] text-amber whitespace-pre-wrap">$ {input.command}</pre>
+        <pre className="rounded bg-ink-950 px-2.5 py-2 font-mono text-[11px] text-amber whitespace-pre-wrap">$ {input.command}</pre>
       </div>
     );
   if (a.tool_name === "Write")
     return (
       <div>
-        <div className="font-mono text-[12px] text-ink-100">{input.file_path}</div>
+        <div className="font-mono text-[11px] text-ink-100">{input.file_path}</div>
         <pre className="mt-1 max-h-56 overflow-auto rounded bg-ink-950 px-2.5 py-2 font-mono text-[11.5px] text-[var(--kb-diff-add)] whitespace-pre-wrap">{String(input.content ?? "")}</pre>
       </div>
     );
   if (a.tool_name === "Edit")
     return (
       <div className="space-y-1">
-        <div className="font-mono text-[12px] text-ink-100">{input.file_path}</div>
+        <div className="font-mono text-[11px] text-ink-100">{input.file_path}</div>
         <pre className="max-h-40 overflow-auto rounded bg-rust/10 px-2.5 py-1.5 font-mono text-[11.5px] text-[var(--kb-diff-del)] whitespace-pre-wrap">{String(input.old_string ?? "")}</pre>
         <pre className="max-h-40 overflow-auto rounded bg-moss/10 px-2.5 py-1.5 font-mono text-[11.5px] text-[var(--kb-diff-add)] whitespace-pre-wrap">{String(input.new_string ?? "")}</pre>
       </div>
@@ -161,8 +163,8 @@ function PendingToolApproval({ a }: { a: Approval }) {
     <div className="rise rounded-lg border border-rose/50 bg-rose/5 p-3">
       <div className="mb-2 flex items-center gap-2">
         <span className="pulse-rose inline-block h-2 w-2 rounded-full bg-rose" />
-        <span className="font-mono text-[12px] font-semibold text-rose">{a.tool_name}</span>
-        <span className="truncate text-[12.5px] text-ink-200">{a.title === a.tool_name ? "" : a.title}</span>
+        <span className="font-mono text-[11px] font-semibold text-rose">{a.tool_name}</span>
+        <span className="truncate text-[11.5px] text-ink-200">{a.title === a.tool_name ? "" : a.title}</span>
         <span className="ml-auto font-mono text-[10.5px] text-ink-500">{ago(a.created_at)}</span>
       </div>
       <CredentialWarning a={a} />
@@ -190,12 +192,14 @@ function SpecTab({ d }: { d: TaskDetail }) {
   const sug = t.suggestion;
   return (
     <div className="space-y-5">
+      {t.setup_pending && t.status === "backlog" && project ? <SetupCard card={t} project={project} /> : null}
       <CheckoutNote d={d} />
+      <ConflictPanel t={t} busy={d.busy} />
       <div className="flex flex-wrap items-center gap-2">
-        <Select className="font-mono text-[12px]" aria-label="Type" value={t.type} onChange={(e) => run(() => api.patchTask(t.id, { type: e.target.value as typeof t.type }))}>
+        <Select className="font-mono text-[11px]" aria-label="Type" value={t.type} onChange={(e) => run(() => api.patchTask(t.id, { type: e.target.value as typeof t.type }))}>
           {TASK_TYPES.map((x) => <option key={x} value={x}>{x}</option>)}
         </Select>
-        <Select className="font-mono text-[12px]" aria-label="Priority" title={PRIORITY_META[t.priority].title} value={t.priority} onChange={(e) => run(() => api.patchTask(t.id, { priority: e.target.value as typeof t.priority }))}>
+        <Select className="font-mono text-[11px]" aria-label="Priority" title={PRIORITY_META[t.priority].title} value={t.priority} onChange={(e) => run(() => api.patchTask(t.id, { priority: e.target.value as typeof t.priority }))}>
           {PRIORITIES.map((p) => <option key={p} value={p}>{PRIORITY_META[p].short}</option>)}
         </Select>
         {t.labels.map((l) => (
@@ -207,7 +211,7 @@ function SpecTab({ d }: { d: TaskDetail }) {
         <Button size="sm" onClick={() => setRefining(true)} title="Quick intake: a cheap model tidies the request, suggests type and priority, and proposes subtasks. For a deeper spec that reads the code, use ✦ Rewrite on the Spec below.">✧ Improve</Button>
       </div>
       {sug && (sug.priority !== t.priority || sug.type !== t.type) ? (
-        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-cyan/40 bg-cyan/5 px-3 py-2 text-[12.5px] text-ink-200">
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-cyan/40 bg-cyan/5 px-3 py-2 text-[11.5px] text-ink-200">
           <span className="text-cyan">Claude suggests</span>
           <span className="font-mono">{sug.type} · {sug.priority}</span>
           <span className="text-ink-500">({Math.round((sug.confidence ?? 0) * 100)}% sure)</span>
@@ -217,7 +221,7 @@ function SpecTab({ d }: { d: TaskDetail }) {
       ) : null}
       {/* A task that needs a live system cannot be done from an autonomous run's sandbox (D191). */}
       {sug?.mode && sug.mode !== t.mode && t.status === "backlog" && !d.busy ? (
-        <div className="rounded-lg border border-cyan/40 bg-cyan/5 px-3 py-2 text-[12.5px]">
+        <div className="rounded-lg border border-cyan/40 bg-cyan/5 px-3 py-2 text-[11.5px]">
           <div className="mb-1 flex flex-wrap items-center gap-2">
             <span className="text-cyan">Claude suggests running this {sug.mode}</span>
           </div>
@@ -231,26 +235,32 @@ function SpecTab({ d }: { d: TaskDetail }) {
       {/* Is it live, and which models: the same two decisions the side chat shows on its card (D288). */}
       <RunSuggestions t={t} busy={d.busy} />
       {refining ? <RefineModal taskId={t.id} onClose={() => setRefining(false)} onApplied={() => undefined} /> : null}
-      <div className="grid grid-cols-2 gap-3 text-[12px]">
+      <div className="grid grid-cols-2 gap-3 text-[11px]">
         <div>
           <div className="mb-1 flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-ink-500">
             Mode <ModeHelp />
           </div>
           <div className="flex gap-1.5">
-            {(["supervised", "autonomous"] as Mode[]).map((m) => (
+            {RUN_STYLES.map((m) => (
               <button
                 key={m}
-                disabled={d.busy || (m === "autonomous" && !!blocked) || t.mode === m}
-                title={m === "autonomous" && blocked ? blocked : undefined}
-                onClick={() => run(() => api.patchTask(t.id, { mode: m }))}
-                className={`rounded border px-2 py-1 font-mono text-[11px] cursor-pointer disabled:cursor-default ${
-                  t.mode === m ? (m === "autonomous" ? "border-amber/60 bg-amber/10 text-amber" : "border-cyan/60 bg-cyan/10 text-cyan") : "border-ink-700 text-ink-400 hover:text-ink-200 disabled:opacity-40"
+                disabled={d.busy || (m !== "supervised" && !!blocked) || runStyleOf(t) === m}
+                title={m !== "supervised" && blocked ? blocked : undefined}
+                onClick={() => run(() => api.patchTask(t.id, runStyleFields(m)))}
+                className={`rounded border px-2 py-1 text-[11px] cursor-pointer disabled:cursor-default ${
+                  runStyleOf(t) === m ? RUN_STYLE_TONE[m] : "border-ink-700 text-ink-400 hover:text-ink-200 disabled:opacity-40"
                 }`}
               >
-                {m}
+                {RUN_STYLE_LABEL[m]}
               </button>
             ))}
           </div>
+          {d.busy ? (
+            <div className="mt-1.5 text-[11.5px] leading-snug text-ink-400">
+              Mode can't change while it runs: it chose where to work when it started.{" "}
+              <button className="cursor-pointer text-amber hover:underline" onClick={() => run(() => api.stop(t.id))}>Stop it to change mode</button>
+            </div>
+          ) : null}
           {t.mode === "supervised" ? (
             <label className="mt-2 flex cursor-pointer items-start gap-1.5 text-[11.5px] text-ink-300" title={branchBlockedReason ?? undefined}>
               <input
@@ -303,13 +313,13 @@ function SpecTab({ d }: { d: TaskDetail }) {
         </div>
       </div>
       {d.parent ? (
-        <div className="text-[12px] text-ink-400">
+        <div className="text-[11px] text-ink-400">
           Subtask of{" "}
           <button className="text-amber hover:underline cursor-pointer" onClick={() => navigate({ taskId: d.parent!.id })}>{d.parent.title}</button>
         </div>
       ) : null}
       {t.related_to.length ? (
-        <div className="text-[12px] text-ink-400">
+        <div className="text-[11px] text-ink-400">
           Related:{" "}
           {t.related_to.map((id, i) => (
             <span key={id}>
@@ -363,18 +373,26 @@ function PipelineTab({ d }: { d: TaskDetail }) {
   const saved = JSON.stringify(d.task.pipeline);
   useEffect(() => setValue(d.task.pipeline), [saved]); // eslint-disable-line react-hooks/exhaustive-deps
   const dirty = JSON.stringify(value) !== saved;
+  // While it runs, the steps up to the newest one that started are fixed; the rest can still change (D364).
+  const stageRuns = d.runs.filter((r) => r.role === "stage");
+  const lockedThrough = d.busy && stageRuns.length ? stageRuns.reduce((a, r) => (r.started_at > a.started_at ? r : a)).stage_index : -1;
   return (
     <div className="space-y-3">
-      <p className="text-[12px] text-ink-400">
+      <p className="text-[11px] text-ink-400">
         Each stage is its own session with its own model, and the previous stage's result is handed to the next. The first box
         is <b className="text-ink-300">where it runs</b>: Claude, or any provider you added in Settings → Providers. A plan stage
         can also be <b className="text-iris">debated</b> — a second model critiques it and you pick the plan before code starts.
       </p>
-      <PipelineEditor value={value} onChange={setValue} models={settings?.models ?? []} />
+      {d.busy ? (
+        <p className="rounded-md border border-amber/30 bg-amber/5 px-2.5 py-1.5 text-[11.5px] text-ink-300">
+          It is running: you can change the model and effort of the steps that haven't started yet. They are used when each one starts.
+        </p>
+      ) : null}
+      <PipelineEditor value={value} onChange={setValue} models={settings?.models ?? []} lockedThrough={lockedThrough} />
       <ErrorLine error={error} />
       <div className="flex justify-end gap-2">
         {dirty ? <Button variant="ghost" onClick={() => setValue(d.task.pipeline)}>Reset</Button> : null}
-        <Button variant="primary" busy={busy} disabled={!dirty || d.busy} title={d.busy ? "Stop the task to edit its pipeline" : undefined} onClick={() => run(() => api.patchTask(d.task.id, { pipeline: value }))}>
+        <Button variant="primary" busy={busy} disabled={!dirty} onClick={() => run(() => api.patchTask(d.task.id, { pipeline: value }))}>
           Save pipeline
         </Button>
       </div>
@@ -387,7 +405,7 @@ function PipelineTab({ d }: { d: TaskDetail }) {
           liveModel={settings?.liveReviewModel ?? "opus"}
           onChange={(v) => void run(() => api.patchTask(d.task.id, v))}
         />
-        {d.busy ? <p className="mt-1.5 text-[11.5px] text-ink-500">Changes apply from the next stage that starts.</p> : null}
+        {d.busy ? <p className="mt-1.5 text-[11.5px] text-ink-500">These two take effect from the next step that starts.</p> : null}
       </div>
     </div>
   );
@@ -407,16 +425,16 @@ function PlanTab({ d }: { d: TaskDetail }) {
       {steps ? (
         <section className="rounded-lg border border-moss/30 bg-moss/5 p-3">
           <div className="mb-1.5 text-[11px] uppercase tracking-wider text-moss">What the {code!.stage} stage did with each step · {modelLabel(code!)}</div>
-          <Markdown text={steps} className="text-[12.5px]" />
+          <Markdown text={steps} className="text-[11.5px]" />
         </section>
       ) : code ? (
-        <p className="text-[12px] text-rust">The {code.stage} stage finished without a “Plan steps” checklist — check its result against the plan below.</p>
+        <p className="text-[11px] text-rust">The {code.stage} stage finished without a “Plan steps” checklist — check its result against the plan below.</p>
       ) : null}
       <section>
         <div className="mb-1.5 flex items-center gap-2 text-[11px] uppercase tracking-wider text-ink-500">
           Plan · {modelLabel(plan)} · {ago(plan.ended_at ?? plan.started_at)}
         </div>
-        <Markdown text={plan.result_md!} className="text-[12.5px]" />
+        <Markdown text={plan.result_md!} className="text-[11.5px]" />
       </section>
     </div>
   );
@@ -477,7 +495,7 @@ function ActivityTab({ d }: { d: TaskDetail }) {
           send();
         }}
       >
-        <div className="mb-1.5 text-[12px] text-ink-400">
+        <div className="mb-1.5 text-[11px] text-ink-400">
           {!d.runs.length ? (
             "Start the task to talk to it: once it runs, what you type here is read at its next step."
           ) : d.busy ? (
@@ -526,7 +544,7 @@ function SubtasksTab({ d }: { d: TaskDetail }) {
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        <p className="min-w-[200px] flex-1 text-[12px] text-ink-400">
+        <p className="min-w-[200px] flex-1 text-[11px] text-ink-400">
           A Plan stage can split this task with <span className="font-mono text-cyan">board_create_subtasks</span>; children see this spec and each other's progress.
         </p>
         {d.children.length ? (
@@ -575,7 +593,7 @@ function SubtasksTab({ d }: { d: TaskDetail }) {
             >
               <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${STATUS_META[c.status].dot}`} />
               <div className="min-w-0 flex-1">
-                <div className={`text-[13px] ${c.status === "done" ? "text-ink-400 line-through" : "text-ink-100"}`}>{c.title}</div>
+                <div className={`text-[12px] ${c.status === "done" ? "text-ink-400 line-through" : "text-ink-100"}`}>{c.title}</div>
                 {waiting.length ? (
                   <div className="truncate text-[11.5px] text-slate">waits for {waiting.map((x) => titles.get(x) ?? x).join(", ")}</div>
                 ) : c.summary ? (
@@ -583,7 +601,7 @@ function SubtasksTab({ d }: { d: TaskDetail }) {
                 ) : null}
               </div>
               <span className={`font-mono text-[10.5px] ${STATUS_META[c.status].text}`}>{c.status}</span>
-              <ModeChip mode={c.mode} />
+              <ModeChip mode={c.mode} mayAsk={c.may_ask} />
             </button>
           );
         })
@@ -605,7 +623,7 @@ function MessagesTab({ d }: { d: TaskDetail }) {
               <span className={inbound ? "text-cyan" : "text-ink-300"}>{inbound ? `← from ${m.from_task_id ?? "you"}` : `→ to ${m.task_id}`}</span>
               <span className="ml-auto">{ago(m.ts)}</span>
             </div>
-            <div className="text-[13px] text-ink-200 whitespace-pre-wrap">{m.body}</div>
+            <div className="text-[12px] text-ink-200 whitespace-pre-wrap">{m.body}</div>
           </div>
         );
       })}
@@ -660,7 +678,8 @@ function Actions({ d }: { d: TaskDetail }) {
       <div className="flex flex-wrap items-center gap-2">
         {t.status === "backlog" && !live ? (
           <>
-            <Button variant="primary" busy={busy} onClick={() => run(() => api.queue(t.id))}>▶ Queue</Button>
+            {/* Open on its Spec tab, a card waiting on its setup shows the mode and models right above (D365). */}
+            <Button variant="primary" busy={busy} onClick={() => run(() => api.queue(t.id, false, t.setup_pending))}>▶ Queue</Button>
             {settings?.serial ? (
               <Button
                 busy={busy}
@@ -707,7 +726,7 @@ function Actions({ d }: { d: TaskDetail }) {
         ) : null}
         {(t.status === "failed" || t.status === "review") && !live ? (
           <div className="flex items-center gap-1">
-            <Select className="h-8 py-0 font-mono text-[12px]" aria-label="Retry from which stage" value={stageIdx} onChange={(e) => setStageIdx(e.target.value === "" ? "" : Number(e.target.value))}>
+            <Select className="h-8 py-0 font-mono text-[11px]" aria-label="Retry from which stage" value={stageIdx} onChange={(e) => setStageIdx(e.target.value === "" ? "" : Number(e.target.value))}>
               <option value="">{t.status === "failed" ? "failed stage" : "stage…"}</option>
               {t.pipeline.map((s, i) => (
                 <option key={i} value={i}>from #{i + 1} {s.stage}</option>
@@ -725,9 +744,9 @@ function Actions({ d }: { d: TaskDetail }) {
         <div className="ml-auto flex gap-2">
           {d.runs.length ? (
             <a
-              className="inline-flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md px-3 text-[13px] text-ink-300 transition-colors hover:bg-ink-800 hover:text-ink-100"
+              className="inline-flex h-8 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md px-3 text-[12px] text-ink-300 transition-colors hover:bg-ink-800 hover:text-ink-100"
               href={`/api/tasks/${t.id}/record?download=1`}
-              title="Save this task's whole story as one file: what was asked, every stage and step, what it cost and which files changed"
+              title={`Save this task's whole story as one file: what was asked, every stage and step, what it cost and which files changed. The step-by-step detail is removed ${settings?.eventRetentionDays ?? 30} days after a run ends (Settings → Guardrails), so save the record if you want to keep it.`}
             >
               ⤓ Record
             </a>
@@ -760,7 +779,7 @@ function Actions({ d }: { d: TaskDetail }) {
       ) : null}
       {scheduling ? <ScheduleModal task={t} onClose={() => setScheduling(false)} /> : null}
       {error ? (
-        <div className="mt-2 flex items-start gap-2 rounded-md border border-rust/40 bg-rust/10 px-3 py-2 text-[12.5px] text-rust">
+        <div className="mt-2 flex items-start gap-2 rounded-md border border-rust/40 bg-rust/10 px-3 py-2 text-[11.5px] text-rust">
           <span className="flex-1">{error}</span>
           <button className="cursor-pointer" onClick={() => setError(null)} aria-label="Dismiss">×</button>
         </div>
@@ -776,7 +795,7 @@ function TitleEditor({ d }: { d: TaskDetail }) {
   return (
     <>
       <input
-        className="w-full bg-transparent text-[17px] font-semibold tracking-tight text-ink-100 focus:outline-none"
+        className="w-full bg-transparent text-[15px] font-semibold tracking-tight text-ink-100 focus:outline-none"
         aria-label="Task title"
         value={title}
         onChange={(e) => setTitle(e.target.value)}
@@ -784,7 +803,7 @@ function TitleEditor({ d }: { d: TaskDetail }) {
         onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
       />
       {/* Without this the box kept showing a title that was never saved. */}
-      {error ? <div className="mt-1 text-[12px] text-rust">The new title was not saved: {error}</div> : null}
+      {error ? <div className="mt-1 text-[11px] text-rust">The new title was not saved: {error}</div> : null}
     </>
   );
 }
@@ -829,7 +848,7 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
         onMouseDown={(e) => e.stopPropagation()}
       >
         {!d ? (
-          <div className="p-6 text-[13px] text-ink-400">{missing ? "This task no longer exists." : "Loading…"}</div>
+          <div className="p-6 text-[12px] text-ink-400">{missing ? "This task no longer exists." : "Loading…"}</div>
         ) : (
           <>
             <div className="flex items-start gap-3 border-b border-ink-800 px-5 pt-4 pb-3">
@@ -839,7 +858,7 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
                   <span className={`text-[11px] font-semibold uppercase tracking-[0.08em] ${costPaused ? "text-rose" : STATUS_META[d.task.status].text}`}>
                     {creditOut ? "Needs you · out of credit" : costPaused ? "Needs you · cost" : STATUS_META[d.task.status].label}
                   </span>
-                  <ModeChip mode={d.task.mode} ownBranch={d.task.own_branch} lookup={isAnswerPipeline(d.task.pipeline)} />
+                  <ModeChip mode={d.task.mode} ownBranch={d.task.own_branch} lookup={isAnswerPipeline(d.task.pipeline)} mayAsk={d.task.may_ask} />
                   {d.task.live ? <Chip className="border-rose/50 text-rose" title="Touches a live system: plan approval is on and review runs on the live review model">prod</Chip> : null}
                   <Chip className={PRIORITY_META[d.task.priority].tone} title={PRIORITY_META[d.task.priority].title}>{d.task.priority}</Chip>
                   <Chip className={TYPE_META[d.task.type].tone}>{TYPE_META[d.task.type].short}</Chip>
@@ -859,7 +878,7 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
                 {d.task.error && d.task.status === "failed" && !d.task.blocked ? <div className="mt-1 font-mono text-[11.5px] text-rust">{d.task.error}</div> : null}
                 {/* A task that ran out says so in its own panel below, with the ways on. */}
                 {d.task.note && !(d.task.status === "paused" && d.task.pause_reason !== "cost") ? (
-                  <div className="mt-1 text-[12px] italic text-ink-400">Note: {d.task.note}</div>
+                  <div className="mt-1 text-[11px] italic text-ink-400">Note: {d.task.note}</div>
                 ) : null}
               </div>
               <button className="text-xl leading-none text-ink-400 hover:text-ink-100 cursor-pointer" onClick={onClose} aria-label="Close">×</button>
@@ -879,7 +898,7 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
                     key={t}
                     onClick={() => setTab(t)}
                     title={TAB_HINT[t]}
-                    className={`relative whitespace-nowrap px-3 py-2.5 text-[12.5px] transition-colors cursor-pointer ${current === t ? "text-ink-100" : "text-ink-400 hover:text-ink-200"} ${t === "result" ? "font-semibold" : ""}`}
+                    className={`relative whitespace-nowrap px-3 py-2.5 text-[11.5px] transition-colors cursor-pointer ${current === t ? "text-ink-100" : "text-ink-400 hover:text-ink-200"} ${t === "result" ? "font-semibold" : ""}`}
                   >
                     {TAB_LABEL[t]}
                     {badge ? <span className={`ml-1.5 font-mono text-[10.5px] ${t === "approvals" ? "text-rose" : "text-ink-500"}`}>{badge}</span> : null}
@@ -896,7 +915,7 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
               {current === "activity" ? <ActivityTab d={d} /> : null}
               {current === "commands" ? (
                 <div className="-mx-5 -my-4">
-                  <p className="border-b border-ink-800 px-5 py-2.5 text-[12px] text-ink-400">
+                  <p className="border-b border-ink-800 px-5 py-2.5 text-[11px] text-ink-400">
                     Every shell command this task ran, is running or waits to run, newest first, with what it does in plain words. Autonomous runs show here too: they never ask, so this is where to see what they did.
                   </p>
                   <CommandList taskId={d.task.id} />

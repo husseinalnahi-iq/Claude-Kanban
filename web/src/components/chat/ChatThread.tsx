@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { Chat, ChatFile, ChatMessage, Effort, Mode } from "../../../../server/src/types.ts";
+import type { Chat, ChatFile, ChatMessage, Effort, RunStyle } from "../../../../server/src/types.ts";
+import { RUN_STYLES } from "../../../../server/src/types.ts";
 import { ANTHROPIC_PROVIDER_ID, attachmentKind } from "../../../../server/src/types.ts";
 import { effortsFor, useClaudeModels } from "../../lib/claudeModels.ts";
 import { EffortSelect } from "../ClaudeModelPicker.tsx";
@@ -50,7 +51,7 @@ const MessageRow = memo(function MessageRow({ m }: { m: ChatMessage }) {
     return (
       <div className="rise flex flex-col items-end gap-1">
         {m.meta.files?.length ? <FileChips files={m.meta.files} /> : null}
-        <div className="max-w-[85%] rounded-2xl rounded-br-md bg-amber/15 px-3.5 py-2 text-[13px] leading-relaxed text-ink-100 whitespace-pre-wrap">{m.text}</div>
+        <div className="max-w-[85%] rounded-2xl rounded-br-md bg-amber/15 px-3 py-1.5 text-[12px] leading-normal text-ink-100 whitespace-pre-wrap">{m.text}</div>
       </div>
     );
   }
@@ -59,8 +60,8 @@ const MessageRow = memo(function MessageRow({ m }: { m: ChatMessage }) {
     return <div className="rise pl-1 font-mono text-[11px] text-ink-500">· {m.text}</div>;
   }
   if (m.role === "update" && m.meta.update) return <ChatUpdateRow m={m} />;
-  if (m.role === "error") return <div className="rise rounded-lg border border-rust/40 bg-rust/10 px-3 py-2 text-[12.5px] text-rust">{m.text}</div>;
-  return <Markdown text={m.text} className="rise text-[13px]" />;
+  if (m.role === "error") return <div className="rise rounded-lg border border-rust/40 bg-rust/10 px-3 py-1.5 text-[12px] text-rust">{m.text}</div>;
+  return <Markdown text={m.text} className="rise md-compact text-[12px]" />;
 });
 
 const kb = (n: number) => (n >= 1_048_576 ? `${(n / 1_048_576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
@@ -129,7 +130,7 @@ export function ChatThread({
   const [pending, setPending] = useState<{ model: string; effort: Effort; provider: string } | null>(null);
   // "my connectors and skills" for a chat that does not exist yet: applied to the row once it is made (D335).
   const [pendingTools, setPendingTools] = useState(false);
-  const [pendingMode, setPendingMode] = useState<Mode>("supervised");
+  const [pendingMode, setPendingMode] = useState<RunStyle>("supervised");
   // Files attached and not yet sent (D334). A new chat has no row to hold them, so they wait in the browser until the first message.
   const [files, setFiles] = useState<ChatFile[]>([]);
   const [local, setLocal] = useState<File[]>([]);
@@ -234,8 +235,8 @@ export function ChatThread({
   const useTools = chat?.use_tools ?? pendingTools;
   const setUseTools = (on: boolean) => (chat ? void api.patchChat(chat.id, { use_tools: on }).catch(say) : setPendingTools(on));
   // How the cards this chat makes will run, unless a message says otherwise (D344).
-  const mode: Mode = chat?.mode ?? pendingMode;
-  const setMode = (m: Mode) => (chat ? void api.patchChat(chat.id, { mode: m }).catch(say) : setPendingMode(m));
+  const mode: RunStyle = chat?.mode ?? pendingMode;
+  const setMode = (m: RunStyle) => (chat ? void api.patchChat(chat.id, { mode: m }).catch(say) : setPendingMode(m));
   const noAuto = autonomousBlocked(project);
   // Naming Slack with the switch off would get a card where the chat could have looked itself (D349).
   // Offered while you type, because the switch is read when the reply starts; × mutes that system here.
@@ -312,13 +313,13 @@ export function ChatThread({
         {chat && !wide ? <CacheStrip chat={chat} compact /> : null}
         <div
           ref={scroller}
-          className={`min-h-0 flex-1 overflow-y-auto ${wide ? "px-6 py-6" : "px-4 py-4"}`}
+          className={`min-h-0 flex-1 overflow-y-auto ${wide ? "px-4 py-3" : "px-3 py-3"}`}
           onScroll={(e) => {
             const el = e.currentTarget;
             pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
           }}
         >
-          <div className={`space-y-3 ${column}`}>
+          <div className={`space-y-2 ${column}`}>
             {!messages.length && !streaming ? (
               <div className={`rise mx-auto max-w-sm text-center ${wide ? "mt-16" : "mt-8"}`}>
                 <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-amber/15 text-[18px] text-amber">✦</div>
@@ -343,7 +344,7 @@ export function ChatThread({
               </div>
             ) : null}
             {messages.map((m) => <MessageRow key={m.id} m={m} />)}
-            {streaming ? <Markdown text={streaming} className="text-[13px] after:ml-0.5 after:inline-block after:h-3.5 after:w-1.5 after:animate-pulse after:bg-amber after:align-middle after:content-['']" /> : null}
+            {streaming ? <Markdown text={streaming} className="md-compact text-[12px] after:ml-0.5 after:inline-block after:h-3.5 after:w-1.5 after:animate-pulse after:bg-amber after:align-middle after:content-['']" /> : null}
             {chat?.busy && !streaming ? (
               <div className="flex items-center gap-1.5 pl-1 text-[11.5px] text-ink-500">
                 <span className="breathe h-1.5 w-1.5 rounded-full bg-amber" /> thinking…
@@ -352,7 +353,7 @@ export function ChatThread({
           </div>
         </div>
 
-        <footer className={wide ? "px-6 pb-4 pt-1" : "border-t border-ink-800 px-3 pb-3 pt-2.5"}>
+        <footer className={wide ? "px-4 pb-3 pt-1" : "border-t border-ink-800 px-3 pb-3 pt-2.5"}>
           <div className={column}>
             {/* The Studio has the work on its right; the panel keeps its cards above the box, where they stay in sight. */}
             {wide ? null : <ChatTray chatId={chatId} />}
@@ -384,8 +385,8 @@ export function ChatThread({
             >
               <textarea
                 ref={input}
-                rows={wide ? 3 : 2}
-                className="block max-h-40 w-full resize-none bg-transparent px-3 pt-2.5 text-[13px] text-ink-100 outline-none placeholder:text-ink-500"
+                rows={2}
+                className="block max-h-40 w-full resize-none bg-transparent px-3 pt-2 text-[12px] text-ink-100 outline-none placeholder:text-ink-500"
                 placeholder={dragging ? "Drop the file here" : `Ask about ${project.name}… (drop or paste a file to attach it)`}
                 value={text}
                 onChange={(e) => setText(e.target.value)}
@@ -403,7 +404,7 @@ export function ChatThread({
                   }
                 }}
               />
-              <div className="flex items-center gap-1.5 border-t border-ink-800/70 px-2 py-1.5">
+              <div className="flex flex-wrap items-center gap-1.5 border-t border-ink-800/70 px-2 py-1.5">
                 <input ref={picker} type="file" multiple className="hidden" accept=".png,.jpg,.jpeg,.gif,.webp,.svg,.pdf,.csv,.tsv,.xlsx,.xls,.docx,.doc,.pptx,.txt,.md,.log,.json,.yaml,.yml,.xml,.html,.htm" onChange={(e) => { void attach([...(e.target.files ?? [])]); e.target.value = ""; }} />
                 <button
                   className={`flex shrink-0 cursor-pointer items-center rounded-md px-1.5 py-1 ${uploading ? "breathe text-amber" : "text-ink-400 hover:text-amber"}`}
@@ -434,21 +435,23 @@ export function ChatThread({
                 </label>
                 {/* The mode the cards of this chat will run in; a message that names one wins (D344). */}
                 <div className="flex shrink-0 items-center overflow-hidden rounded-md border border-ink-700 text-[11px]" role="radiogroup" aria-label="How cards from this chat run">
-                  {(["supervised", "autonomous"] as Mode[]).map((m) => (
+                  {RUN_STYLES.map((m) => (
                     <button
                       key={m}
                       role="radio"
                       aria-checked={mode === m}
-                      disabled={m === "autonomous" && !!noAuto}
-                      className={`cursor-pointer px-2 py-1 transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${mode === m ? (m === "autonomous" ? "bg-amber/15 text-amber" : "bg-cyan/15 text-cyan") : "text-ink-500 hover:text-ink-200"}`}
+                      disabled={m !== "supervised" && !!noAuto}
+                      className={`cursor-pointer px-2 py-1 transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${mode === m ? (m === "ask" ? "bg-iris/15 text-iris" : m === "autonomous" ? "bg-amber/15 text-amber" : "bg-cyan/15 text-cyan") : "text-ink-500 hover:text-ink-200"}`}
                       title={
-                        m === "autonomous"
+                        m === "ask"
+                          ? noAuto ?? "Cards this chat makes work like autonomous, but when one needs your answer it stops and asks you — here in the chat, on the card and in a pop-up — and waits. Click an answer, or just tell Claude."
+                          : m === "autonomous"
                           ? noAuto ?? "Cards this chat makes work on their own branch without asking, and the work lands when you approve it. Say “supervised” in a message to make one card the other way. A lookup card runs in the project's own folder and asks nothing (it changes nothing), unless the project keeps autonomous in a sandbox."
                           : "Cards this chat makes work in the project's own folder and ask you before each change; “Always allow” on a card stops the asking for that command. Say “autonomous” in a message to make one card the other way."
                       }
                       onClick={() => setMode(m)}
                     >
-                      {m}
+                      {m === "ask" ? "asks me" : m}
                     </button>
                   ))}
                 </div>

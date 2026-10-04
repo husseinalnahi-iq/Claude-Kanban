@@ -38,6 +38,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   blocked_json  TEXT,
   questions_json TEXT NOT NULL DEFAULT '[]',
   checkout_json TEXT,
+  resolution_json TEXT,
+  conflict_risk_json TEXT,
   plan_approval INTEGER,
   live          INTEGER NOT NULL DEFAULT 0,
   own_branch    INTEGER NOT NULL DEFAULT 0,

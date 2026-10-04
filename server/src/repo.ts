@@ -7,7 +7,7 @@ import type {
   Attachment, Note, MergePolicy, Priority, ProjectEnv, Settings, Stage, StageName, Task, TaskCard, TaskStatus, TaskType, UsageLimit,
   Provider, RunRole, CostSource, TierRef, Schedule, Chat, ChatFile, ChatFolder, ChatMessage, Effort, SpecVersion, ProviderOut, UsageTotals,
 } from "./types.ts";
-import { ANTHROPIC_PROVIDER_ID, DEFAULT_MERGE, EMPTY_ENV, HELPER_MODELS, type HelperModel } from "./types.ts";
+import { ANTHROPIC_PROVIDER_ID, DEFAULT_MERGE, EMPTY_ENV, HELPER_MODELS, RUN_STYLES, type HelperModel, type RunStyle } from "./types.ts";
 import { DEFAULT_CHECKLIST } from "./engine/onboarding.ts";
 import { isImageProvider } from "./engine/images.ts";
 
@@ -135,10 +135,13 @@ const toTask = (r: Row): Task => ({
   plan_approval: r.plan_approval === null || r.plan_approval === undefined ? null : Number(r.plan_approval) === 1,
   live: Number(r.live ?? 0) === 1,
   own_branch: Number(r.own_branch ?? 0) === 1,
+  may_ask: Number(r.may_ask ?? 0) === 1,
+  setup_pending: Number(r.setup_pending ?? 0) === 1,
   chat_id: (r.chat_id as string) ?? null,
   triaged_at: (r.triaged_at as string) ?? null,
   archived_at: (r.archived_at as string) ?? null,
   done_at: (r.done_at as string) ?? null,
+  merged_at: (r.merged_at as string) ?? null,
   resume_at: (r.resume_at as string) ?? null,
   pause_reason: (r.pause_reason as Task["pause_reason"]) ?? null,
   budget_extra_usd: Number(r.budget_extra_usd ?? 0),
@@ -150,6 +153,8 @@ const toTask = (r: Row): Task => ({
   questions: json<Task["questions"]>(r.questions_json, []),
   checklist: json<Task["checklist"]>(r.checklist_json, []),
   checkout: json<Task["checkout"]>(r.checkout_json, null),
+  resolution: json<Task["resolution"]>(r.resolution_json, null),
+  conflict_risk: json<Task["conflict_risk"]>(r.conflict_risk_json, null),
   mode: r.mode as Mode,
   pipeline: json<Stage[]>(r.pipeline_json, []),
   skills: json<string[]>(r.skills_json, []),
@@ -170,6 +175,7 @@ const toSchedule = (r: Row): Schedule => ({
   title: r.title as string,
   spec_md: r.spec_md as string,
   mode: r.mode as Mode,
+  may_ask: Number(r.may_ask ?? 0) === 1,
   type: (r.type as TaskType) ?? "feature",
   priority: (r.priority as Priority) ?? "p2",
   pipeline: json<Stage[]>(r.pipeline_json, []),
@@ -196,7 +202,9 @@ const toChat = (r: Row): Chat => ({
   warm_at: (r.warm_at as string) ?? null,
   keep_alive: r.keep_alive === undefined || r.keep_alive === null ? true : Number(r.keep_alive) === 1,
   use_tools: Number(r.use_tools ?? 0) === 1,
-  mode: r.mode === "autonomous" ? "autonomous" : "supervised",
+  context_tokens: Number(r.context_tokens ?? 0),
+  context_window: Number(r.context_window ?? 0),
+  mode: r.mode === "autonomous" || r.mode === "ask" ? r.mode : "supervised",
   archived_at: (r.archived_at as string) ?? null,
   created_at: r.created_at as string,
   updated_at: r.updated_at as string,
@@ -346,6 +354,8 @@ function setClause(patch: Record<string, unknown>, columns: Record<string, (v: u
       : k === "questions" ? "questions_json"
       : k === "checklist" ? "checklist_json"
       : k === "checkout" ? "checkout_json"
+      : k === "resolution" ? "resolution_json"
+      : k === "conflict_risk" ? "conflict_risk_json"
       : k === "days" ? "days_json"
       : k;
     sets.push(`${col} = ?`);
@@ -379,12 +389,15 @@ export interface TaskFacts {
 const TASK_COLUMNS: Record<string, (v: unknown) => SQLInputValue> = {
   parent_id: str, milestone_id: str, title: str, spec_md: str, status: str, mode: str, pipeline: js, skills: js,
   branch: str, worktree_path: str, base_sha: str, summary: str, note: str, error: str, position: num,
-  type: str, priority: str, labels: js, depends_on: js, related_to: js, triaged_at: str, archived_at: str, resume_at: str, pause_reason: str, budget_extra_usd: num, start_at: str, suggestion: js, plan_gate: js, blocked: js, questions: js, checklist: js, checkout: js, onboarding: str,
+  type: str, priority: str, labels: js, depends_on: js, related_to: js, triaged_at: str, archived_at: str, resume_at: str, pause_reason: str, budget_extra_usd: num, start_at: str, suggestion: js, plan_gate: js, blocked: js, questions: js, checklist: js, checkout: js, resolution: js, conflict_risk: js, onboarding: str,
   auto_queue_children: (v) => (v ? 1 : 0),
   plan_approval: (v) => (v === null || v === undefined ? null : v ? 1 : 0),
   live: (v) => (v ? 1 : 0),
   own_branch: (v) => (v ? 1 : 0),
+  may_ask: (v) => (v ? 1 : 0),
+  setup_pending: (v) => (v ? 1 : 0),
   chat_id: str,
+  merged_at: str,
 };
 
 export type NewTask = {
@@ -407,6 +420,8 @@ export type NewTask = {
   plan_approval?: boolean | null;
   live?: boolean;
   own_branch?: boolean;
+  may_ask?: boolean;
+  setup_pending?: boolean;
   chat_id?: string | null;
 };
 
@@ -515,6 +530,7 @@ export class Repo {
       claudeFallback: tierOrNull(json<unknown>(m.get("claudeFallback"), null)),
       keepAwake: (m.get("keepAwake") ?? "true") !== "false",
       questionWaitMin: Number(m.get("questionWaitMin") ?? 0),
+      askModeWaitMin: Number(m.get("askModeWaitMin") ?? 0),
       chatModel: m.get("chatModel") || "claude-sonnet-5-5",
       chatEffort: (m.get("chatEffort") as Effort) || "medium",
       chatProvider: m.get("chatProvider") || ANTHROPIC_PROVIDER_ID,
@@ -531,6 +547,8 @@ export class Repo {
       autoAllowReadOnly: (m.get("autoAllowReadOnly") ?? "true") !== "false",
       markitdownInTasks: (m.get("markitdownInTasks") ?? "true") !== "false",
       planApproval: m.get("planApproval") === "true",
+      defaultRunStyle: (RUN_STYLES as string[]).includes(m.get("defaultRunStyle") ?? "") ? (m.get("defaultRunStyle") as RunStyle) : "ask",
+      confirmSetup: (m.get("confirmSetup") ?? "true") !== "false",
       autoContinueTurns: Number(m.get("autoContinueTurns") ?? 2),
       liveReviewModel: m.get("liveReviewModel") || "claude-opus-5-5",
       followLatestModels: (m.get("followLatestModels") ?? "true") !== "false",
@@ -631,15 +649,15 @@ export class Repo {
     this.stmt(
       `INSERT INTO tasks(id, project_id, parent_id, milestone_id, title, spec_md, status, mode, pipeline_json, skills_json,
                          type, priority, labels_json, depends_on_json, related_to_json, auto_queue_children, onboarding, position, created_at, updated_at,
-                         plan_approval, live, own_branch, done_at, chat_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                         plan_approval, live, own_branch, may_ask, done_at, chat_id, setup_pending)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       id, t.project_id, t.parent_id ?? null, t.milestone_id ?? null, t.title, t.spec_md ?? "", t.status ?? "backlog",
       t.mode ?? "supervised", JSON.stringify(t.pipeline ?? []), JSON.stringify(t.skills ?? []),
       t.type ?? "feature", t.priority ?? "p2", JSON.stringify(t.labels ?? []), JSON.stringify(t.depends_on ?? []),
       JSON.stringify(t.related_to ?? []), t.auto_queue_children ? 1 : 0, t.onboarding ?? null, pos, now, now,
-      t.plan_approval === undefined || t.plan_approval === null ? null : t.plan_approval ? 1 : 0, t.live ? 1 : 0, t.own_branch ? 1 : 0,
-      t.status === "done" ? now : null, t.chat_id ?? null,
+      t.plan_approval === undefined || t.plan_approval === null ? null : t.plan_approval ? 1 : 0, t.live ? 1 : 0, t.own_branch ? 1 : 0, t.may_ask ? 1 : 0,
+      t.status === "done" ? now : null, t.chat_id ?? null, t.setup_pending ? 1 : 0,
     );
     return this.getTask(id)!;
   }
@@ -654,6 +672,8 @@ export class Repo {
         // so a task that is already done keeps its date; leaving done clears it.
         sets.push("done_at = CASE WHEN ? = 'done' THEN CASE WHEN status = 'done' AND done_at IS NOT NULL THEN done_at ELSE ? END ELSE NULL END");
         vals.push(patch.status, now);
+        // A task taken back out of done is no longer merged work, whatever lands next time.
+        if (patch.status !== "done" && patch.merged_at === undefined) sets.push("merged_at = NULL");
       }
       this.stmt(`UPDATE tasks SET ${sets.join(", ")}, updated_at = ? WHERE id = ?`).run(...vals, now, id);
     }
@@ -751,10 +771,10 @@ export class Repo {
   createSchedule(s: Omit<Schedule, "id" | "created_at" | "last_run_at" | "last_task_id">): Schedule {
     const id = newId("sc");
     this.stmt(
-      `INSERT INTO schedules(id, project_id, title, spec_md, mode, type, priority, pipeline_json, skills_json, days_json, time, enabled, next_run_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO schedules(id, project_id, title, spec_md, mode, may_ask, type, priority, pipeline_json, skills_json, days_json, time, enabled, next_run_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
-      id, s.project_id, s.title, s.spec_md, s.mode, s.type, s.priority, JSON.stringify(s.pipeline), JSON.stringify(s.skills),
+      id, s.project_id, s.title, s.spec_md, s.mode, s.may_ask ? 1 : 0, s.type, s.priority, JSON.stringify(s.pipeline), JSON.stringify(s.skills),
       JSON.stringify(s.days), s.time, s.enabled ? 1 : 0, s.next_run_at, nowIso(),
     );
     return this.getSchedule(id)!;
@@ -762,7 +782,7 @@ export class Repo {
 
   updateSchedule(id: string, patch: Partial<Omit<Schedule, "id" | "project_id" | "created_at">>): Schedule {
     const { sets, vals } = setClause(patch as Record<string, unknown>, {
-      title: str, spec_md: str, mode: str, type: str, priority: str, pipeline: js, skills: js, days: js, time: str,
+      title: str, spec_md: str, mode: str, may_ask: (v) => (v ? 1 : 0), type: str, priority: str, pipeline: js, skills: js, days: js, time: str,
       enabled: (v) => (v ? 1 : 0), next_run_at: str, last_run_at: str, last_task_id: str,
     });
     if (sets.length) this.stmt(`UPDATE schedules SET ${sets.join(", ")} WHERE id = ?`).run(...vals, id);
@@ -788,20 +808,22 @@ export class Repo {
     return r && toChat(r);
   }
 
-  createChat(c: { project_id: string; title: string; model: string; effort: Effort; provider?: string }): Chat {
+  createChat(c: { project_id: string; title: string; model: string; effort: Effort; provider?: string; mode?: RunStyle }): Chat {
     const id = newId("c");
     const now = nowIso();
-    this.stmt("INSERT INTO chats(id, project_id, title, model, effort, provider, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(id, c.project_id, c.title, c.model, c.effort, c.provider || ANTHROPIC_PROVIDER_ID, now, now);
+    // A new chat's switch starts on the board's default run style (D365); an old chat keeps the one it has.
+    this.stmt("INSERT INTO chats(id, project_id, title, model, effort, provider, mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(id, c.project_id, c.title, c.model, c.effort, c.provider || ANTHROPIC_PROVIDER_ID, c.mode ?? this.getSettings().defaultRunStyle, now, now);
     return this.getChat(id)!;
   }
 
-  updateChat(id: string, patch: Partial<Pick<Chat, "title" | "session_id" | "model" | "effort" | "provider" | "cost_usd" | "folder_id" | "warm_at" | "keep_alive" | "use_tools" | "mode" | "archived_at">>): Chat {
+  updateChat(id: string, patch: Partial<Pick<Chat, "title" | "session_id" | "model" | "effort" | "provider" | "cost_usd" | "folder_id" | "warm_at" | "keep_alive" | "use_tools" | "context_tokens" | "context_window" | "mode" | "archived_at">>): Chat {
     const { sets, vals } = setClause(patch as Record<string, unknown>, {
-      title: str, session_id: str, model: str, effort: str, provider: str, cost_usd: num, folder_id: str, warm_at: str, keep_alive: bool, use_tools: bool, mode: str, archived_at: str,
+      title: str, session_id: str, model: str, effort: str, provider: str, cost_usd: num, folder_id: str, warm_at: str, keep_alive: bool, use_tools: bool,
+      context_tokens: num, context_window: num, mode: str, archived_at: str,
     });
-    // Filing a chat, its switches, or its cache window moving are not activity: it keeps its place in a list sorted by when it was last used.
-    const quiet = new Set(["folder_id", "warm_at", "keep_alive", "use_tools", "mode"]);
+    // Filing a chat, its switches, or its cache window or context moving are not activity: it keeps its place in a list sorted by when it was last used.
+    const quiet = new Set(["folder_id", "warm_at", "keep_alive", "use_tools", "context_tokens", "context_window", "mode"]);
     const filingOnly = Object.keys(patch).every((k) => quiet.has(k) || (patch as Record<string, unknown>)[k] === undefined);
     if (sets.length && filingOnly) this.stmt(`UPDATE chats SET ${sets.join(", ")} WHERE id = ?`).run(...vals, id);
     else if (sets.length) this.stmt(`UPDATE chats SET ${sets.join(", ")}, updated_at = ? WHERE id = ?`).run(...vals, nowIso(), id);

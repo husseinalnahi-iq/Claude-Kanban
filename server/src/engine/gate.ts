@@ -7,10 +7,15 @@ export type GateResult =
   | { behavior: "allow"; updatedInput: Record<string, unknown> }
   | { behavior: "deny"; message: string };
 
-/** Tools that never change anything. Everything else is a write for approval purposes. */
+/**
+ * Tools that never change anything. Everything else is a write for approval purposes. The Task*
+ * names are the SDK's to-do list (the successor of TodoWrite): they only touch the run's own
+ * checklist, and leaving them out cost one supervised run 30 of its 68 cards (D363).
+ */
 export const READ_ONLY_TOOLS = new Set([
   "Read", "Glob", "Grep", "LS", "NotebookRead", "WebFetch", "WebSearch", "TodoWrite", "TodoRead", "Skill",
   "ToolSearch", "ListMcpResourcesTool", "ReadMcpResourceTool", "BashOutput", "TaskOutput",
+  "TaskCreate", "TaskUpdate", "TaskList", "TaskGet",
 ]);
 
 /** MCP servers every run may use without approval: the board itself and read-only docs lookup. */
@@ -37,6 +42,40 @@ export function isSafeMcp(toolName: string): boolean {
   return SAFE_MCP_PREFIXES.some((p) => toolName.startsWith(p));
 }
 
+const OWN_RULE_PREFIXES = [CHROME_PREFIX, `mcp__${BROWSER_SERVER}__`, `${PLAYWRIGHT_PLUGIN_TOOLS}__`, IMAGE_PREFIX, `mcp__${MARKITDOWN_SERVER}__`, "mcp__computer-use__"];
+const READ_VERBS = new Set(["get", "list", "search", "read", "fetch", "find", "count", "describe", "lookup", "query"]);
+// Any one of these anywhere in the name makes it a write, so `get_or_create_x` or `find_and_delete`
+// still asks. Nouns that only look like verbs (`get_agent_run`, `get_issue`) are left off. `query` counts as a read only beside a word that says so (`query_logs`): a bare
+// `query` / `execute_sql` can change rows.
+const WRITE_VERBS = new Set([
+  "send", "create", "update", "delete", "trash", "apply", "execute", "exec", "deploy", "write", "set",
+  "add", "remove", "post", "merge", "reset", "pause", "unpause", "restore", "buy", "upload", "label", "unlabel",
+  "mark", "unmark", "cancel", "move", "copy", "share", "submit", "schedule", "respond", "forward", "reply",
+  "draft", "edit", "patch", "put", "insert", "replace", "rename", "approve", "assign", "invalidate", "kill",
+  "stop", "start", "rollback", "promote", "transfer", "join", "accept", "sign", "revoke", "activate",
+  "rebase", "sql", "migration", "click", "type", "navigate",
+]);
+
+/**
+ * A connector tool whose name says it only reads — `get_values`, `slack_search_public_and_private`,
+ * `list_events` — judged by its words, since an MCP server declares nothing the board can trust. The
+ * read verb must be the first or second word (the second covers a server prefix such as `slack_`),
+ * and no word may be a write verb. Wrongly calling a write a read is the costly mistake, so the
+ * write list is long and wins every tie (D363).
+ */
+export function isReadOnlyMcp(toolName: string): boolean {
+  if (!toolName.startsWith("mcp__")) return false;
+  // Servers that see your screen, your own browser or make files keep their own rules: "reading"
+  // your clipboard or a logged-in Chrome tab is exactly what a card is for.
+  if (OWN_RULE_PREFIXES.some((p) => toolName.startsWith(p))) return false;
+  const action = toolName.slice(toolName.lastIndexOf("__") + 2).toLowerCase();
+  const words = action.split(/[_\-]+/).filter(Boolean);
+  if (words.some((w) => WRITE_VERBS.has(w))) return false;
+  const lead = words.slice(0, 2).findIndex((w) => READ_VERBS.has(w));
+  if (lead < 0) return false;
+  return words[lead] !== "query" || words.length > lead + 1;
+}
+
 /** How the board treats one MCP server's tools, in the words the Settings page shows. */
 export function serverRule(prefix: string, opts: { markitdown?: boolean } = {}): string {
   if (prefix === "mcp__board__") return "The board's own tools — always allowed.";
@@ -48,7 +87,7 @@ export function serverRule(prefix: string, opts: { markitdown?: boolean } = {}):
   if (prefix === `mcp__${MARKITDOWN_SERVER}__` && opts.markitdown) {
     return "Documents to Markdown — a web page or a file in the task's own folders is a read, without a card; other files are refused (autonomous) or asked (supervised).";
   }
-  return "Autonomous runs: refused. Supervised runs: an approval card for every call.";
+  return "Autonomous runs: refused. Supervised runs: an approval card for every call, except tools whose name says they only read (get, list, search…) when read-only work is allowed without a card.";
 }
 
 // ---------------------------------------------------------------- paths
@@ -116,7 +155,7 @@ const TRAVERSAL = /(^|[\s"'=;&|(`\\/:,<>@])\.\.([\\/]|$|[\s"';&|)`,<>])/;
  * Anything that names the home folder: `~` and `~user`, the variables each shell keeps it in (with or
  * without braces), and the calls a one-line script would use to ask for it.
  */
-const HOME_VARS = "HOME|USERPROFILE|HOMEPATH|HOMEDRIVE|APPDATA|LOCALAPPDATA|ONEDRIVE";
+const HOME_VARS = "HOME|USERPROFILE|HOMEPATH|HOMEDRIVE|APPDATA|LOCALAPPDATA|CLOUDSYNC";
 const HOME_REF = new RegExp(
   String.raw`(^|[\s"'=;&|(:<>,\`])~[\w.+-]*([\\/]|$|[\s"';&|)<>,\`])` +
     String.raw`|\$\{?(?:${HOME_VARS})\}?(?![\w])|\$env:(?:${HOME_VARS})\b|%(?:${HOME_VARS})%` +

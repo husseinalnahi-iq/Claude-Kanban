@@ -212,6 +212,57 @@ export async function updateFromBase(worktreePath: string, base: string, how: "m
   }
 }
 
+export interface MergePreview {
+  clean: boolean;
+  /** The tree git would produce. For a conflicted merge, conflicted files hold conflict markers. */
+  tree: string;
+  conflicts: string[];
+}
+
+/**
+ * What merging `theirs` into `ours` would do, worked out in git's object store alone: no checkout,
+ * index or HEAD is touched (`git merge-tree --write-tree`, git 2.38+). This is what lets the board ask
+ * "would this conflict?" of a task that is running, or of one nobody has approved yet.
+ */
+export async function previewMerge(cwd: string, ours: string, theirs: string): Promise<MergePreview> {
+  let out: string;
+  try {
+    out = await git(cwd, ["merge-tree", "--write-tree", "--name-only", "--no-messages", ours, theirs]);
+  } catch (err) {
+    // Exit 1 is git's answer "it conflicts", with the same output on stdout; anything else is a failure.
+    if (!(err instanceof GitError) || err.code !== 1) throw err;
+    out = err.stdout;
+  }
+  const [tree = "", ...rest] = out.split(/\r?\n/);
+  const conflicts = rest.filter(Boolean);
+  return { clean: conflicts.length === 0, tree: tree.trim(), conflicts };
+}
+
+export interface LandedWork {
+  /** The board task that landed it, when its merge message names one. */
+  taskId: string | null;
+  title: string;
+}
+
+/**
+ * What arrived on `base` since the worktree's branch split from it, newest first — the "other side" of
+ * a conflict. The board's own landings are recognised by their messages (`Merge kanban/<id>: <title>`
+ * for merge and squash, `kanban: <title>` for the commits a rebase fast-forwards in); anything else is
+ * someone's own commit and is listed by its subject.
+ */
+export async function landedSince(worktreePath: string, base: string, limit = 20): Promise<LandedWork[]> {
+  const from = (await git(worktreePath, ["merge-base", "HEAD", base])).trim();
+  // --first-parent: a merge landing counts once, not once more for every commit inside it.
+  const log = (await git(worktreePath, ["log", "--first-parent", "--format=%s", `-${limit}`, `${from}..${base}`])).trim();
+  if (!log) return [];
+  return log.split(/\r?\n/).map((subject) => {
+    const merged = /^Merge kanban\/(\S+): (.*)$/.exec(subject);
+    if (merged) return { taskId: merged[1], title: merged[2] };
+    const committed = /^kanban: (.*)$/.exec(subject);
+    return { taskId: null, title: committed ? committed[1] : subject };
+  });
+}
+
 /**
  * Land the task branch on the branch the main checkout has out. On a conflict the merge is aborted so
  * the checkout is left exactly as it was, and the conflicting files are reported. With
@@ -325,4 +376,184 @@ export async function listWorktrees(projectPath: string): Promise<string[]> {
     .split(/\r?\n/)
     .filter((l) => l.startsWith("worktree "))
     .map((l) => l.slice("worktree ".length));
+}
+
+// ── Conflict resolution (D355) ────────────────────────────────────────────────────────────────────
+// The board, not the model, starts and finishes the merge, so what is checked is exactly what was
+// merged: a pinned base commit, with git's own clean merge of everything else as the yardstick.
+
+/** The commit a name points at, in that repository. */
+export async function revParse(cwd: string, rev: string): Promise<string> {
+  return (await git(cwd, ["rev-parse", "--verify", `${rev}^{commit}`])).trim();
+}
+
+/** Remember where a branch stood, under the board's own ref namespace (never a branch). */
+export async function setRef(cwd: string, ref: string, sha: string | null): Promise<void> {
+  if (sha) await git(cwd, ["update-ref", ref, sha]);
+  else await git(cwd, ["update-ref", "-d", ref]).catch(() => undefined);
+}
+
+async function mergeInProgress(cwd: string): Promise<boolean> {
+  return existsSync(join(await gitPath(cwd, "--git-dir"), "MERGE_HEAD"));
+}
+
+/**
+ * Start merging `baseSha` into the worktree and leave any conflicts in place for Claude, written
+ * zdiff3-style (this side, the original after `|||||||`, the other side). Returns the conflicted
+ * files; none means git merged it cleanly and has already committed.
+ */
+export async function startResolveMerge(worktreePath: string, baseSha: string, message: string): Promise<string[]> {
+  try {
+    await git(worktreePath, ["-c", "merge.conflictStyle=zdiff3", "merge", "--no-ff", "-m", message, baseSha]);
+    return [];
+  } catch (err) {
+    const conflicts = await conflictedFiles(worktreePath);
+    if (!conflicts.length) {
+      if (await mergeInProgress(worktreePath)) await git(worktreePath, ["merge", "--abort"]).catch(() => undefined);
+      throw err;
+    }
+    return conflicts;
+  }
+}
+
+/** Commit whatever the resolution left: concludes the merge, or records edits made after Claude committed it. */
+export async function finishResolveMerge(worktreePath: string, message: string): Promise<void> {
+  if (await mergeInProgress(worktreePath)) {
+    await git(worktreePath, ["add", "-A"]);
+    await git(worktreePath, ["commit", "-q", "--no-verify", "-m", message]);
+    return;
+  }
+  await commitAll(worktreePath, message);
+}
+
+/**
+ * Put the task's branch back where it was before the attempt. The attempt is committed first and only
+ * then stepped back from with `reset --keep`, so it stays in the reflog: nothing is thrown away, and
+ * `--keep` refuses rather than overwrite anything it did not expect.
+ */
+export async function rollbackResolution(worktreePath: string, pre: string): Promise<void> {
+  await finishResolveMerge(worktreePath, "kanban: set aside a conflict resolution that did not pass").catch(() => undefined);
+  if ((await headSha(worktreePath)) === pre) return;
+  await git(worktreePath, ["reset", "-q", "--keep", pre]);
+}
+
+export interface ResolutionFindings {
+  /** Failures no explanation can excuse: the resolution is set aside. */
+  hard: { id: "history" | "markers" | "files"; detail: string }[];
+  /** Lines either side added that the result no longer has — each needs the reviewer's agreement. */
+  lost: { file: string; side: "task" | "base"; lines: string[] }[];
+  /** Files changed that git had merged cleanly, or that are new. */
+  outside: string[];
+}
+
+const MARKER = /^(<{7}|>{7}|\|{7})(\s|$)/;
+const SEPARATOR = /^={7}$/;
+const LOST_PER_FILE = 20;
+
+async function isAncestor(cwd: string, a: string, b: string): Promise<boolean> {
+  try {
+    await git(cwd, ["merge-base", "--is-ancestor", a, b]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function showFile(cwd: string, rev: string, file: string): Promise<string | null> {
+  try {
+    return await git(cwd, ["show", `${rev}:${file}`]);
+  } catch {
+    return null;
+  }
+}
+
+async function namesBetween(cwd: string, from: string, to: string, filter?: string): Promise<string[]> {
+  const out = (await git(cwd, ["diff", "--name-only", "--no-renames", ...(filter ? [`--diff-filter=${filter}`] : []), from, to])).trim();
+  return out ? out.split(/\r?\n/) : [];
+}
+
+/** A line worth missing: brace-only and blank lines move about in any honest merge. */
+const meaningful = (line: string) => line.trim().length >= 3 && /[A-Za-z0-9]/.test(line);
+
+/** The lines a `diff -U0` adds, by file. */
+export function addedLines(patch: string): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  let file: string | null = null;
+  for (const line of patch.split(/\r?\n/)) {
+    if (line.startsWith("+++ ")) {
+      file = line === "+++ /dev/null" ? null : line.slice(4).replace(/^b\//, "");
+      if (file && !out.has(file)) out.set(file, []);
+    } else if (file && line.startsWith("+")) {
+      out.get(file)!.push(line.slice(1));
+    }
+  }
+  return out;
+}
+
+/**
+ * Check a committed resolution against what was merged. `previewTree` is git's own merge of the two
+ * sides (`previewMerge`): everything outside the conflicts must still match it.
+ */
+export async function checkResolution(
+  worktreePath: string,
+  a: { pre: string; baseSha: string; previewTree: string; conflicts: string[] },
+): Promise<ResolutionFindings> {
+  const hard: ResolutionFindings["hard"] = [];
+  const head = await headSha(worktreePath);
+
+  // Both histories must survive whole: a rebase, reset or abort would drop one of them.
+  if (!head || head === a.pre || (await mergeInProgress(worktreePath)) || !(await isAncestor(worktreePath, a.pre, head)) || !(await isAncestor(worktreePath, a.baseSha, head))) {
+    hard.push({ id: "history", detail: "The merge was not completed with both histories in it." });
+    return { hard, lost: [], outside: [] };
+  }
+
+  const marked: string[] = [];
+  for (const file of a.conflicts) {
+    const body = await showFile(worktreePath, head, file);
+    if (body === null) continue;
+    const lines = body.split(/\r?\n/);
+    const opening = lines.some((l) => MARKER.test(l));
+    if (opening || (lines.some((l) => SEPARATOR.test(l)) && lines.some((l) => /^<{7}/.test(l)))) marked.push(file);
+  }
+  if (marked.length) hard.push({ id: "markers", detail: `Conflict markers are still in: ${marked.join(", ")}.` });
+
+  const conflicted = new Set(a.conflicts);
+  const changed = await namesBetween(worktreePath, a.previewTree, head);
+  const outside = changed.filter((f) => !conflicted.has(f));
+  const removed = (await namesBetween(worktreePath, a.previewTree, head, "D")).filter((f) => !conflicted.has(f));
+  if (removed.length) hard.push({ id: "files", detail: `Files git had merged cleanly were deleted: ${removed.join(", ")}.` });
+
+  // Lines each side added, looked for in the result. Only where the resolution could have touched:
+  // everywhere else the result is git's own merge, which keeps both sides by construction.
+  const scope = [...new Set([...a.conflicts, ...outside])];
+  const lost: ResolutionFindings["lost"] = [];
+  if (scope.length) {
+    const mb = (await git(worktreePath, ["merge-base", a.pre, a.baseSha])).trim();
+    const finals = new Map<string, Set<string>>();
+    for (const file of scope) {
+      const body = await showFile(worktreePath, head, file);
+      finals.set(file, new Set((body ?? "").split(/\r?\n/).map((l) => l.trim())));
+    }
+    for (const [side, tip] of [["task", a.pre], ["base", a.baseSha]] as const) {
+      const patch = await git(worktreePath, ["diff", "-U0", "--no-renames", "--no-color", mb, tip, "--", ...scope]);
+      for (const [file, added] of addedLines(patch)) {
+        const final = finals.get(file);
+        if (!final) continue;
+        const missing = [...new Set(added.filter((l) => meaningful(l) && !final.has(l.trim())).map((l) => l.trim()))];
+        if (missing.length) lost.push({ file, side, lines: missing.slice(0, LOST_PER_FILE) });
+      }
+    }
+  }
+  return { hard, lost, outside };
+}
+
+/** What a resolution changed in some files, against one side — for the reviewer to read. */
+export async function diffFiles(cwd: string, from: string, to: string, files: string[]): Promise<string> {
+  if (!files.length) return "";
+  return git(cwd, ["diff", "--no-renames", "--no-color", from, to, "--", ...files]);
+}
+
+/** Where the two sides split. */
+export async function mergeBase(cwd: string, a: string, b: string): Promise<string> {
+  return (await git(cwd, ["merge-base", a, b])).trim();
 }

@@ -4,11 +4,11 @@ import type { Repo } from "../repo.ts";
 import type { Bus } from "../bus.ts";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, extname, join } from "node:path";
-import type { Chat, ChatFile, ChatFolder, ChatMessage, ChatUpdate, FolderColor, Mode, ModelEntry, Project, Stage, Task } from "../types.ts";
+import type { Approval, Chat, ChatFile, ChatFolder, ChatMessage, ChatUpdate, FolderColor, Mode, ModelEntry, Project, RunStyle, Stage, Task } from "../types.ts";
 import { ATTACHMENT_TYPES, FOLDER_COLORS, MAX_ATTACHMENT_BYTES, attachmentKind } from "../types.ts";
-import { ConflictError, forceAsk, NotFoundError, type QueryFn, type TaskRunner } from "./runner.ts";
+import { ConflictError, forceAsk, NotFoundError, QUESTION_TOOL, type QueryFn, type TaskRunner } from "./runner.ts";
 import type { Scheduler } from "./scheduler.ts";
-import { createChatBoardServer, pipelineLine } from "./chatBoard.ts";
+import { askedQuestions, createChatBoardServer, pipelineLine } from "./chatBoard.ts";
 import { defaultPipeline } from "./boardMcp.ts";
 import { resultText } from "./record.ts";
 import type { Resolved } from "./providers/types.ts";
@@ -37,6 +37,8 @@ export const CHAT_COMMANDS_OFF =
 const NEW_CHAT = "New chat";
 /** What one reply may cost: enough for a long, careful answer. */
 const CHAT_CEILING_USD = 1.5;
+/** The context bar moves while a reply reads files; pushing it to every open page once a second is enough. */
+const CONTEXT_PUSH_MS = 1000;
 /** What ✦ What next? asks (D338). The user picks; the chat makes no card on its own. */
 export const NEXT_STEPS_PROMPT =
   "Looking at this conversation and the cards it made, suggest the next 5 things we might need to do: bugs to fix, security to tighten, follow-up edits once this work lands, or useful additions related to it. Number them, one line each with a short why, most valuable first. Create no cards: I will pick.";
@@ -110,7 +112,7 @@ export function turnContext(now = new Date()): string {
  * The chat's instructions. Stable for a project — the models line changes only when Settings does — so
  * the cached conversation behind it is not re-billed turn after turn.
  */
-export function chatPrompt(project: Project, board?: { models: ModelEntry[]; defaults: Stage[]; pictures?: string | null; tools?: boolean; mode?: Mode }): string {
+export function chatPrompt(project: Project, board?: { models: ModelEntry[]; defaults: Stage[]; pictures?: string | null; tools?: boolean; mode?: RunStyle }): string {
   return [
     `You are the side chat of Claude Kanban, talking with the user about the project "${project.name}" (${project.path}).`,
     "Many users are not programmers: answer plainly and briefly, and explain any technical word you have to use.",
@@ -127,18 +129,19 @@ export function chatPrompt(project: Project, board?: { models: ModelEntry[]; def
     "3. Work that changes something: one card. Leave stages out for the board's default; one code stage is enough for a small, clear change; plan → code → review where choosing the approach, or a mistake, is the costly part. Split into several cards only when the parts are big and independent.",
     "When one part needs another's result or must come after it (look something up, then use it; build the API, then the page), make a chain: create the cards in order, give each later card depends_on the earlier ones, and start them together. A card waits in Queued until the cards it depends on are done, then starts by itself and is given what they reported.",
     "For a change, make sure you understand it first; ask one short question if it is unclear. The spec says the problem and what done looks like, from what the user asked, nothing more. Extras you think would help (a pause button, a README) go in your reply as suggestions they can say yes to; they never go into the spec on their own, because every line in it is paid for.",
-    "When you create a change card, say in a few words how it will run and why, then ask whether to start it. The user can also press Start on the card here:",
+    "When you create a change card, say in a few words how it will run and why. A card with a plan stage opens its setup card here, where the user checks the mode and each step's model and effort and presses Start; list those for them, and never start it yourself (D365). Another change card: ask whether to start it; the user can also press Start on the card. The modes:",
     "- supervised: works in the project's own folder and asks the user before each change. A change that reaches a live system or runs commands outside the project is supervised: an autonomous change is sandboxed and cannot reach it.",
     "- autonomous: works on its own branch without asking, and lands only when the user approves it. Good for changes to the project's own files, when the project allows it.",
+    "- ask (Autonomous + asks me): autonomous, but when it needs the user's answer to go on, it stops and waits for it; its question appears in this chat. For work where the user wants a say in the choices along the way.",
     "- an answer card follows the same switch. Autonomous: it runs in the project's own folder, reaches what the project reaches (a live system, its scripts and keys) and asks nothing; it still changes nothing. Supervised: each command that is not read-only waits for the user's Allow. The card's reply tells you which it got.",
     // The switch under the chat is the default; a mode named in the message wins over it (D344).
-    `Use the mode the user chose in their message; otherwise leave mode out and the chat's own mode switch applies${board?.mode ? ` (it is set to ${board.mode} now)` : ""}, and say which mode the card got and why. Set live: true only when the card will change a live system: it then waits for the user's OK on its plan and its review checks the live system. Reading one is not live.`,
+    `Use the mode the user chose in their message; otherwise leave mode out and the chat's own mode switch applies${board?.mode ? ` (it is set to ${board.mode === "ask" ? "ask, Autonomous + asks me" : board.mode} now)` : ""}, and say which mode the card got and why. Set live: true only when the card will change a live system: it then waits for the user's OK on its plan and its review checks the live system. Reading one is not live.`,
     `When the user names a model or an effort ("sonnet, high effort for the code"), put it on that stage in stages.${board ? ` This board's models: ${board.models.map((m) => `${m.label} (${m.id})`).join(", ")}. Default stages: ${pipelineLine(board.defaults)}.` : ""} Haiku has no effort setting. board_update_task changes a Backlog card's stages, mode, branch or live.`,
     "Never queue or schedule a change card the user did not ask to run.",
     "You can also follow and talk to the cards themselves:",
     "- board_list_tasks and board_task_progress tell you what each card is doing, what it did, what it cost and what it is waiting for. Look before you answer a question about a task; do not guess.",
     "- board_message_task passes the user's words to a card's own Claude session: a running card takes them in at its next step, a card in review or failed picks its session up again with them. Pass on what the user said; do not invent instructions.",
-    "- board_answer_question answers a question a card asked, with the answer the user gave. board_stop_task and board_retry_task stop or re-run a card when the user asks.",
+    "- board_answer_question answers a question a card asked, with the answer the user gave — a note it carried on past, or a question card it stopped on and waits for (an Autonomous + asks me or supervised card). board_stop_task and board_retry_task stop or re-run a card when the user asks.",
     // Only when a picture maker is ready: otherwise the chat would promise pictures no card can make (D303).
     ...(board?.pictures ? [`Task cards can make pictures with the board's picture tool (${board.pictures}): when the user wants an image in their project, a card does it.`] : []),
     "When a card from this chat finishes, fails, has a plan ready or asks something, the board posts it here, and the user's next message starts with a [Board news] note about it: use that rather than looking again.",
@@ -156,8 +159,14 @@ function userMessage(text: string): AsyncIterable<SDKUserMessage> {
 /** One update in front of the next message, clipped: the model needs the gist, the chat shows it whole. */
 function newsLine(u: ChatUpdate): string {
   const body = u.text.length > 1500 ? `${u.text.slice(0, 1500)} …` : u.text;
-  const what = { finished: u.status === "done" ? "finished" : "finished and waits for review", failed: "failed", plan: "has a plan waiting for the user's OK", question: "asks" }[u.kind];
-  const extra = u.kind === "question" ? ` (question_id ${u.question_id}${u.options?.length ? `; options: ${u.options.join(" / ")}` : ""})` : "";
+  const what = {
+    finished: u.status === "done" ? "finished" : "finished and waits for review", failed: "failed", plan: "has a plan waiting for the user's OK", question: "asks",
+    asks: "stopped and waits for the user's answer to",
+  }[u.kind];
+  const extra =
+    u.kind === "question" ? ` (question_id ${u.question_id}${u.options?.length ? `; options: ${u.options.join(" / ")}` : ""})`
+    : u.kind === "asks" ? ` (question_id ${u.approval_id}; the user can click an answer on the card shown here, or tell you and you pass it on)`
+    : "";
   return `- "${u.title}" (${u.id}) ${what}${extra}: ${body}`;
 }
 
@@ -188,6 +197,14 @@ export class ChatService {
 
   constructor(private deps: ChatDeps) {
     deps.bus.subscribe((m) => {
+      if (m.type === "approval.requested" && m.approval.tool_name === QUESTION_TOOL) {
+        try {
+          this.reportAsk(m.approval);
+        } catch (err) {
+          console.error("Side chat could not report a card's question:", err);
+        }
+        return;
+      }
       if (m.type !== "task.updated" || !m.task.chat_id) return;
       try {
         this.report(m.task);
@@ -229,6 +246,20 @@ export class ChatService {
     }
   }
 
+  /**
+   * A card this chat made stopped on a question card: put it in the chat, where it can be answered by
+   * a click or in words (D361). Each card is its own approval, so there is nothing to tell apart.
+   */
+  private reportAsk(approval: Approval): void {
+    const { repo } = this.deps;
+    const task = repo.getTask(approval.task_id);
+    if (!task?.chat_id || !repo.getChat(task.chat_id)) return;
+    const asked = askedQuestions(approval.input);
+    const text = asked.map((q) => (q.options.length ? `${q.question} (${q.options.join(" / ")})` : q.question)).join("\n") || "It has a question for you.";
+    const update: ChatUpdate = { id: task.id, title: task.title, kind: "asks", status: task.status, text, approval_id: approval.id };
+    this.message({ chat_id: task.chat_id, role: "update", text: `“${task.title}” asks you`, meta: { update } });
+  }
+
   private kindOf(task: Task): ChatUpdate["kind"] | null {
     if (task.status === "review" || task.status === "done") return "finished";
     if (task.status === "failed") return "failed";
@@ -249,7 +280,7 @@ export class ChatService {
       id: task.id, title: task.title, kind, status: task.status, text, cost_usd: cost,
       ...(q ? { question_id: q.id, options: q.options } : {}),
     };
-    const line = { finished: "finished", failed: "failed", plan: "has a plan ready", question: "asks something" }[kind];
+    const line = { finished: "finished", failed: "failed", plan: "has a plan ready", question: "asks something", asks: "asks you" }[kind];
     this.message({ chat_id: chatId, role: "update", text: `“${task.title}” ${line}`, meta: { update } });
   }
 
@@ -287,7 +318,7 @@ export class ChatService {
     return chat;
   }
 
-  update(id: string, patch: { title?: string; model?: string; effort?: Chat["effort"]; provider?: string; archived?: boolean; folder_id?: string | null; keep_alive?: boolean; use_tools?: boolean; mode?: Mode }): Chat {
+  update(id: string, patch: { title?: string; model?: string; effort?: Chat["effort"]; provider?: string; archived?: boolean; folder_id?: string | null; keep_alive?: boolean; use_tools?: boolean; mode?: RunStyle }): Chat {
     const before = this.mustChat(id);
     if (patch.provider && patch.provider !== ANTHROPIC_PROVIDER_ID) this.chatProvider(patch.provider); // refused here, not at the next message
     if (patch.folder_id) {
@@ -306,7 +337,8 @@ export class ChatService {
       mode: patch.mode,
       // Another endpoint cannot continue a session this one signed: a fresh one, with the conversation
       // carried in front of the next message (D301).
-      ...(moved ? { session_id: null } : {}),
+      // Its context is measured again by the first reply there.
+      ...(moved ? { session_id: null, context_tokens: 0, context_window: 0 } : {}),
       archived_at: patch.archived === undefined ? undefined : patch.archived ? new Date().toISOString() : null,
     });
     this.publish(chat);
@@ -619,13 +651,14 @@ export class ChatService {
       res?.provider ? estimateCost(res.provider, chat.model, usage, this.deps.runner.catalog.priceOf(res.provider, chat.model)).usd : 0;
     let metered = 0;
     const counted = new Set<string>();
+    let contextPushedAt = 0;
 
     let streamed = "";
     const resumed = chat.session_id;
     /** Claude Code no longer has the session this chat was continuing (its history was cleaned up, or the folder moved). */
     const lostSession = (why: string) => Boolean(resumed) && /no conversation found|session.*not found/i.test(why);
     const startFresh = () => {
-      repo.updateChat(chat.id, { session_id: null });
+      repo.updateChat(chat.id, { session_id: null, context_tokens: 0, context_window: 0 });
       this.message({ chat_id: chat.id, role: "error", text: "Claude no longer has the earlier part of this chat, so it cannot continue it. Send your message again: it starts fresh, without what was said before." });
     };
     try {
@@ -645,6 +678,19 @@ export class ChatService {
         if (!repo.getChat(chat.id)) break;
         if (msg.session_id && msg.session_id !== chat.session_id) {
           chat = repo.updateChat(chat.id, { session_id: msg.session_id });
+        }
+        // How full the conversation is: what Claude read for its latest answer, plus the answer (D360).
+        // The latest, not the largest: a session Claude Code compacted holds less than it did.
+        const u = msg.type === "assistant" && !msg.parent_tool_use_id ? msg.message?.usage : null;
+        if (u) {
+          const held = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.output_tokens ?? 0);
+          if (held && held !== chat.context_tokens) {
+            chat = repo.updateChat(chat.id, { context_tokens: held });
+            if (Date.now() - contextPushedAt >= CONTEXT_PUSH_MS) {
+              contextPushedAt = Date.now();
+              this.publish(chat);
+            }
+          }
         }
         if (msg.type === "assistant" && res) {
           // Another model: the SDK cannot price it, so the board does, reply by reply, and stops at the ceiling.
@@ -676,7 +722,10 @@ export class ChatService {
         if (msg.type === "result") {
           // The SDK prices Claude only; another model is priced from Settings → Providers (or its live list).
           const cost = res ? priceOf(sumUsage(msg.modelUsage ?? {})) : Number(msg.total_cost_usd ?? 0);
-          chat = repo.updateChat(chat.id, { cost_usd: (repo.getChat(chat.id)?.cost_usd ?? 0) + cost });
+          // The window is the chat's model's; a quick helper model in the same reply may have a smaller one.
+          const used = (msg.modelUsage ?? {}) as Record<string, { contextWindow?: number }>;
+          const window = used[chat.model]?.contextWindow || Math.max(0, ...Object.values(used).map((m) => m.contextWindow ?? 0));
+          chat = repo.updateChat(chat.id, { cost_usd: (repo.getChat(chat.id)?.cost_usd ?? 0) + cost, ...(window ? { context_window: window } : {}) });
           if (msg.is_error && !ctl.signal.aborted) {
             // A result can fail with subtype "success": then the error is in `result`, and `errors` is empty.
             const why = msg.subtype === "success" ? msg.result || "the reply failed" : (msg.errors ?? []).join("; ") || msg.subtype || "the reply failed";

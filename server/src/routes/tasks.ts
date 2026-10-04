@@ -3,18 +3,19 @@ import { commandsForTask } from "../engine/commands.ts";
 import { z } from "zod";
 import type { AppDeps } from "../app.ts";
 import { ConflictError, NotFoundError } from "../engine/runner.ts";
-import { defaultPipeline } from "../engine/boardMcp.ts";
+import { defaultPipeline, defaultRunFields } from "../engine/boardMcp.ts";
 import { dependencyError } from "../engine/graph.ts";
 import { aheadBehind, currentBranch } from "../git/worktree.ts";
 import { removeAttachmentDir } from "./attachments.ts";
 import { stageSchema } from "./projects.ts";
-import { PRIORITIES, TASK_TYPES } from "../types.ts";
+import { PRIORITIES, TASK_TYPES, type Stage } from "../types.ts";
 
 const createSchema = z.object({
   project_id: z.string(),
   title: z.string().trim().min(1),
   spec_md: z.string().default(""),
-  mode: z.enum(["autonomous", "supervised"]).default("supervised"),
+  /** Left out, the card runs the board's default run style (Settings → defaultRunStyle, D365). */
+  mode: z.enum(["autonomous", "supervised"]).optional(),
   pipeline: z.array(stageSchema).optional(),
   parent_id: z.string().nullable().optional(),
   milestone_id: z.string().nullable().optional(),
@@ -27,6 +28,7 @@ const createSchema = z.object({
   plan_approval: z.boolean().nullable().optional(),
   live: z.boolean().optional(),
   own_branch: z.boolean().optional(),
+  may_ask: z.boolean().optional(),
   /** Classify in the background after creating (type/priority/labels). */
   triage: z.boolean().optional(),
 });
@@ -51,6 +53,7 @@ const patchSchema = z.object({
   plan_approval: z.boolean().nullable().optional(),
   live: z.boolean().optional(),
   own_branch: z.boolean().optional(),
+  may_ask: z.boolean().optional(),
   /** Only ever cleared from the UI ("dismiss"), never set. */
   suggestion: z.null().optional(),
 });
@@ -147,7 +150,10 @@ export async function taskRoutes(app: FastifyInstance, { repo, bus, runner }: Ap
     if (!project) throw new NotFoundError(`No project ${body.project_id}`);
     if (body.depends_on?.length) checkDeps("", body.project_id, body.depends_on);
     checkLinks("", body.project_id, body);
-    const task = repo.createTask({ ...body, pipeline: body.pipeline?.length ? body.pipeline : defaultPipeline(repo, project) } as never);
+    const pipeline = (body.pipeline?.length ? body.pipeline : defaultPipeline(repo, project)) as Stage[];
+    // A mode someone picked is kept as asked (the run refuses it, with the reason, if the project can't); only the default bends to the project.
+    const run = body.mode ? { mode: body.mode, may_ask: body.mode === "autonomous" && Boolean(body.may_ask) } : await defaultRunFields(project, repo.getSettings().defaultRunStyle, pipeline);
+    const task = repo.createTask({ ...body, ...run, pipeline } as never);
     bus.publish({ type: "task.updated", task });
     if (body.triage ?? repo.getSettings().autoTriage) void runner.triage(task.id, "classify").catch(() => {});
     return task;
@@ -279,7 +285,12 @@ export async function taskRoutes(app: FastifyInstance, { repo, bus, runner }: Ap
   });
 
   app.post("/tasks/:id/queue", async (req) => {
-    const body = z.object({ force: z.boolean().optional() }).parse(req.body ?? {});
+    // `confirm_setup`: Start on the setup card — the person has now seen the mode and models (D365).
+    const body = z.object({ force: z.boolean().optional(), confirm_setup: z.boolean().optional() }).parse(req.body ?? {});
+    if (body.confirm_setup) {
+      const t = repo.getTask(idOf(req));
+      if (t?.setup_pending) bus.publish({ type: "task.updated", task: repo.updateTask(t.id, { setup_pending: false }) });
+    }
     return runner.queueTask(idOf(req), { fromStage: 0 }, body.force ?? false);
   });
   app.post("/tasks/:id/retry", async (req) => {
@@ -288,6 +299,7 @@ export async function taskRoutes(app: FastifyInstance, { repo, bus, runner }: Ap
   });
   app.post("/tasks/:id/stop", async (req) => runner.stopTask(idOf(req)));
   app.post("/tasks/:id/approve", async (req) => runner.approveTask(idOf(req)));
+  app.post("/tasks/:id/resolve", async (req) => runner.resolveConflict(idOf(req)));
   app.post("/tasks/:id/reject", async (req) => {
     const body = z.object({ note: z.string().nullable().optional() }).parse(req.body ?? {});
     return runner.rejectTask(idOf(req), body.note ?? null);

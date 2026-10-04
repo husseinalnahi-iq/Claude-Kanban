@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildStagePrompt, type PromptCtx } from "../src/engine/prompts.ts";
 import { absolutePaths, autonomousGate, escalationHint, readViolation } from "../src/engine/gate.ts";
+import { RUN_STYLES, runStyleFields, runStyleOf } from "../src/types.ts";
 
 const base: PromptCtx = {
   stage: "code",
@@ -98,7 +99,7 @@ test("autonomous gate: bypasses found in review are refused", () => {
 });
 
 test("autonomous reads: the main checkout's secrets are out of reach, attachments and skills are not (D187)", () => {
-  const repo = "C:\\Users\\me\\OneDrive\\Client Work Folder\\Acme-Ledger";
+  const repo = "C:\\Users\\me\\CloudSync\\Client Work Folder\\Acme-Ledger";
   const cwd = `${repo}\\.kanban\\wt\\t_1`;
   const roots = ["C:\\Users\\me\\.claude-kanban\\attachments\\t_1", "C:\\Users\\me\\.claude\\skills"];
   const read = (tool: string, input: Record<string, unknown>) => readViolation(tool, input, cwd, roots);
@@ -106,7 +107,7 @@ test("autonomous reads: the main checkout's secrets are out of reach, attachment
   assert.match(read("Read", { file_path: `${repo}\\.codex-secrets\\bizapp-api.json` }) ?? "", /refused/);
   assert.match(read("Read", { file_path: "C:\\Users\\me\\.claude-kanban\\secrets.json" }) ?? "", /refused/, "the board's own provider keys");
   assert.match(read("Grep", { pattern: "api_key", path: repo }) ?? "", /refused/);
-  assert.match(read("Glob", { pattern: "/c/Users/me/OneDrive/**/*.json" }) ?? "", /refused/, "an absolute glob is a path");
+  assert.match(read("Glob", { pattern: "/c/Users/me/CloudSync/**/*.json" }) ?? "", /refused/, "an absolute glob is a path");
   assert.equal(read("Glob", { pattern: "**/*.ts" }), null, "a relative glob searches the worktree");
   assert.equal(read("Read", { file_path: "C:\\Users\\me\\.claude-kanban\\attachments\\t_1\\shot.png" }), null, "this task's attachments");
   assert.equal(read("Read", { file_path: "C:\\Users\\me\\.claude\\skills\\bizapp\\SKILL.md" }), null, "skills");
@@ -115,7 +116,7 @@ test("autonomous reads: the main checkout's secrets are out of reach, attachment
 });
 
 test("absolute paths are read the way a shell would, whatever quotes sit elsewhere in the command (D188)", () => {
-  // The command that exposed it: a heredoc whose body the old tokenizer mis-paired, cutting the path at "Codes".
+  // The command that exposed it: a heredoc whose body the old tokenizer mis-paired, cutting the path at "Client".
   const cmd = `cd "/c/Users/me/Client Work Folder/proj/.kanban/wt/t_1" && python - <<'EOF'\nimport json\nc=json.load(open(r"C:\\Users\\me\\Client Work Folder\\proj\\.codex-secrets\\bizapp-api.json"))\nprint("it's here")\nEOF`;
   assert.deepEqual(absolutePaths(cmd), ["/c/Users/me/Client Work Folder/proj/.kanban/wt/t_1", "C:\\Users\\me\\Client Work Folder\\proj\\.codex-secrets\\bizapp-api.json"]);
   assert.deepEqual(absolutePaths("ls /c/tmp/x && type C:\\a\\b.txt"), ["/c/tmp/x", "C:\\a\\b.txt"]);
@@ -222,4 +223,19 @@ test("the Board section names one way to ask per mode (D239)", () => {
   const auto = buildStagePrompt(base);
   assert.match(auto, /Nobody is watching this run, so every question for the person goes through `board_ask`/);
   assert.doesNotMatch(auto, /AskUserQuestion/);
+});
+
+test("an \"Autonomous + asks me\" run is told to ask what changes the result and note the rest (D361)", () => {
+  const ask = buildStagePrompt({ ...base, mayAsk: true });
+  assert.match(ask, /ask with `AskUserQuestion`: the run waits on a card until they answer/);
+  assert.match(ask, /small choice that does not change the result, use `board_ask`/);
+  assert.doesNotMatch(ask, /Nobody is watching this run/);
+  assert.doesNotMatch(ask, /cannot go on without an answer/, "it can get the answer by asking, so that is no reason to stop");
+  assert.match(buildStagePrompt(base), /cannot go on without an answer/);
+});
+
+test("the run styles map to a mode and the may-ask switch, and back (D361)", () => {
+  for (const s of RUN_STYLES) assert.equal(runStyleOf(runStyleFields(s)), s);
+  assert.deepEqual(runStyleFields("ask"), { mode: "autonomous", may_ask: true });
+  assert.equal(runStyleOf({ mode: "supervised", may_ask: true }), "supervised", "a supervised task ignores the switch");
 });

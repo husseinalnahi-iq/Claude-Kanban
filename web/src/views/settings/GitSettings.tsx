@@ -3,6 +3,7 @@ import type { MergePolicy, MergeStrategy } from "../../../../server/src/types.ts
 import { api, type ProjectWithGit } from "../../lib/api.ts";
 import { useAppData } from "../../lib/store.tsx";
 import { Button, ErrorLine, Field, Help, inputCls, useAction } from "../../components/ui.tsx";
+import { ProviderEffort, ProviderPicker } from "../../components/ProviderPicker.tsx";
 
 const STRATEGY: { value: MergeStrategy; label: string; blurb: string }[] = [
   { value: "merge", label: "Merge commit", blurb: "Keeps the task's commits and records a merge. The safest default and the easiest to undo." },
@@ -15,7 +16,7 @@ const STRATEGY: { value: MergeStrategy; label: string; blurb: string }[] = [
  * into the task's worktree first, so conflicts happen there rather than in the user's checkout.
  */
 export function GitSettings({ project }: { project: ProjectWithGit }) {
-  const { reloadProjects } = useAppData();
+  const { reloadProjects, settings } = useAppData();
   const [m, setM] = useState<MergePolicy>(project.merge);
   const { busy, error, run } = useAction();
   const [saved, setSaved] = useState(false);
@@ -43,6 +44,14 @@ export function GitSettings({ project }: { project: ProjectWithGit }) {
             <span className="mr-2 font-mono text-[11px] text-amber">3</span>
             {m.verifyBeforeMerge ? <>The project's verify command runs again on the combined result, because "it passed before the other task landed" is not the same as "it passes now".</> : <span className="text-ink-400">Skipped — the task is landed on the strength of its earlier run.</span>}
           </li>
+          {m.updateBeforeMerge ? (
+            <li>
+              <span className="mr-2 font-mono text-[11px] text-amber">↳</span>
+              {m.onConflict === "claude"
+                ? <>If that conflicts, Claude combines both changes there; the board checks no line or file from either side was lost and has a second model confirm it, or sets the attempt aside.</>
+                : <span className="text-ink-400">If that conflicts, the board stops and names the files.</span>}
+            </li>
+          ) : null}
           <li><span className="mr-2 font-mono text-[11px] text-amber">4</span>Only then is it landed ({STRATEGY.find((s) => s.value === m.strategy)!.label.toLowerCase()}), one task at a time per project.</li>
         </ol>
 
@@ -102,8 +111,8 @@ export function GitSettings({ project }: { project: ProjectWithGit }) {
           <Field label="If the base conflicts with the task" group>
             <div className="space-y-1.5">
               {([
+                { v: "claude", label: "Give it back to Claude", blurb: "The Claude session that wrote the task combines both changes in its own copy of the repo. The board then checks nothing was lost, and a second look confirms it. If it cannot pass after two tries, nothing is merged and you are told why." },
                 { v: "ask", label: "Stop and tell me", blurb: "Nothing is merged, the worktree is left exactly as it was, and the message names the conflicting files." },
-                { v: "claude", label: "Give it back to Claude", blurb: "Adds a stage to the same task that merges the base and resolves the conflict in the worktree, then re-verifies. You still approve the result." },
               ] as const).map((o) => (
                 <label
                   key={o.v}
@@ -118,6 +127,73 @@ export function GitSettings({ project }: { project: ProjectWithGit }) {
               ))}
             </div>
           </Field>
+
+          {m.onConflict === "claude" ? (
+            <>
+              <Field label="When Claude has resolved it" group>
+                <div className="space-y-1.5">
+                  {([
+                    { v: true, label: "Land it straight away", blurb: "You already pressed Approve. Once every check passes, the board finishes that approval for you." },
+                    { v: false, label: "Wait for me to approve again", blurb: "The task goes back to Review with a report of what Claude kept from each side." },
+                  ] as const).map((o) => (
+                    <label
+                      key={String(o.v)}
+                      className={`flex cursor-pointer gap-2.5 rounded-md border px-3 py-2 transition-colors ${m.autoLandResolved === o.v ? "border-amber/50 bg-amber/5" : "border-ink-700 hover:border-ink-600"}`}
+                    >
+                      <input type="radio" className="mt-1 accent-amber" checked={m.autoLandResolved === o.v} onChange={() => set({ autoLandResolved: o.v })} />
+                      <span>
+                        <span className="text-[12.5px] text-ink-100">{o.label}</span>
+                        <span className="block text-[11.5px] text-ink-400">{o.blurb}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </Field>
+
+              <Field
+                label="Who double-checks the result"
+                hint="A second look reads both changes and the combined result, and says whether anything from either side went missing. A different model is better at catching what the first one missed, and costs a little more."
+                group
+              >
+                <div className="space-y-2">
+                  <label className="flex cursor-pointer items-center gap-2 text-[12.5px] text-ink-200">
+                    <input type="radio" className="accent-amber" checked={!m.resolveReviewer} onChange={() => set({ resolveReviewer: null })} />
+                    The same model that wrote the task
+                  </label>
+                  <label className="flex cursor-pointer items-center gap-2 text-[12.5px] text-ink-200">
+                    <input
+                      type="radio"
+                      className="accent-amber"
+                      checked={!!m.resolveReviewer}
+                      onChange={() => set({ resolveReviewer: m.resolveReviewer ?? { provider: "anthropic", model: "claude-sonnet-5-5", effort: "medium" } })}
+                    />
+                    A model I choose
+                  </label>
+                  {m.resolveReviewer && settings ? (
+                    <div className="ml-6 flex flex-wrap items-center gap-2">
+                      <ProviderPicker
+                        compact
+                        surface="helpers"
+                        value={{ provider: m.resolveReviewer.provider, model: m.resolveReviewer.model }}
+                        models={settings.models}
+                        providers={settings.providers}
+                        onChange={(v) => set({ resolveReviewer: { ...m.resolveReviewer!, ...v } })}
+                      />
+                      <div className="w-[130px]">
+                        <ProviderEffort
+                          provider={m.resolveReviewer.provider}
+                          model={m.resolveReviewer.model}
+                          providers={settings.providers}
+                          value={m.resolveReviewer.effort}
+                          onChange={(effort) => set({ resolveReviewer: { ...m.resolveReviewer!, effort } })}
+                        />
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              </Field>
+            </>
+          ) : null}
         </div>
 
         <div className="mt-4"><ErrorLine error={error} /></div>

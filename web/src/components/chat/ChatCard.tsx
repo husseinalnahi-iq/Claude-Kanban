@@ -1,21 +1,19 @@
 import { createContext, useContext, useState } from "react";
-import type { Approval, ChatMessage, Mode, Stage, TaskCard } from "../../../../server/src/types.ts";
+import type { Approval, ChatMessage, TaskCard } from "../../../../server/src/types.ts";
 import { isAnswerPipeline } from "../../../../server/src/engine/answer.ts";
 import { api, type ProjectWithGit } from "../../lib/api.ts";
 import { useAppData } from "../../lib/store.tsx";
 import { navigate } from "../../lib/router.ts";
 import { Markdown } from "../../lib/markdown.tsx";
-import { cost, modelLabel, STATUS_META } from "../../lib/format.ts";
+import { cost, STATUS_META } from "../../lib/format.ts";
 import { phase, waitingOn, waitLine } from "../../lib/phase.ts";
 import { isQuestion } from "../../lib/questions.ts";
 import { inputSummary } from "../../lib/approvals.ts";
 import { Button, Chip, ErrorLine, useAction } from "../ui.tsx";
-import { PipelineEditor, pipelineLine } from "../PipelineEditor.tsx";
-import { RunSuggestions } from "../Suggestions.tsx";
+import { SetupCard } from "../RunSetup.tsx";
 import { QuestionCard } from "../QuestionCard.tsx";
 import { CredentialWarning, riskOf } from "../CredentialWarning.tsx";
 import { ChecklistLine } from "../Checklist.tsx";
-import { autonomousBlocked, branchBlocked, lookupAutoBlocked } from "../forms.tsx";
 import { AlwaysAllow } from "../AlwaysAllow.tsx";
 import { openTaskOn } from "../../views/TaskDrawer.tsx";
 import { CommandExplainer } from "../CommandExplainer.tsx";
@@ -99,69 +97,6 @@ export function ToolApproval({ a }: { a: Approval }) {
   );
 }
 
-/** How a Backlog card will run, changeable here: mode, its own branch, and the model and effort per stage. */
-function RunSetup({ card, project }: { card: TaskCard; project: ProjectWithGit }) {
-  const { settings } = useAppData();
-  const [editing, setEditing] = useState<Stage[] | null>(null);
-  const { busy, error, run } = useAction();
-  const answer = isAnswerPipeline(card.pipeline);
-  const noAuto = answer ? lookupAutoBlocked(project) : autonomousBlocked(project);
-  const noBranch = branchBlocked(project);
-  return (
-    <div className="space-y-1.5">
-      <div className="flex flex-wrap items-center gap-1.5">
-        {(["supervised", "autonomous"] as Mode[]).map((m) => (
-          <button
-            key={m}
-            disabled={busy || card.mode === m || (m === "autonomous" && !!noAuto)}
-            title={
-              m === "autonomous"
-                ? noAuto ?? (answer ? "Runs in the project's folder and asks nothing; it reads and reports, and changes nothing" : "Works on its own branch without asking; lands when you approve")
-                : answer ? "Runs in the project's folder; a command that is not read-only waits for your Allow" : "Works in the project's folder and asks you before each change"
-            }
-            onClick={() => run(() => api.patchTask(card.id, { mode: m }))}
-            className={`${small} ${card.mode === m ? (m === "autonomous" ? "border-amber/60 bg-amber/10 text-amber" : "border-cyan/60 bg-cyan/10 text-cyan") : "border-ink-700 text-ink-400 hover:text-ink-200"}`}
-          >
-            {m}
-          </button>
-        ))}
-        {card.mode === "supervised" && !answer ? (
-          <label className="flex cursor-pointer items-center gap-1 text-[11px] text-ink-300" title={noBranch ?? "Its own copy of the project; lands only when you approve"}>
-            <input
-              type="checkbox"
-              className="accent-cyan"
-              checked={card.own_branch}
-              disabled={busy || !!noBranch || !!card.branch}
-              onChange={(e) => run(() => api.patchTask(card.id, { own_branch: e.target.checked }))}
-            />
-            own branch
-          </label>
-        ) : null}
-        {answer ? <span className="text-[11px] text-ink-500">reads only · lands in Done with its answer</span> : null}
-      </div>
-      {editing ? (
-        <div className="space-y-1.5">
-          <PipelineEditor value={editing} onChange={setEditing} models={settings?.models ?? []} />
-          <div className="flex justify-end gap-2">
-            <Button size="sm" variant="go" busy={busy} disabled={!editing.length} onClick={() => run(async () => { await api.patchTask(card.id, { pipeline: editing }); setEditing(null); })}>
-              Use these
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => setEditing(null)}>Cancel</Button>
-          </div>
-        </div>
-      ) : (
-        <div className="flex items-start gap-2">
-          <span className="min-w-0 flex-1 font-mono text-[11px] leading-snug text-ink-400">{pipelineLine(card.pipeline, modelLabel)}</span>
-          <button className={`${small} shrink-0 border-ink-600 text-ink-300 hover:text-ink-100`} title="Change the model or effort of a stage" onClick={() => setEditing(card.pipeline.map((s) => ({ ...s })))}>
-            change
-          </button>
-        </div>
-      )}
-      <ErrorLine error={error} />
-    </div>
-  );
-}
-
 /**
  * A card the chat made or touched, as it is now. Only the newest mention of a card carries its
  * controls, so a long chat does not offer the same Start three times.
@@ -190,17 +125,7 @@ export function ChatCard({ id, title, actions, messageId }: { id: string; title:
       ) : null}
       {card && latest ? (
         <div className="mt-1.5 space-y-1.5">
-          {card.status === "backlog" && ctx ? (
-            <>
-              <RunSetup card={card} project={ctx.project} />
-              <div className="space-y-1.5">
-                <RunSuggestions t={card} busy={false} compact />
-              </div>
-              <div className="flex justify-end">
-                <Button size="sm" variant="go" busy={busy} title="Queue it now" onClick={() => run(() => api.queue(card.id))}>▶ Start</Button>
-              </div>
-            </>
-          ) : null}
+          {card.status === "backlog" && ctx ? <SetupCard card={card} project={ctx.project} compact /> : null}
           {IN_PROGRESS.has(card.status) || card.status === "queued" ? (
             <>
               <ChecklistLine list={card.checklist} live={card.status !== "paused"} />
@@ -256,16 +181,20 @@ const UPDATE_LOOK = {
   failed: { tone: "border-rust/40 bg-rust/5", word: "text-rust" },
   plan: { tone: "border-iris/40 bg-iris/5", word: "text-iris" },
   question: { tone: "border-cyan/40 bg-cyan/5", word: "text-cyan" },
+  asks: { tone: "border-iris/45 bg-iris/5", word: "text-iris" },
 } as const;
 
 /**
  * What a card from this chat did by itself — its answer, why it failed, its plan, its question —
  * posted by the board (D285). Its buttons follow the card's live state: Retry only while it is still
- * failed, the options only while the question is still open.
+ * failed, the options only while the question is still open. A question card the run waits on is
+ * answered right here, or in words to the chat, which passes it on (D361).
  */
 export function ChatUpdateRow({ m }: { m: ChatMessage }) {
   const u = m.meta.update!;
   const ctx = useContext(ChatBoard);
+  const { pending } = useAppData();
+  const waiting = u.kind === "asks" ? pending.find((a) => a.id === u.approval_id) : undefined;
   const card = ctx?.cards.get(u.id);
   const { busy, error, run } = useAction();
   const look = UPDATE_LOOK[u.kind];
@@ -273,6 +202,7 @@ export function ChatUpdateRow({ m }: { m: ChatMessage }) {
     u.kind === "finished" ? (u.status === "done" ? (card && isAnswerPipeline(card.pipeline) ? "answer" : "done") : "ready for review")
     : u.kind === "failed" ? "failed"
     : u.kind === "plan" ? "plan ready"
+    : u.kind === "asks" ? (waiting ? "asks you · waiting" : "asked you")
     : "question";
   const open = u.kind === "question" && card?.questions.find((q) => q.id === u.question_id && !q.answer);
   const answered = u.kind === "question" ? card?.questions.find((q) => q.id === u.question_id)?.answer : null;
@@ -286,6 +216,16 @@ export function ChatUpdateRow({ m }: { m: ChatMessage }) {
       </div>
       {u.kind === "failed" ? (
         <div className="line-clamp-4 font-mono text-[11.5px] text-rust">{u.text}</div>
+      ) : waiting ? (
+        <>
+          <QuestionCard a={waiting} />
+          <div className="mt-1.5 text-[11px] text-ink-500">Or just tell Claude your answer below, in your own words.</div>
+        </>
+      ) : u.kind === "asks" ? (
+        <>
+          <div className="whitespace-pre-line text-[12.5px] text-ink-400">{u.text}</div>
+          <div className="mt-1 text-[11.5px] text-ink-500">No longer waiting: it was answered, or the run moved on.</div>
+        </>
       ) : (
         <Markdown text={u.text} className="text-[13px]" />
       )}

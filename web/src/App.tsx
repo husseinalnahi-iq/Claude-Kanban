@@ -185,7 +185,7 @@ export function App() {
     return (
       <div className="h-full">
         <ErrorBoundary key={`studio:${route.projectId ?? ""}`} onClose={() => navigate({ view: "board" })}>
-          <Suspense fallback={<div className="p-6 text-[13px] text-ink-400">Loading…</div>}>
+          <Suspense fallback={<div className="p-6 text-[12px] text-ink-400">Loading…</div>}>
             <Studio project={project} projects={projects} onAddProject={() => setAdding(true)} onSearch={() => setSearching(true)} />
           </Suspense>
         </ErrorBoundary>
@@ -205,7 +205,7 @@ export function App() {
             <span className="h-1/3 w-1.5 rounded-sm bg-ink-500" />
           </div>
           <div>
-            <div className="text-[13.5px] font-semibold leading-none text-ink-100">Claude Kanban</div>
+            <div className="text-[12.5px] font-semibold leading-none text-ink-100">Claude Kanban</div>
             <div className="mt-1 flex items-center gap-1 font-mono text-[10px] text-ink-500">
               <span className={`h-1.5 w-1.5 rounded-full ${connected ? "bg-moss" : "bg-rust breathe"}`} />
               {connected ? "live" : "reconnecting"}
@@ -226,12 +226,12 @@ export function App() {
                 <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded font-mono text-[10px] font-semibold ${active ? "bg-amber text-ink-950" : "bg-ink-800 text-ink-300"}`}>
                   {initials(p.name)}
                 </span>
-                <span className="min-w-0 flex-1 truncate text-[12.5px]">{p.name}</span>
+                <span className="min-w-0 flex-1 truncate text-[11.5px]">{p.name}</span>
                 {p.policy.autonomous === "forbidden" ? <span className="font-mono text-[9.5px] text-cyan/80" title="Supervised only">SUP</span> : null}
               </button>
             );
           })}
-          <button className="mt-1 w-full rounded-md px-2 py-1.5 text-left text-[12px] text-ink-400 hover:bg-ink-850 hover:text-amber cursor-pointer" onClick={() => setAdding(true)}>
+          <button className="mt-1 w-full rounded-md px-2 py-1.5 text-left text-[11px] text-ink-400 hover:bg-ink-850 hover:text-amber cursor-pointer" onClick={() => setAdding(true)}>
             + Add project
           </button>
         </nav>
@@ -251,7 +251,7 @@ export function App() {
             <button
               key={n.view}
               onClick={() => navigate({ view: n.view, taskId: null })}
-              className={`relative shrink-0 whitespace-nowrap px-3 py-3 text-[12.5px] transition-colors cursor-pointer ${route.view === n.view ? "text-ink-100" : "text-ink-400 hover:text-ink-200"}`}
+              className={`relative shrink-0 whitespace-nowrap px-3 py-3 text-[11.5px] transition-colors cursor-pointer ${route.view === n.view ? "text-ink-100" : "text-ink-400 hover:text-ink-200"}`}
             >
               {n.label}
               {n.view === "setup" && setupCount ? (
@@ -265,7 +265,7 @@ export function App() {
             </button>
           ))}
           <button
-            className={`ml-auto flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border px-2.5 py-1 text-[12px] transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${
+            className={`ml-auto flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border px-2.5 py-1 text-[11px] transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${
               chatting ? "border-amber/60 bg-amber/10 text-amber" : "border-ink-700 text-ink-300 hover:border-amber/50 hover:text-amber"
             }`}
             onClick={() => setChatting((v) => !v)}
@@ -275,7 +275,7 @@ export function App() {
             ✦ Chat <span className="font-mono text-[10px] text-ink-600">c</span>
           </button>
           <button
-            className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border px-2.5 py-1 text-[12px] transition-colors cursor-pointer ${
+            className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border px-2.5 py-1 text-[11px] transition-colors cursor-pointer ${
               terminal ? "border-amber/60 bg-amber/10 text-amber" : "border-ink-700 text-ink-400 hover:border-ink-500 hover:text-ink-200"
             }`}
             onClick={() => setTerminal((v) => !v)}
@@ -284,7 +284,7 @@ export function App() {
             <span className="font-mono">&gt;_</span> Terminal
           </button>
           <button
-            className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-ink-700 px-2.5 py-1 text-[12px] text-ink-400 transition-colors hover:border-ink-500 hover:text-ink-200 cursor-pointer"
+            className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-ink-700 px-2.5 py-1 text-[11px] text-ink-400 transition-colors hover:border-ink-500 hover:text-ink-200 cursor-pointer"
             onClick={() => setSearching(true)}
             title="Search specs, transcripts, results and memory"
           >
@@ -301,7 +301,7 @@ export function App() {
         <StaleServerBanner />
         <main className="min-h-0 flex-1 overflow-hidden">
           <ErrorBoundary key={`${route.view}:${route.projectId ?? ""}`}>
-          <Suspense fallback={<div className="p-6 text-[13px] text-ink-400">Loading…</div>}>
+          <Suspense fallback={<div className="p-6 text-[12px] text-ink-400">Loading…</div>}>
           {needsProject && !project ? (
             <div className="mx-auto mt-24 max-w-md space-y-4 text-center">
               <Empty>

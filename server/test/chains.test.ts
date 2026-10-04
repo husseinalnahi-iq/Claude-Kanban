@@ -65,7 +65,7 @@ test("the chat says a card it started will wait, and for what", () => {
   const h = chatBoardHandlers({ repo: s.repo, bus: s.bus, runner: s.runner }, s.project.id, null, () => {});
   try {
     const a = s.repo.createTask({ project_id: s.project.id, title: "Build the API", mode: "supervised", pipeline: ONE });
-    const made = JSON.parse(h.createTask({ title: "Build the page", spec_md: "x", depends_on: [a.id] }).content[0].text).created;
+    const made = JSON.parse(h.createTask({ title: "Build the page", spec_md: "x", depends_on: [a.id], stages: [{ stage: "code" }] }).content[0].text).created;
     const queued = JSON.parse(h.queueTask({ task_id: made.id }).content[0].text);
     assert.equal(queued.queued.status, "queued");
     assert.match(queued.note, /waits for "Build the API" \(backlog\) to be done, then starts by itself/);

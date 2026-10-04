@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { ANTHROPIC_PROVIDER_ID, accessOf, DEBATE_ROUND_CEILING, EFFORTS, type DebateMode, type HelperModel, type ImageProvider, type ModelEntry, type ModelSurface, type Note, type Provider, type Settings as SettingsShape, type Stage, type TierRef } from "../../../server/src/types.ts";
+import { ANTHROPIC_PROVIDER_ID, accessOf, DEBATE_ROUND_CEILING, EFFORTS, RUN_STYLE_LABEL, RUN_STYLES, type RunStyle, type DebateMode, type HelperModel, type ImageProvider, type ModelEntry, type ModelSurface, type Note, type Provider, type Settings as SettingsShape, type Stage, type TierRef } from "../../../server/src/types.ts";
 import { api, type ProjectWithGit, type WorktreeRow } from "../lib/api.ts";
 import { ago } from "../lib/format.ts";
 import { useAppData } from "../lib/store.tsx";
 import { navigate } from "../lib/router.ts";
-import { Button, ErrorLine, Field, Help, ModeHelp, Select, Switch, inputCls, useAction } from "../components/ui.tsx";
+import { Button, ErrorLine, Field, Help, ModeHelp, RUN_STYLE_TONE, Select, Switch, inputCls, useAction } from "../components/ui.tsx";
 import { PipelineEditor } from "../components/PipelineEditor.tsx";
 import { useAsk } from "../components/Ask.tsx";
 import { ProviderEffort, ProviderPicker } from "../components/ProviderPicker.tsx";
@@ -463,6 +463,18 @@ const TABS: { id: Tab; label: string; needsProject?: boolean }[] = [
 const GLOBAL_TABS: Tab[] = ["models", "providers", "lists", "runs", "tools"];
 
 /** Which model a helper runs on: a cheaper Claude, or the stage's own model (no helper — the stage does it itself). */
+/** How long a question card waits for you: 0 is "however long it takes". */
+function WaitSelect({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  return (
+    <Select value={value} onChange={(e) => onChange(Number(e.target.value))}>
+      <option value={0}>Wait for my answer, however long it takes</option>
+      {[15, 30, 60, 120, 240].map((m) => (
+        <option key={m} value={m}>Wait {m < 60 ? `${m} minutes` : `${m / 60} hour${m > 60 ? "s" : ""}`}, then let Claude decide</option>
+      ))}
+    </Select>
+  );
+}
+
 function HelperSelect({ value, onChange, disabled }: { value: HelperModel; onChange: (v: HelperModel) => void; disabled?: boolean }) {
   return (
     <Select wide value={value} disabled={disabled} onChange={(e) => onChange(e.target.value as HelperModel)}>
@@ -489,6 +501,8 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [maxTurns, setMaxTurns] = useState(60);
   const [autoContinue, setAutoContinue] = useState(2);
   const [planApproval, setPlanApproval] = useState(false);
+  const [runStyle, setRunStyle] = useState<RunStyle>("ask");
+  const [confirmSetup, setConfirmSetup] = useState(true);
   const [liveReviewModel, setLiveReviewModel] = useState("claude-opus-5-5");
   const [followLatest, setFollowLatest] = useState(true);
   const [autoEngine, setAutoEngine] = useState(true);
@@ -525,6 +539,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [claudeFallback, setClaudeFallback] = useState<TierRef | null>(null);
   const [keepAwake, setKeepAwake] = useState(true);
   const [questionWait, setQuestionWait] = useState(0);
+  const [askModeWait, setAskModeWait] = useState(0);
   const [browserChecks, setBrowserChecks] = useState(true);
   const [browserCheckModel, setBrowserCheckModel] = useState<HelperModel>("stage");
   const [chrome, setChrome] = useState(false);
@@ -561,6 +576,8 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
     take((s) => s.maxTurnsPerStage, setMaxTurns);
     take((s) => s.autoContinueTurns, setAutoContinue);
     take((s) => s.planApproval, setPlanApproval);
+    take((s) => s.defaultRunStyle, setRunStyle);
+    take((s) => s.confirmSetup, setConfirmSetup);
     take((s) => s.liveReviewModel, setLiveReviewModel);
     take((s) => s.followLatestModels ?? true, setFollowLatest);
     take((s) => s.autoUpdateEngine ?? true, setAutoEngine);
@@ -595,6 +612,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
     take((s) => s.claudeFallback, setClaudeFallback);
     take((s) => s.keepAwake, setKeepAwake);
     take((s) => s.questionWaitMin, setQuestionWait);
+    take((s) => s.askModeWaitMin ?? 0, setAskModeWait);
     take((s) => s.browserChecks, setBrowserChecks);
     take((s) => s.browserCheckModel ?? "stage", setBrowserCheckModel);
     take((s) => s.chromeInSupervised, setChrome);
@@ -613,7 +631,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
       setSettings(
         await api.patchSettings({
           models, defaultPipeline: pipeline, globalCap, serial, maxForcedParallel: forced, defaultMaxConcurrent: defMax,
-          maxTurnsPerStage: maxTurns, maxCostPerStageUsd: maxCost, autoContinueTurns: autoContinue, planApproval, liveReviewModel, followLatestModels: followLatest, autoUpdateEngine: autoEngine,
+          maxTurnsPerStage: maxTurns, maxCostPerStageUsd: maxCost, autoContinueTurns: autoContinue, planApproval, defaultRunStyle: runStyle, confirmSetup, liveReviewModel, followLatestModels: followLatest, autoUpdateEngine: autoEngine,
           maxSubagentDepth: subDepth, maxConcurrentSubagents: subMax, cacheableSystemPrompt: cacheable,
           triageModel, chatModel, chatEffort, chatProvider, chatKeepAlive, chatKeepAliveMessage: chatKeepAliveMessage.trim() || undefined, chatKeepAliveMaxHours, nextStepsSuggestions: nextSteps, hiddenModels, imageModel, specModel, specEffort, visionModel: vision.model, visionProvider: vision.provider, autoSizing, tiers,
           providers: providers.map((p) => ({ ...p, models: p.models.filter((m) => m.id.trim()).map((m) => ({ ...m, label: m.label.trim() || m.id })) })),
@@ -627,6 +645,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           claudeFallback: claudeFallback?.model && claudeFallback.provider !== ANTHROPIC_PROVIDER_ID ? claudeFallback : null,
           keepAwake,
           questionWaitMin: questionWait,
+          askModeWaitMin: askModeWait,
           browserChecks,
           browserCheckModel,
           chromeInSupervised: chrome,
@@ -983,6 +1002,31 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
         </Section>
 
         <Section title="Plan approval & live tasks" hint="Catch a wrong plan before any code is written, and put more care into tasks that touch real data.">
+          <Field label="New cards run" hint="The mode a new card starts with, on the New task form, in a new side chat and on the setup card. A project that can't run autonomous uses Supervised.">
+            <div className="flex flex-wrap gap-1.5">
+              {RUN_STYLES.map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setRunStyle(m)}
+                  className={`cursor-pointer rounded border px-2 py-1 text-[11.5px] ${runStyle === m ? RUN_STYLE_TONE[m] : "border-ink-700 text-ink-400 hover:text-ink-200"}`}
+                >
+                  {RUN_STYLE_LABEL[m]}
+                </button>
+              ))}
+            </div>
+          </Field>
+          <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
+            <input type="checkbox" className="mt-1 accent-amber" checked={confirmSetup} onChange={(e) => setConfirmSetup(e.target.checked)} />
+            <span>
+              Let me check how a planned card runs before it starts
+              <span className="block text-[11.5px] text-ink-400">
+                A card the side chat makes with a plan step waits with its setup card: the mode, each step's model and effort and what
+                Claude suggests. Nothing runs until you press Start there.
+              </span>
+            </span>
+          </label>
+          <div className="mt-3" />
           <label className="flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
             <input type="checkbox" className="mt-1 accent-amber" checked={planApproval} onChange={(e) => setPlanApproval(e.target.checked)} />
             <span>
@@ -1096,16 +1140,17 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           <div className="mt-4 text-[12.5px] text-ink-200">
             When Claude asks you a question mid-task
             <div className="mt-1.5 flex flex-wrap items-center gap-2">
-              <Select value={questionWait} onChange={(e) => setQuestionWait(Number(e.target.value))}>
-                <option value={0}>Wait for my answer, however long it takes</option>
-                {[15, 30, 60, 120, 240].map((m) => (
-                  <option key={m} value={m}>Wait {m < 60 ? `${m} minutes` : `${m / 60} hour${m > 60 ? "s" : ""}`}, then let Claude decide</option>
-                ))}
-              </Select>
+              <span className="w-full text-[11.5px] text-ink-400 sm:w-auto">Supervised tasks</span>
+              <WaitSelect value={questionWait} onChange={setQuestionWait} />
+            </div>
+            <div className="mt-1.5 flex flex-wrap items-center gap-2">
+              <span className="w-full text-[11.5px] text-ink-400 sm:w-auto">“Autonomous + asks me” tasks</span>
+              <WaitSelect value={askModeWait} onChange={setAskModeWait} />
             </div>
             <span className="mt-1 block text-[11.5px] text-ink-400">
               The task shows <b className="text-iris">asks you</b> and plays the “needs you” sound. Waiting is safest for decisions that
               matter; a time limit keeps night work moving: Claude picks the most sensible option and says which in its summary.
+              Plain autonomous tasks never wait: they leave the question on the card with the answer they went with.
             </span>
           </div>
         </Section>
@@ -1129,7 +1174,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
             <textarea className={`${inputCls} mt-1 min-h-[120px] font-mono text-[12.5px]`} value={blocked} onChange={(e) => setBlocked(e.target.value)} />
           </Field>
           <div className="mt-3 grid gap-3 md:grid-cols-2">
-            <Field label="Keep transcripts for (days)" hint="Runs, costs and results are kept forever; only the message-by-message detail of old finished runs is pruned, on restart.">
+            <Field label="Keep transcripts for (days)" hint="Tasks, runs, costs and results are kept forever; only the step-by-step detail of old finished runs is removed, on restart. Use ⤓ Record on a task to save its full story before it is trimmed.">
               <input type="number" min={1} max={365} className={`${inputCls} font-mono`} value={retention} onChange={(e) => setRetention(Number(e.target.value) || 1)} />
             </Field>
             <Field label="Desktop notifications" hint="When a task needs approval, is ready for review, or fails — only while the board is in a background tab." group>

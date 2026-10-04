@@ -614,12 +614,14 @@ test("landing refuses to touch a dirty checkout, or the wrong branch, and never 
     }
   }
 
-  // 3. The base conflicts with the task: report it, merge nothing, leave the worktree alone.
+  // 3. The base conflicts with the task and the project says "stop and tell me": report it, merge
+  //    nothing, leave the worktree alone.
   {
     const g = fakeGit({}, { updateFromBase: async () => ({ ok: false, pulled: 0, conflicts: ["src/app.ts"] }) });
     const s = setup(fakeQuery().fn);
     const runner = new TaskRunner({ repo: s.repo, bus: s.bus, queryFn: fakeQuery().fn, git: g.git });
     try {
+      s.repo.updateProject(s.project.id, { merge: { ...s.project.merge, onConflict: "ask" } });
       const task = s.repo.createTask({ project_id: s.project.id, title: "auto", mode: "autonomous", pipeline: ONE_STAGE });
       s.repo.updateTask(task.id, { status: "review", branch: `kanban/${task.id}`, worktree_path: s.dir, base_sha: "a".repeat(40) });
       await assert.rejects(runner.approveTask(task.id), /src\/app\.ts/);

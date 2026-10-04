@@ -24,7 +24,7 @@ lands safely, and an honest record of what everything cost.
 | “The best model for everything is slow and uses up my limit.” | Each task is a **pipeline**: a strong model plans, an efficient one codes, a cheap one reviews. You choose per stage — or use **free local models** (LM Studio, Ollama) and others (OpenRouter, GLM, Kimi…). |
 | “I hit my usage limit halfway through and lost the work.” | The task **pauses** and **carries on by itself** when your limit resets, in the same session — or carries on with another provider you picked. The same goes for a GLM, Kimi or Qwen plan that runs out. |
 | “I just want to talk about my project and have the tasks written for me.” | The **✦ Chat** panel answers questions about your code and turns what you want into task cards, which you start or schedule. It reads, and never changes code by itself. |
-| “Claude guessed at a choice only I could make.” | When a decision really needs you, Claude **asks**: the card shows *asks you* with options to pick. It waits for your answer, or decides after a time you set. |
+| “Claude guessed at a choice only I could make.” | When a decision really needs you, Claude **asks**: the card shows *asks you* with options to pick. It waits for your answer, or decides after a time you set. Want a task to run on its own and still ask? Make it **Autonomous + asks me**. |
 | “I want Claude to work while I sleep.” | **Schedule** a card for 2 AM, for when your limit resets, or every chosen day. The computer is kept awake while work is waiting, and you wake up to it in Review. |
 | “I have no idea what that cost or where the time went.” | Every task shows its **cost, tokens and time**; the **Dashboard** adds it all up. |
 | “A big job is too much for one prompt.” | **Improve** turns a rough idea into a clear spec and splits it into subtasks with dependencies; the board runs them in the right order. Chain any tasks yourself with **Starts after**: queue them all, and each starts when the ones before it are done, with their results. |
@@ -177,8 +177,28 @@ window. Nothing of the board is on screen until you press **Board** at the top l
   folder*, or onto *Archived*. To move or archive several at once, tick them (Ctrl-click, or Shift-click
   for a run of them) and use the bar that appears above the list. **+ New chat** starts one; it is made
   with your first message, so pressing it twice leaves nothing behind.
+- **A light on each chat** says where the work it started stands, without opening it. When a chat
+  started several tasks, it shows the one that most needs you, and the line under the title says it
+  in words (hover the light for more):
+
+  | Light | Means |
+  |---|---|
+  | Yellow bulb, glowing | Claude asked you a question (also one it carried on past that is still unanswered) |
+  | Orange, glowing | It needs your OK: a command to allow, or it reached its cost limit |
+  | Blue, glowing | A plan is ready for you to approve |
+  | Red | It failed |
+  | Orange ring | Its changes clash with work that landed meanwhile |
+  | Grey dot, pulsing | Claude is working (or writing a reply in the chat) |
+  | Pause mark | Paused by a usage limit; it carries on by itself |
+  | Hollow ring | Queued, or waiting for another task |
+  | Lime | Finished and ready for your review |
+  | Purple merge icon | Finished and merged into your project |
+  | Green | Finished, nothing left for you |
+  | Dashed ring | Written down, not started yet |
+
+  *Group by status* uses the same lights: a question, an OK or a plan puts a chat under *Needs you*.
 - **Middle: the conversation**, the same chat as the panel, with the model, effort and mode pickers. Click
-  the title to rename the chat. The cache bar and **Keep warm** sit on the title row; the 5-hour window
+  the title to rename the chat. The context and cache bars and **Keep warm** sit on the title row; the 5-hour window
   is the one in the top bar.
 - **Right: the work this chat started** (its edge drags too). Every card it made, with its stages as
   dots, what it is doing this minute, Claude's own steps (done, doing, still to do), its subtasks, its
@@ -192,9 +212,14 @@ window. Nothing of the board is on screen until you press **Board** at the top l
 
 Claude keeps a conversation cached for an hour after its last reply. A message within the hour is cheap:
 only the new words are read. A message after it is read again in full, at full price, however short it
-is. So the chat panel shows two thin bars above the conversation (in the Studio, the cache bar sits on
-the title row and the 5-hour window is the top bar's):
+is. So the chat panel shows thin bars above the conversation (in the Studio, the context and cache bars
+sit on the title row and the 5-hour window is the top bar's):
 
+- **context**: how full the chat is — the conversation, the files and pages it read, and its
+  instructions (your connectors and skills too, when the chat has them) — against what its model can
+  hold, as tokens and a percentage. Claude re-reads all of it with every message, so a fuller chat makes
+  each message use more of your limit. At 70% it turns amber and suggests a new chat for a new topic;
+  at 90% it turns red. It is measured from Claude's last reply, so a chat shows "—" until it has one.
 - **cache**: how much of the hour is left, counted from Claude's last reply. Fifteen minutes before the
   end it turns amber, a banner says so, and you get a pop-up and a desktop notification (the *Usage*
   alert kind in 🔔): send your next idea before then.
@@ -224,10 +249,15 @@ credits, Claude's cache lasts five minutes instead of an hour; the bar still cou
   typing names a system people connect to Claude (Slack, your inbox, a Google Sheet, Notion, Jira…)
   while the switch is off, a strip above the box offers to turn it on for this chat. Changing a file is
   still a card's job either way.
-- **supervised / autonomous**: how the cards this chat makes will run. *Supervised* works in the
+- **supervised / autonomous / asks me**: how the cards this chat makes will run. A new chat starts on
+  Settings → *New cards run* (*Autonomous + asks me* unless you change it). A card it makes with a plan
+  step waits on its **setup card** in the chat: the mode, each step's model and effort, and what Claude
+  suggests, all changeable, and nothing runs until you press **Start** there (the board shows such a card
+  with a *check setup* chip; turn this off in Settings → *Plan approval & live tasks*). *Supervised* works in the
   project's own folder and asks you before each change; *autonomous* works on its own branch without
-  asking and lands when you approve. Saying "autonomous" or "supervised" in a message decides for that
-  one card. A lookup card follows the switch too: under *autonomous* it runs in the project's own
+  asking and lands when you approve; *asks me* is autonomous that stops to ask you when your answer
+  changes the result, and its question appears right here in the chat. Saying "autonomous",
+  "supervised" or "autonomous + asks me" in a message decides for that one card. A lookup card follows the switch too: under *autonomous* it runs in the project's own
   folder, reaches what the project reaches (its scripts, its keys, the live system they talk to) and
   asks nothing — it still changes nothing, an edit is refused, and so is a command that would show a
   credentials file. A project can keep autonomous inside its sandbox instead (Settings → the project →
@@ -310,6 +340,31 @@ Claude decide after 15 minutes to 4 hours; it says what it chose in its summary.
 
 An **autonomous** task never stops to ask — nobody is watching it. It puts the question on the card
 with the answer it is going with, and carries on; answer it there and the next stage gets your answer.
+
+**Autonomous + asks me** is the third choice under *Run mode* (on the New task form, in a task's *Mode*,
+and on the switch under any chat). It runs exactly like autonomous — its own copy of the project, no
+Allow / Deny cards, nothing lands until you approve — with one difference: when Claude has a question
+whose answer changes the result, it stops and waits for you, the way a supervised task does. Small
+choices it still makes itself, noting them on the card with the answer it went with. Cards show
+**auto · asks**, and repeating schedules, subtasks and follow-ups keep the choice.
+
+Wherever you are, the question reaches you:
+
+- **The pop-up and the bell.** A one-question card shows its options as buttons: one click answers it.
+  Several questions, ticking several options or typing your own answer open the full card.
+- **The card.** It shows **asks you**; the task has the full question with its options and a box for
+  your own words.
+- **The chat that made the card** (the side chat or the Studio). The question appears in the
+  conversation as the same card: click an answer, or just tell Claude in your own words and it passes
+  it on.
+- **The Approvals tab** lists every question waiting on you.
+
+How long it waits is its own setting: Settings → Runs & limits → *When Claude asks you a question* →
+*“Autonomous + asks me” tasks*. It starts at *Wait for my answer, however long it takes*; choose 15
+minutes to 4 hours to have Claude decide after that and say what it chose. Supervised tasks keep their
+own setting next to it. A waiting task still counts as running, so with **one at a time** on, the
+tasks queued behind it wait until you answer. If the board is restarted while a task is waiting, the
+task fails like any running task; press **Retry**.
 
 ## Approve the plan first, and mark live tasks
 
@@ -527,8 +582,8 @@ restarting it.
 | **Projects** | A registered folder plus a policy: whether worktrees and autonomous runs are allowed, and how many tasks may run at once. |
 | **Tasks** | Title, markdown spec, mode, pipeline, attached skills, optional parent, milestone and dependencies. |
 | **Pipeline** | Each stage is one `query()` with its own model and effort. The prompt carries the spec, the parent, sibling summaries, earlier stage results, project memory, messages and attached files. Plan stages cannot edit files. The plan is handed to Code and Review **in full**: Code works through its numbered steps and ends with a checklist of each one (done, or skipped and why), and Review sends the task back if a step — a safety check above all — was dropped without a reason. |
-| **Autonomous** | Runs in its own git worktree on `kanban/<taskId>`. Edits are accepted inside it; writes outside it and history-rewriting git commands are refused. **Approve** lands the branch — see *Landing safely*. |
-| **Supervised** | Runs in the project folder, and every tool call that needs permission becomes an approval card: Allow or Deny, with a note. Tick **Work on its own branch** and it runs in its own worktree on `kanban/<taskId>` instead, like an autonomous task — still approving every write, and landing only when you press **Approve**. Commands that only read (`grep`, `wc`, `ls`, `git status`, `git diff`…) run without a card and are listed in the run log — switch that off in Settings → *Guardrails*. When the spec says a step needs your go-ahead (a live write, a deploy), Claude asks for it on a card rather than stopping. |
+| **Autonomous** | Runs in its own git worktree on `kanban/<taskId>`. Edits are accepted inside it; writes outside it and history-rewriting git commands are refused. **Approve** lands the branch — see *Landing safely*. **Autonomous + asks me** is the same with `may_ask` on: its `AskUserQuestion` becomes a question card that waits (Settings → `askModeWaitMin`) instead of being turned into a `board_ask` note. |
+| **Supervised** | Runs in the project folder, and every tool call that needs permission becomes an approval card: Allow or Deny, with a note. Tick **Work on its own branch** and it runs in its own worktree on `kanban/<taskId>` instead, like an autonomous task — still approving every write, and landing only when you press **Approve**. Commands that only read (`grep`, `wc`, `ls`, `git status`, `git diff`…), Claude's own to-do list, and connector tools whose name only reads (`get_values`, `list_events`, `slack_search_…`) run without a card and are listed in the run log — switch that off in Settings → *Guardrails*. When the spec says a step needs your go-ahead (a live write, a deploy), Claude asks for it on a card rather than stopping. |
 | **Queue** | Per-project FIFO with a per-project cap and a global cap. Drag between Backlog and Queued. |
 | **Board MCP** | Every run gets `board_get_task`, `board_list_siblings`, `board_post_message`, `board_create_subtasks`, `board_set_summary`, `board_remember`, `board_memory`, `board_flag_memory`, `board_search_past_work`, `board_report_blocked`. |
 | **Approvals** | A global inbox with `a` / `y` / `n` and a tab-title badge, so an unattended run never stalls unnoticed. |
@@ -609,10 +664,12 @@ There is no "slow / balanced / fast" setting in Claude; these two controls are w
 **Where you set effort.** Every pipeline — Settings → Models & pipeline, the New task form, and a
 task's **Pipeline** tab — has an effort box on each stage that reads *high effort*, *medium effort* and
 so on, next to the model. The New task form's *Quick change* / *Full* buttons show model and effort
-for each stage before you pick one. The default pipeline is **plan on Opus 5.5 at high effort, code
-on Opus 5.5 at medium, review on Sonnet 5.5 at medium**: a plan is where thinking pays off; once the
-plan says what to do, coding at medium thinks less per step. A board that still had the old default
-(plan on Fable) moves to this one by itself; a default you changed is left alone.
+for each stage before you pick one. The default pipeline is **plan on Opus 5.5, code on Opus 5.5 and
+review on Sonnet 5.5, all at high effort**; raise the hardest step to *extra high* or *max*. A planned
+card's sizing never goes below high either. A board that still had an older default (plan on Fable,
+or code and review at medium) moves to this one by itself; a default you changed is left alone.
+While a task runs you can still change the model and effort of the steps that haven't started on
+its **Pipeline** tab; the started ones are greyed out, and its mode stays as it is until you stop it.
 
 ## Claude models: picked, not typed
 
@@ -885,10 +942,36 @@ moment they land, and that is what Settings → *Git & merging* controls. Approv
    not "it passes now". Skipped when the tree has not changed since it last passed.
 4. **Lands it**, one task at a time per project: a merge commit (default), a rebase, or a squash.
 
-If the base genuinely conflicts, the default is to stop and name the files, with nothing merged. Set
-*Give it back to Claude* and the session that wrote the code resolves it in its own worktree and
-re-verifies — you still approve the result. A failed merge is always undone with `git merge --abort`,
-never `reset --hard`; if that abort fails, the board says so and stops rather than guessing.
+### When two tasks changed the same lines
+
+If the base genuinely conflicts, *Give it back to Claude* (the default for new projects) hands it to
+the session that wrote the task, in the task's own worktree — your checkout is never touched:
+
+1. **The board starts the merge** at a pinned commit of the base, with the original shown between the
+   two sides (`zdiff3`), and tells Claude what each change on the other side was for (the title and
+   summary of the task that landed it). Claude only edits the conflicted files; the board commits.
+2. **The board checks the result**, and none of these can be talked past:
+   - no conflict marker is left, and both histories are in the merge (nothing was rebased or reset away);
+   - every file outside the conflict is exactly what git's own merge made — and none was deleted;
+   - every line either side added is still there word for word; one that is not must be explained;
+   - the project's verify command passes on the combined code.
+3. **A second look** reads both sides and the result and says `BOTH KEPT` or `LOST`. It decides the
+   lines that were rewritten to combine both sides. By default it is the model that wrote the task;
+   Settings → *Git & merging* can name another.
+4. **An attempt that fails is set aside**: committed, then stepped back from with `git reset --keep`, so
+   the branch is exactly where it was and the attempt stays in git's reflog. Claude gets one more try,
+   told exactly what failed. After two, nothing is merged and the card says why.
+5. **It lands by itself** once everything passes — you already pressed Approve. *Wait for me to approve
+   again* in Settings → *Git & merging* keeps it in Review with a report of what was kept from each side.
+
+The board also looks ahead. When a task lands, and when one reaches Review, it asks git (without
+touching any folder) whether the other open tasks would now conflict. Those cards show **will
+conflict**, and the task's panel has **Fix now**, which resolves it the same way but never lands it —
+nobody has approved that task yet. This needs git 2.38 or newer; Setup checks it.
+
+Set *Stop and tell me* to have none of this: the files are named and nothing is merged. A failed merge
+is always undone with `git merge --abort`, never `reset --hard`; if that abort fails, the board says so
+and stops rather than guessing.
 
 A task open for a while shows **"N commits landed on main since this started"** with an *Update it*
 button, so it can catch up while that is still cheap.
@@ -1272,7 +1355,8 @@ a comment to it. When you have said everything, **Send** hands all of them to th
 one message, each with its file, line and the line's text, and the task deals with them and says what
 it changed; the diff updates when it is done. A task that has landed shows its diff read-only.
 
-**⤓ Record.** Transcripts are pruned after a while (Settings), so the button on a task saves its whole
+**⤓ Record.** Transcripts are pruned after a number of days you choose (Settings → Guardrails → *Keep
+transcripts for*, 30 by default; tasks, runs and costs are never deleted), so the button on a task saves its whole
 story as one Markdown file while it is still there: what was asked, every stage with its model, time
 and cost, each step Claude took in order, what it asked and was told, what you approved, and the files
 it changed. Keep it, share it, or read it back months later. API: `GET /api/tasks/:id/record`
@@ -1385,7 +1469,9 @@ a background tab). **▶** next to an event plays it with its pop-up; **♪ Play
 set in ten seconds. The sounds are synthesised in the browser: no audio files.
 
 A **needs you** pop-up shows what the card wants to run and has **Allow** and **Deny** on it (a command
-that would print credentials only gets **Review**, which opens the card). It closes itself the moment
+that would print credentials only gets **Review**, which opens the card). A question with one answer to
+pick shows its options as buttons instead; anything more has **Type an answer…**, which opens the
+card. It closes itself the moment
 the card is dealt with *anywhere* — the pop-up, the task, the Approvals tab, another browser tab — with
 a moment's "✓ Allowed" or "✕ Denied" first, and its desktop notification goes with it. More than three
 waiting fold into one pop-up that leads to Approvals.

@@ -169,6 +169,25 @@ const gitIdentity: SetupCheck = {
   },
 };
 
+/** `git merge-tree --write-tree` arrived in 2.38: it is how a conflict is foreseen and a fix checked (D359). */
+const GIT_FOR_CONFLICTS: [number, number] = [2, 38];
+
+const gitForConflicts: SetupCheck = {
+  id: "git-conflicts",
+  title: `git ${GIT_FOR_CONFLICTS.join(".")} or newer`,
+  level: "recommended",
+  why: "When two tasks change the same lines, the board warns before you approve and checks Claude's fix against git's own merge. Older git cannot do either, so conflicts are only found at approval and Claude's fix is not checked.",
+  manual: { win32: "winget upgrade --id Git.Git -e", darwin: "brew install git", linux: "sudo add-apt-repository ppa:git-core/ppa && sudo apt install git" },
+  async detect({ probe }) {
+    const v = await gitVersion(probe);
+    if (!v) return bad("Install git first", "git");
+    const m = /(\d+)\.(\d+)/.exec(v);
+    const [major, minor] = m ? [Number(m[1]), Number(m[2])] : [0, 0];
+    const [needMajor, needMinor] = GIT_FOR_CONFLICTS;
+    return major > needMajor || (major === needMajor && minor >= needMinor) ? ok(v) : bad(`${v} — conflicts need ${needMajor}.${needMinor} or newer`);
+  },
+};
+
 const BROWSER_LABEL = { chrome: "Chrome", msedge: "Edge", chromium: "Playwright Chromium" } as const;
 const INSTALL_BROWSER = ["-y", "@playwright/mcp@latest", "install-browser", "chromium"];
 
@@ -534,7 +553,7 @@ const imagesInClaudeCode: SetupCheck = {
 
 /** The checks that apply right now: always the core, then only what your settings switch on. */
 export function buildChecks(settings: Settings): SetupCheck[] {
-  const list: SetupCheck[] = [node, claudeLogin, claudeEngine, claudeModelIds, git, gitIdentity];
+  const list: SetupCheck[] = [node, claudeLogin, claudeEngine, claudeModelIds, git, gitIdentity, gitForConflicts];
   if (settings.browserChecks) list.push(browser);
   if (settings.imageProvider !== "off") list.push(images, imagesInClaudeCode);
   const enabled = settings.providers.filter((p) => p.enabled);

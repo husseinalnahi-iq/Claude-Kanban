@@ -56,7 +56,11 @@ export function pipelineLine(stages: Stage[], label: (s: Stage) => string): stri
 }
 
 /** Edits a pipeline: one row per stage with provider + model, effort and optional prompt. */
-export function PipelineEditor({ value, onChange, models, providers: providersProp }: { value: Stage[]; onChange: (v: Stage[]) => void; models: ModelEntry[]; providers?: Provider[] }) {
+/**
+ * `lockedThrough`: the stages up to this index already started on a running task. They show but
+ * cannot change or move, because the run has already used them; the ones after still can (D364).
+ */
+export function PipelineEditor({ value, onChange, models, providers: providersProp, lockedThrough = -1 }: { value: Stage[]; onChange: (v: Stage[]) => void; models: ModelEntry[]; providers?: Provider[]; lockedThrough?: number }) {
   const fastStatus = useFastMode();
   const fastAvailable = fastStatus?.state === "on";
   const { settings } = useAppData();
@@ -72,10 +76,11 @@ export function PipelineEditor({ value, onChange, models, providers: providersPr
     <div className="space-y-2">
       <div className="px-1 text-[11px] text-ink-500">
         Each stage: what it does, which model runs it, and its <b className="font-medium text-ink-300">effort</b> — how long it may think. Higher effort
-        thinks more and costs more; medium suits most coding, high suits planning.
+        thinks more and costs more; high suits most work, extra high or max the hardest steps.
       </div>
       {value.map((s, i) => (
-        <div key={i} className="rounded-lg border border-ink-700 bg-ink-850/60 p-2.5">
+        <fieldset key={i} disabled={i <= lockedThrough} className={`rounded-lg border border-ink-700 bg-ink-850/60 p-2.5 ${i <= lockedThrough ? "opacity-60" : ""}`}>
+          {i <= lockedThrough ? <div className="mb-1.5 text-[10.5px] uppercase tracking-wider text-ink-500">Already started — can't change</div> : null}
           {/* The model gets whatever the stage, effort and buttons leave: it is the one name that must read whole. */}
           <div className="grid grid-cols-[88px_minmax(0,1fr)_auto_auto_auto] items-center gap-2">
             <Select wide className={`font-mono ${STAGE_TINT[s.stage]}`} value={s.stage} onChange={(e) => set(i, { stage: e.target.value as StageName })}>
@@ -127,7 +132,7 @@ export function PipelineEditor({ value, onChange, models, providers: providersPr
               );
             })()}
             <div className="flex items-center text-ink-400">
-              <button type="button" className="px-1 hover:text-ink-100 disabled:opacity-30 cursor-pointer" disabled={i === 0} onClick={() => move(i, -1)} title="Move up">↑</button>
+              <button type="button" className="px-1 hover:text-ink-100 disabled:opacity-30 cursor-pointer" disabled={i === 0 || i - 1 <= lockedThrough} onClick={() => move(i, -1)} title="Move up">↑</button>
               <button type="button" className="px-1 hover:text-ink-100 disabled:opacity-30 cursor-pointer" disabled={i === value.length - 1} onClick={() => move(i, 1)} title="Move down">↓</button>
               <button type="button" className="px-1 hover:text-rust cursor-pointer" onClick={() => onChange(value.filter((_, j) => j !== i))} title="Remove stage">×</button>
             </div>
@@ -164,7 +169,7 @@ export function PipelineEditor({ value, onChange, models, providers: providersPr
               + custom prompt
             </button>
           )}
-        </div>
+        </fieldset>
       ))}
       <div className="flex items-center gap-2">
         <button

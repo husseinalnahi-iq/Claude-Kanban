@@ -36,7 +36,7 @@ function dayLabel(d: Date): string {
   return d.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
 }
 
-export type NewSchedule = Omit<Schedule, "id" | "created_at" | "last_run_at" | "last_task_id" | "next_run_at">;
+export type NewSchedule = Omit<Schedule, "id" | "created_at" | "last_run_at" | "last_task_id" | "next_run_at" | "may_ask"> & { may_ask?: boolean };
 
 export interface SchedulerDeps {
   repo: Repo;
@@ -118,7 +118,7 @@ export class Scheduler {
 
   create(s: NewSchedule): Schedule {
     const next = s.enabled ? nextOccurrence(s.days, s.time, new Date(this.now())) : null;
-    const created = this.deps.repo.createSchedule({ ...s, next_run_at: next?.toISOString() ?? null });
+    const created = this.deps.repo.createSchedule({ ...s, may_ask: s.may_ask ?? false, next_run_at: next?.toISOString() ?? null });
     this.publish(created);
     this.tick();
     return created;
@@ -157,6 +157,7 @@ export class Scheduler {
       title: `${sc.title} · ${dayLabel(new Date(this.now()))}`,
       spec_md: sc.spec_md,
       mode: sc.mode,
+      may_ask: sc.may_ask,
       type: sc.type,
       priority: sc.priority,
       pipeline: sc.pipeline,

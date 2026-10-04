@@ -34,6 +34,16 @@ export const isHandsOff = (t: { mode: Mode; pipeline: StageKind[] }): boolean =>
 export const usesWorktree = (t: { mode: Mode; own_branch?: boolean; pipeline?: StageKind[] }): boolean =>
   (t.mode === "autonomous" && !isAnswerPipeline(t.pipeline ?? [])) || Boolean(t.own_branch);
 
+/**
+ * How a task runs, as the forms and cards name it: the two modes, plus "ask" — "Autonomous + asks me",
+ * an autonomous task with `may_ask` on (D361). Stored as mode + may_ask, never as a third Mode.
+ */
+export type RunStyle = Mode | "ask";
+export const RUN_STYLES: RunStyle[] = ["supervised", "autonomous", "ask"];
+export const runStyleOf = (t: { mode: Mode; may_ask?: boolean }): RunStyle => (t.mode === "autonomous" && t.may_ask ? "ask" : t.mode);
+export const runStyleFields = (s: RunStyle): { mode: Mode; may_ask: boolean } => (s === "ask" ? { mode: "autonomous", may_ask: true } : { mode: s, may_ask: false });
+export const RUN_STYLE_LABEL: Record<RunStyle, string> = { supervised: "Supervised", autonomous: "Autonomous", ask: "Autonomous + asks me" };
+
 export const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
 
 /** Where `generate_image` makes pictures: Codex on your ChatGPT plan (D297), free Pollinations.ai, Cloudflare Workers AI with your token, or nowhere (D262). */
@@ -479,6 +489,13 @@ export interface MergePolicy {
   /** Re-run the project's verify command after that update, before landing. */
   verifyBeforeMerge: boolean;
   onConflict: ConflictPolicy;
+  /**
+   * A conflict Claude resolved while you were approving lands by itself once every check passes. Off:
+   * it waits in Review for you to approve again. A resolution started with Fix now always waits.
+   */
+  autoLandResolved: boolean;
+  /** Who double-checks a resolution. null: the model that wrote the task (D357). */
+  resolveReviewer: { provider: string; model: string; effort: Effort } | null;
 }
 
 export const DEFAULT_MERGE: MergePolicy = {
@@ -486,8 +503,63 @@ export const DEFAULT_MERGE: MergePolicy = {
   updateBeforeMerge: true,
   strategy: "merge",
   verifyBeforeMerge: true,
-  onConflict: "ask",
+  onConflict: "claude",
+  autoLandResolved: true,
+  resolveReviewer: null,
 };
+
+/** One check the board ran on a conflict resolution (D355). */
+export interface ResolutionCheck {
+  id: "history" | "markers" | "files" | "lines" | "verify" | "review";
+  ok: boolean;
+  /** Plain words, for the card. */
+  detail: string;
+}
+
+/** Lines one side added that the resolution no longer has. */
+export interface LostLines {
+  file: string;
+  /** "task": this task's own change; "base": what landed on the base meanwhile. */
+  side: "task" | "base";
+  lines: string[];
+}
+
+/**
+ * A conflict between a task and its base, and what Claude did about it (D355–D358). Lives on the task
+ * so the card can show it; replaced by the next resolution.
+ */
+export interface Resolution {
+  state: "resolving" | "checking" | "reviewing" | "resolved" | "failed";
+  base: string;
+  /** The base commit being merged — pinned, so the checks judge exactly what was merged. */
+  base_sha: string;
+  conflicts: string[];
+  /** What landed on the base meanwhile, by title. */
+  others: string[];
+  attempt: number;
+  max_attempts: number;
+  /** Started by Approve: land once it passes, if the project allows (`autoLandResolved`). */
+  land_after: boolean;
+  checks: ResolutionCheck[];
+  lost: LostLines[];
+  /** Files changed that were not in conflict. */
+  outside: string[];
+  verdict: "kept" | "lost" | null;
+  /** The reviewer's own words. */
+  review: string | null;
+  /** Claude's report of what it kept from each side. */
+  report: string | null;
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
+/** This task's branch would conflict with its base if landed now (D359). */
+export interface ConflictRisk {
+  base: string;
+  files: string[];
+  checked_at: string;
+}
 
 export interface Project {
   id: string;
@@ -526,6 +598,16 @@ export interface Task {
   live: boolean;
   /** A supervised task that still works in its own worktree and branch, landing only on Approve (D234). Autonomous always does. */
   own_branch: boolean;
+  /**
+   * "Autonomous + asks me": an autonomous task that may stop on a question card and wait for your
+   * answer, instead of only leaving a note with its default (D361). Ignored when the task is supervised.
+   */
+  may_ask: boolean;
+  /**
+   * Made by the side chat with a plan stage: it waits on its setup card (mode, models, effort) until
+   * someone presses Start there, and the queue refuses it until then (D365).
+   */
+  setup_pending: boolean;
   /** The side chat that made this card: its result, failure, plan or question is posted back there (D285). */
   chat_id: string | null;
   /** Set when the board classified this task, so the UI can show it was a guess. */
@@ -534,6 +616,8 @@ export interface Task {
   archived_at: string | null;
   /** When the task became done, or null while it is not. Unlike updated_at, archiving or editing it later does not move this. */
   done_at: string | null;
+  /** When Approve merged its branch into the base: what tells a merged task from one that was only finished. */
+  merged_at: string | null;
   /** When a task paused by a usage limit will pick up again (ISO time), or null. */
   resume_at: string | null;
   /**
@@ -581,6 +665,10 @@ export interface Task {
   checklist: ChecklistItem[];
   /** Supervised runs: the checkout's state around the run. */
   checkout: CheckoutState | null;
+  /** The latest conflict Claude was given to resolve, and how it went. */
+  resolution: Resolution | null;
+  /** Set while the task's branch would conflict with its base. */
+  conflict_risk: ConflictRisk | null;
   mode: Mode;
   pipeline: Stage[];
   skills: string[];
@@ -605,6 +693,8 @@ export interface Schedule {
   title: string;
   spec_md: string;
   mode: Mode;
+  /** The cards it makes are "Autonomous + asks me" (D361). */
+  may_ask: boolean;
   type: TaskType;
   priority: Priority;
   pipeline: Stage[];
@@ -646,8 +736,14 @@ export interface Chat {
    * default: their tool lists ride on every message, so a plain question costs more with them.
    */
   use_tools: boolean;
+  /**
+   * How full the chat's context is, from Claude's last answer: tokens held, and the model's window
+   * (0 when the model did not say). Both 0 before the first reply and after a fresh session (D360).
+   */
+  context_tokens: number;
+  context_window: number;
   /** How the cards this chat makes will run unless the message says otherwise (D344). An answer card is always supervised. */
-  mode: Mode;
+  mode: RunStyle;
   archived_at: string | null;
   created_at: string;
   updated_at: string;
@@ -688,11 +784,14 @@ export interface ChatFolder {
 export interface ChatUpdate {
   id: string;
   title: string;
-  kind: "finished" | "failed" | "plan" | "question";
+  /** "asks": a question card the run waits on (AskUserQuestion); "question": a note it carried on past (board_ask). */
+  kind: "finished" | "failed" | "plan" | "question" | "asks";
   status: TaskStatus;
   /** The answer or outcome, why it failed, the plan's first lines, or the question. */
   text: string;
   question_id?: string;
+  /** For "asks": the question card, answered in the chat or anywhere else (D361). */
+  approval_id?: string;
   options?: string[];
   cost_usd?: number;
 }
@@ -1005,6 +1104,8 @@ export interface Settings {
    * takes; N > 0 waits N minutes, then Claude picks the most sensible option and says which.
    */
   questionWaitMin: number;
+  /** The same for an "Autonomous + asks me" task's question card: 0 waits however long it takes (D361). */
+  askModeWaitMin: number;
   /** The side chat's model and effort: a balance of quality and price for questions about code. */
   chatModel: string;
   chatEffort: Effort;
@@ -1044,6 +1145,13 @@ export interface Settings {
   markitdownInTasks: boolean;
   /** Every task waits for the human after its plan stage (a task can override it). D231. */
   planApproval: boolean;
+  /** How a new card runs unless someone picks otherwise: the form, the chat and the setup card start here (D365). */
+  defaultRunStyle: RunStyle;
+  /**
+   * A task with a plan stage waits on its setup card (mode, models, effort) until someone presses
+   * Start, wherever it was created; subtasks, schedules and re-runs are not asked again (D365).
+   */
+  confirmSetup: boolean;
   /** A stage that hits maxTurnsPerStage continues in the same session this many times before failing. D232. */
   autoContinueTurns: number;
   /** Claude model the review stage of a live task runs on, whatever its pipeline says. D233. */

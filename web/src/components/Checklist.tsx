@@ -21,6 +21,21 @@ export function ChecklistLine({ list, live }: { list: ChecklistItem[] | undefine
   );
 }
 
+/**
+ * A step's mark: ✓ done, ○ to do, and for the one in hand a ring that turns while the run works on
+ * it. It used to be a pulsing ▸, which read as a toggle you could open (D367).
+ */
+export function StepMark({ status, live }: { status: ChecklistItem["status"]; live: boolean }) {
+  if (status === "completed") return <>✓</>;
+  if (status !== "in_progress") return <>○</>;
+  return (
+    <span
+      aria-label={live ? "working on it" : "stopped here"}
+      className={`inline-block h-2.5 w-2.5 rounded-full border-[1.5px] border-current align-[-1px] ${live ? "kb-spin border-t-transparent" : ""}`}
+    />
+  );
+}
+
 /** In the task drawer: Claude's own to-do list for the stage, step by step. */
 export function ChecklistPanel({ list, live }: { list: ChecklistItem[]; live: boolean }) {
   const s = checklistSummary(list);
@@ -39,7 +54,7 @@ export function ChecklistPanel({ list, live }: { list: ChecklistItem[]; live: bo
           {liveChecklist(list).map((x) => (
             <li key={x.id} className={`flex items-start gap-2 text-[12.5px] leading-snug ${x.status === "completed" ? "text-ink-500" : x.status === "in_progress" ? "text-ink-100" : "text-ink-300"}`}>
               <span className={`mt-px w-3.5 shrink-0 text-center ${x.status === "completed" ? "text-moss" : x.status === "in_progress" ? "text-amber" : "text-ink-600"}`}>
-                {x.status === "completed" ? "✓" : x.status === "in_progress" ? <span className={live ? "breathe" : ""}>▸</span> : "○"}
+                <StepMark status={x.status} live={live} />
               </span>
               <span className={x.status === "completed" ? "line-through decoration-ink-600" : ""}>{x.status === "in_progress" && x.doing ? x.doing : x.text}</span>
             </li>

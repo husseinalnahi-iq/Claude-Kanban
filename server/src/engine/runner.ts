@@ -9,7 +9,7 @@ import { DEFAULT_VISION_MODEL, nowIso } from "../db.ts";
 import type { Repo } from "../repo.ts";
 import type { Bus } from "../bus.ts";
 import type {
-  Approval, ApprovalDecision, Blocked, Mode, Project, Provider, ProviderOut, ProviderUsage, Run, SessionTools, Settings, Stage, StageName, Task, TaskStatus, TierRef, UsageLimit, UsageTotals,
+  Approval, ApprovalDecision, Blocked, ConflictRisk, Mode, Project, Resolution, ResolutionCheck, Provider, ProviderOut, ProviderUsage, Run, SessionTools, Settings, Stage, StageName, Task, TaskStatus, TierRef, UsageLimit, UsageTotals,
 } from "../types.ts";
 
 type RateLimitInfo = {
@@ -22,9 +22,10 @@ type RateLimitInfo = {
 };
 import { RunQueue } from "./queue.ts";
 import { buildStagePrompt, type PromptCtx } from "./prompts.ts";
-import { autonomousGate, blockedCommand, escalationHint, handsOffGate, isReadOnlyShell, isSafeMcp, isTrusted, killsByName, markitdownRead, READ_ONLY_TOOLS, readViolation, serverRule, trustRules } from "./gate.ts";
+import { autonomousGate, blockedCommand, escalationHint, handsOffGate, isReadOnlyMcp, isReadOnlyShell, isSafeMcp, isTrusted, killsByName, markitdownRead, READ_ONLY_TOOLS, readViolation, serverRule, trustRules } from "./gate.ts";
 import { credentialRisk } from "./credentials.ts";
 import { allowedMode, createBoardServer } from "./boardMcp.ts";
+import { RESOLVE_ATTEMPTS, buildResolvePrompt, buildReviewPrompt, parseReviewVerdict, problemsFrom, type OtherSide } from "./conflictResolve.ts";
 import { CONFIDENCE_TO_APPLY, serialiseFileConflicts, triageTask, type Sizing, type TriageResult, type TriageSubtask } from "./triage.ts";
 import { describeImage, describeImageVia } from "./vision.ts";
 import { LEAN } from "./lean.ts";
@@ -61,6 +62,8 @@ export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options:
 export class PolicyError extends Error {}
 /** The request conflicts with the task's current state (HTTP 409). */
 export class ConflictError extends Error {}
+/** The card waits on its setup card: mode and models are confirmed by a person before it runs (D365). */
+export class SetupNeededError extends ConflictError {}
 export class NotFoundError extends Error {}
 
 export interface RunnerDeps {
@@ -144,6 +147,12 @@ interface CaptureState {
 
 const STAGE_STATUS: Record<StageName, TaskStatus> = { plan: "planning", code: "running", review: "review", custom: "running" };
 const PLAN_DISALLOWED = ["Edit", "Write", "NotebookEdit", "MultiEdit"];
+
+/** Resolutions one approval may start before the conflict comes back to you (D356). */
+const MAX_RESOLVE_ROUNDS = 3;
+
+/** Where a task's branch stood before Claude touched a conflict: the way back if it does not pass. */
+const preResolveRef = (taskId: string) => `refs/kanban/pre-resolve/${taskId}`;
 
 /** What a stage that ran out of turns is told when it carries on in the same session (D232). */
 const CONTINUE_PROMPT =
@@ -354,6 +363,13 @@ function eventType(msg: SDKMessage): string {
   return m.subtype ? `${m.type}:${m.subtype}` : m.type;
 }
 
+/** Two stages are the same step when every setting on them matches, whatever order the keys came in. */
+export function sameStage(a: Stage | undefined, b: Stage | undefined): boolean {
+  if (!a || !b) return false;
+  const norm = (s: Stage) => JSON.stringify(Object.keys(s).sort().reduce<Record<string, unknown>>((o, k) => ((o[k] = (s as never)[k]), o), {}));
+  return norm(a) === norm(b);
+}
+
 /**
  * Supervised runs: force every non-read-only tool through the approval card, even when a settings
  * file pre-allows it (a PreToolUse "ask" overrides allow rules). See docs/DECISIONS.md D20.
@@ -368,7 +384,7 @@ export function forceAsk(readsFree: boolean, cwd: string): HookCallbackMatcher[]
       hooks: [
         async (input) => {
           const { tool_name: name = "", tool_input: toolInput } = input as { tool_name?: string; tool_input?: unknown };
-          if (READ_ONLY_TOOLS.has(name) || isSafeMcp(name) || freeShellRead(name, toolInput)) return {};
+          if (READ_ONLY_TOOLS.has(name) || isSafeMcp(name) || freeShellRead(name, toolInput) || (readsFree && isReadOnlyMcp(name))) return {};
           return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask", permissionDecisionReason: "Supervised task: every write is approved on the board." } };
         },
       ],
@@ -400,6 +416,8 @@ export class TaskRunner {
   private pipelines = new Map<string, PipelineCtl>();
   /** Tasks inside an approve / discard / chat transition (git or session work in flight). */
   private holds = new Set<string>();
+  /** Conflict resolutions started by one approval, so a base that keeps moving cannot loop it (D356). */
+  private resolveRounds = new Map<string, number>();
   private startOpts = new Map<string, StartOpts>();
   private ports = new Map<string, number>();
   /** Live pictures of each task's browser, for the Browser tab. */
@@ -493,6 +511,8 @@ export class TaskRunner {
   private setTask(taskId: string, patch: Parameters<Repo["updateTask"]>[1]): Task {
     const task = this.repo.updateTask(taskId, patch);
     this.bus.publish({ type: "task.updated", task });
+    // A branch that has just reached Review is final until approved: say now if it would conflict (D359).
+    if (patch.status === "review" && task.branch) setImmediate(() => void this.refreshConflictRisk(task.project_id, task.id).catch(() => undefined));
     return task;
   }
 
@@ -641,6 +661,9 @@ export class TaskRunner {
     if (!["backlog", "failed", "review"].includes(task.status)) {
       throw new ConflictError(`Cannot queue a task in status "${task.status}".`);
     }
+    if (task.setup_pending && this.repo.getSettings().confirmSetup) {
+      throw new SetupNeededError("Check how it runs first: confirm its mode and models on its setup card, then press Start.");
+    }
     // A task whose dependencies are not done yet is queued all the same: the queue holds it until they
     // are, then it starts by itself (D289). Refusing it left a chain to be started by hand, link by link.
     this.assertRunnable(task, project);
@@ -679,7 +702,7 @@ export class TaskRunner {
       );
     }
     // A checkout of a big repository takes a minute — measured 61 s for 40k files, and 47 s outside
-    // OneDrive, so it is the size, not the sync. Say so instead of sitting silently in Queued (D192).
+    // CloudSync, so it is the size, not the sync. Say so instead of sitting silently in Queued (D192).
     this.setTask(task.id, { summary: "Preparing its worktree — a fresh checkout of the repository, up to a minute on a big one" });
     const wt = await this.git.addWorktree(project.path, task.id);
     // baseSha is null when an existing branch was re-attached: keep the stored base so the diff stays right.
@@ -779,6 +802,8 @@ export class TaskRunner {
           return;
         }
         task = this.repo.getTask(taskId)!;
+        // The steps ahead may have been edited while the last one ran (D364), shortening the list.
+        if (i >= task.pipeline.length) break;
         // A per-stage cap alone lets a 3-stage task cost 3x it, and a parent with six subtasks far
         // more. Check the task's whole spend before starting another stage.
         const capped = this.taskCeiling(task);
@@ -1193,6 +1218,7 @@ export class TaskRunner {
       customPrompt: stage.prompt,
       mode: task.mode,
       handsOff: isHandsOff(task),
+      mayAsk: task.mode === "autonomous" && task.may_ask,
       task: { id: task.id, title: task.title, spec_md: task.spec_md },
       branch: task.branch,
       baseSha: task.base_sha,
@@ -1404,9 +1430,11 @@ export class TaskRunner {
       if (toolName.startsWith("mcp__board__")) return { behavior: "allow", updatedInput: input };
       // A question for you: in a supervised run it waits on a card like an approval (and, if Settings
       // say so, Claude decides for itself after a while). Before the gate, which would refuse it.
-      // An autonomous run has nobody watching, so it asks with board_ask and carries on (D239).
+      // An autonomous run has nobody watching, so it asks with board_ask and carries on (D239) —
+      // unless it is "Autonomous + asks me", whose whole point is that someone will answer (D361).
       if (toolName === QUESTION_TOOL) {
         if (!autonomous) return this.askApproval(run, task.id, toolName, input, o);
+        if (task.may_ask) return this.askApproval(run, task.id, toolName, input, o, { askMode: true });
         return { behavior: "deny", message: "Nobody is watching this autonomous run, so a question would stall it. Put it on the card with board_ask (with the default you carry on with) and carry on." };
       }
       // The blocklist comes first, in both modes: these are the commands where an approval card
@@ -1439,7 +1467,8 @@ export class TaskRunner {
         // Likewise a read of the skills Claude loads, this task's attachments or its screenshots — the
         // same folders an autonomous run may read. Anything else outside the project still asks.
         const readsKnownFolder = READ_ONLY_TOOLS.has(toolName) && !readViolation(toolName, input, a.cwd, readRoots) && !credentialRisk(toolName, input);
-        if (settings.autoAllowReadOnly && (readsKnownFolder || ((toolName === "Bash" || toolName === "PowerShell") && isReadOnlyShell(command, a.cwd)))) {
+        // A connector tool whose name only reads (get_values, list_events) is the same kind of call (D363).
+        if (settings.autoAllowReadOnly && (readsKnownFolder || isReadOnlyMcp(toolName) || ((toolName === "Bash" || toolName === "PowerShell") && isReadOnlyShell(command, a.cwd)))) {
           const what = command || String((input as { file_path?: unknown; path?: unknown }).file_path ?? (input as { path?: unknown }).path ?? toolName);
           const event = this.repo.insertEvent(run.id, "board:auto-allowed", { type: "auto_allowed", tool: toolName, command: what });
           this.bus.publish({ type: "event", runId: run.id, taskId: task.id, event });
@@ -1872,7 +1901,7 @@ export class TaskRunner {
    * "passed before another task landed" is not the same as "passes now". Only then is the branch
    * merged, which by that point cannot conflict.
    */
-  private async landBranch(project: Project, task: Task): Promise<void> {
+  private async landBranch(project: Project, task: Task): Promise<"landed" | "resolving"> {
     const policy = project.merge;
     const branch = task.branch!;
     const base = policy.baseBranch?.trim() || (await this.git.currentBranch(project.path));
@@ -1899,10 +1928,9 @@ export class TaskRunner {
         if (!update.ok) {
           const files = update.conflicts.join(", ");
           const note = `"${base}" has moved on and conflicts with this task in: ${files}. Nothing was merged and your checkout is untouched.`;
-          if (policy.onConflict === "claude") {
-            this.setTask(task.id, { status: "backlog", note: `${note} Queued a stage to resolve it.` });
-            this.queueResolveStage(task, base, update.conflicts);
-            throw new ConflictError(`${note} Claude has been queued to resolve it — approve again when that finishes.`);
+          if (policy.onConflict === "claude" && this.mayResolveAgain(task)) {
+            this.beginResolution(task, base, true);
+            return "resolving";
           }
           throw new ConflictError(`${note} Open the task's worktree at ${task.worktree_path} and resolve it, or use Follow-up to redo the work on the current code.`);
         }
@@ -1922,32 +1950,324 @@ export class TaskRunner {
       } catch (err) {
         throw new ConflictError(`Merge into "${base}" failed. ${err instanceof Error ? err.message : err}`);
       }
+      this.resolveRounds.delete(task.id);
+      return "landed";
     } finally {
       release();
     }
   }
 
   /**
-   * Put the task back to work with the conflict as its job, as a chat turn in the session that wrote
-   * the code — it is already in the worktree with the context. Deliberately NOT a new pipeline stage:
-   * appending one would weld a synthetic stage onto the task for the rest of its life, skewing every
-   * later retry, stage count and failure statistic.
+   * A base that keeps moving while Claude resolves could send Approve round and round: each landing
+   * finds a fresh conflict. After a few rounds in one approval, the conflict is handed back to you.
    */
-  private queueResolveStage(task: Task, base: string, conflicts: string[]): void {
-    const prompt = [
-      `The branch "${task.branch}" is behind "${base}", and merging "${base}" into it conflicts in: ${conflicts.join(", ")}.`,
-      "",
-      `Run \`git merge ${base}\` in this worktree and resolve every conflict, keeping both sides' intent — the other change was made deliberately by another task, so do not discard it. Then commit the merge.`,
-      "Finally make sure the project's checks still pass. Report which files you resolved and how you decided.",
-    ].join("\n");
-    // Deferred so the caller's hold on the task is released first.
+  private mayResolveAgain(task: Task): boolean {
+    const rounds = (this.resolveRounds.get(task.id) ?? 0) + 1;
+    if (rounds > MAX_RESOLVE_ROUNDS) {
+      this.resolveRounds.delete(task.id);
+      return false;
+    }
+    this.resolveRounds.set(task.id, rounds);
+    return true;
+  }
+
+  /**
+   * Hand a conflict to the session that wrote the task, in its own worktree (D107, D355). The task is
+   * held busy from here, synchronously, so nothing else can start on it; the work itself runs after
+   * the caller's hold is released. `landAfter`: Approve started it, so a resolution that passes
+   * every check finishes that approval — when the project allows (`autoLandResolved`).
+   */
+  private beginResolution(task: Task, base: string, landAfter: boolean): Task {
+    const ctl: PipelineCtl = { stopped: false };
+    this.pipelines.set(task.id, ctl); // counts as a pipeline, so Stop works and nothing else starts
+    const resolution: Resolution = {
+      state: "resolving", base, base_sha: "", conflicts: [], others: [], attempt: 0, max_attempts: RESOLVE_ATTEMPTS, land_after: landAfter,
+      checks: [], lost: [], outside: [], verdict: null, review: null, report: null, error: null, started_at: nowIso(), finished_at: null,
+    };
+    const t = this.setTask(task.id, { status: "running", resolution, conflict_risk: null, error: null, note: `"${base}" has moved on and conflicts with this task. Claude is resolving it in the task's own worktree — your checkout is untouched.` });
     setImmediate(() => {
-      try {
-        this.chat(task.id, prompt);
-      } catch {
-        this.setTask(task.id, { status: "review", note: `Could not start the conflict resolution automatically. Resolve it in ${task.worktree_path}, or use Follow-up.` });
-      }
+      void this.runResolution(task.id, ctl).catch((err) => {
+        // Nothing awaits this: a throw here would end the whole board.
+        this.failTask(task.id, `The conflict could not be handled: ${err instanceof Error ? err.message : String(err)}`);
+      });
     });
+    return t;
+  }
+
+  private async runResolution(taskId: string, ctl: PipelineCtl): Promise<void> {
+    const { task, project } = this.load(taskId);
+    const wt = task.worktree_path!;
+    let r = task.resolution!;
+    const save = (patch: Partial<Resolution>) => {
+      r = { ...r, ...patch };
+      this.setTask(taskId, { resolution: r });
+    };
+    const message = `Merge ${r.base} into ${task.branch}: ${task.title}`;
+    let pre: string | null = null;
+    let outcome = "failed" as "resolved" | "failed";
+    let why = "";
+    try {
+      await this.git.commitAll(wt, `kanban: ${task.title}`);
+      pre = await this.git.headSha(wt);
+      if (!pre) throw new Error("the task's branch has no commit to start from");
+      const baseSha = await this.git.revParse(project.path, r.base);
+      await this.git.setRef(wt, preResolveRef(taskId), pre);
+      const preview = await this.git.previewMerge(wt, pre, baseSha);
+      const landed = await this.otherSide(task, r.base);
+      save({ base_sha: baseSha, conflicts: preview.conflicts, others: landed.map((o) => o.title) });
+
+      let problems: string[] = [];
+      for (let attempt = 1; attempt <= RESOLVE_ATTEMPTS && outcome !== "resolved"; attempt++) {
+        if (ctl.stopped) break;
+        save({ state: "resolving", attempt, checks: [], lost: [], outside: [], verdict: null, review: null, report: null });
+        const conflicts = await this.git.startResolveMerge(wt, baseSha, message);
+        if (!conflicts.length) {
+          // The base moved again and no longer conflicts: git merged it, and its merge needs no judging.
+          save({ checks: [{ id: "history", ok: true, detail: `"${r.base}" no longer conflicts with this task; git merged it cleanly.` }] });
+          outcome = "resolved";
+          break;
+        }
+        const turn = await this.sessionTurn(taskId, buildResolvePrompt({ branch: task.branch ?? "", base: r.base, baseSha, conflicts, landed, problems }), ctl);
+        if (!turn.ok) {
+          why = ctl.stopped ? "Stopped by you." : `Claude could not finish the resolution: ${turn.error ?? "no result"}.`;
+          await this.git.rollbackResolution(wt, pre);
+          break;
+        }
+        save({ state: "checking", report: turn.report });
+        await this.git.finishResolveMerge(wt, message);
+        const judged = await this.judgeResolution(project, task, wt, { pre, baseSha, previewTree: preview.tree, conflicts, landed, report: turn.report }, (state) => save({ state }), ctl);
+        save(judged);
+        // A Stop during the checks cuts the review short, and an unreviewed resolution is not a pass.
+        if (ctl.stopped) {
+          await this.git.rollbackResolution(wt, pre);
+          break;
+        }
+        if (judged.checks.every((c) => c.ok)) {
+          outcome = "resolved";
+          break;
+        }
+        await this.git.rollbackResolution(wt, pre);
+        problems = problemsFrom(judged.checks, judged.review);
+        why = `It did not pass the board's checks after ${attempt} ${attempt === 1 ? "try" : "tries"}: ${problems[0] ?? "see the checks"}`;
+      }
+      if (ctl.stopped && outcome !== "resolved") why = "Stopped by you.";
+    } catch (err) {
+      why = `The conflict could not be handled: ${err instanceof Error ? err.message : String(err)}`;
+      if (pre) await this.git.rollbackResolution(wt, pre).catch(() => undefined);
+    } finally {
+      await this.git.setRef(wt, preResolveRef(taskId), null).catch(() => undefined);
+      this.pipelines.delete(taskId);
+    }
+
+    if (outcome !== "resolved") {
+      this.resolveRounds.delete(taskId);
+      save({ state: "failed", error: why, finished_at: nowIso() });
+      this.setTask(taskId, {
+        status: "review",
+        note: `${why} Nothing was merged and the task's branch is back as it was. Open the worktree at ${wt} to resolve it yourself, or use Follow-up to redo the work on the current code.`,
+      });
+      return;
+    }
+    save({ state: "resolved", finished_at: nowIso() });
+    const landNow = r.land_after && project.merge.autoLandResolved;
+    this.setTask(taskId, {
+      status: "review",
+      note: landNow
+        ? `Claude resolved the conflict with "${r.base}" and every check passed. Landing it now.`
+        : `Claude resolved the conflict with "${r.base}" and every check passed. Approve to land it.`,
+    });
+    if (!landNow) return;
+    try {
+      await this.approveTask(taskId);
+    } catch (err) {
+      this.setTask(taskId, { note: `Claude resolved the conflict and every check passed, but landing it failed: ${err instanceof Error ? err.message : String(err)} Approve again once that is sorted.` });
+    }
+  }
+
+  /**
+   * The board's own checks on a committed resolution, then the project's verify command, then a
+   * second model. Anything a line-by-line check cannot settle — a line rewritten to combine both
+   * sides, a file touched outside the conflict — passes only when the reviewer says nothing was lost.
+   */
+  private async judgeResolution(
+    project: Project, task: Task, wt: string,
+    a: { pre: string; baseSha: string; previewTree: string; conflicts: string[]; landed: OtherSide[]; report: string },
+    stage: (s: Resolution["state"]) => void, ctl: PipelineCtl,
+  ): Promise<Pick<Resolution, "checks" | "lost" | "outside" | "verdict" | "review">> {
+    const f = await this.git.checkResolution(wt, a);
+    const failed = new Map(f.hard.map((h) => [h.id, h.detail]));
+    const checks: ResolutionCheck[] = [
+      { id: "history", ok: !failed.has("history"), detail: failed.get("history") ?? "Both histories are in the merge." },
+    ];
+    if (failed.has("history")) return { checks, lost: [], outside: [], verdict: null, review: null };
+    checks.push(
+      { id: "markers", ok: !failed.has("markers"), detail: failed.get("markers") ?? "No conflict markers are left." },
+      {
+        id: "files", ok: !failed.has("files"),
+        detail: failed.get("files") ?? (f.outside.length ? `Changed outside the conflict: ${f.outside.join(", ")} — the reviewer judged these.` : "Every file outside the conflict matches git's own merge."),
+      },
+    );
+    const lostCount = f.lost.reduce((n, l) => n + l.lines.length, 0);
+    const linesCheck: ResolutionCheck = {
+      id: "lines", ok: lostCount === 0,
+      detail: lostCount ? `${lostCount} line${lostCount === 1 ? "" : "s"} a side added ${lostCount === 1 ? "is" : "are"} not in the result word for word — the reviewer judged ${lostCount === 1 ? "it" : "them"}.` : "Every line either side added is still there.",
+    };
+    checks.push(linesCheck);
+    const result = (verdict: Resolution["verdict"] = null, review: string | null = null) => ({ checks, lost: f.lost, outside: f.outside, verdict, review });
+    if (f.hard.length || ctl.stopped) return result();
+
+    const runId = this.repo.latestRun(task.id)?.id ?? "";
+    if (project.merge.verifyBeforeMerge && project.env.verifyCommand?.trim()) {
+      const res = await this.verifyWorkspace(project, task, wt, runId);
+      if (res && !res.ok) {
+        checks.push({ id: "verify", ok: false, detail: `The project's verify command fails on the combined code:\n${res.output.slice(-1500)}` });
+        return result();
+      }
+      checks.push({ id: "verify", ok: true, detail: "The project's verify command passes on the combined code." });
+    }
+    if (ctl.stopped) return result();
+
+    stage("reviewing");
+    const review = await this.reviewResolution(project, task, wt, { ...a, lost: f.lost, outside: f.outside }, ctl);
+    const judgement = f.lost.length > 0 || f.outside.length > 0;
+    if (review.verdict === "kept") {
+      linesCheck.ok = true;
+      checks.push({ id: "review", ok: true, detail: `A second look (${review.model}) found nothing from either side lost.` });
+    } else if (review.verdict === "lost") {
+      checks.push({ id: "review", ok: false, detail: `A second look (${review.model}) found something lost.` });
+    } else {
+      // No verdict: fine only when nothing needed the reviewer's judgement in the first place.
+      checks.push({ id: "review", ok: !judgement, detail: `The second look gave no verdict${review.error ? ` (${review.error})` : ""}${judgement ? ", and some changes needed one." : "; nothing needed its judgement."}` });
+    }
+    return result(review.verdict, review.text);
+  }
+
+  /** A second model reads both sides and the result, and says whether anything was lost (D357). */
+  private async reviewResolution(
+    project: Project, task: Task, wt: string,
+    a: { pre: string; baseSha: string; conflicts: string[]; landed: OtherSide[]; report: string; lost: Resolution["lost"]; outside: string[] },
+    ctl: PipelineCtl,
+  ): Promise<{ verdict: Resolution["verdict"]; text: string | null; model: string; error: string | null }> {
+    const last = this.repo.latestRun(task.id);
+    const who = project.merge.resolveReviewer ?? { provider: last?.provider ?? ANTHROPIC_PROVIDER_ID, model: last?.model ?? task.pipeline[0]?.model ?? "", effort: last?.effort ?? "medium" };
+    try {
+      const mb = await this.git.mergeBase(wt, a.pre, a.baseSha);
+      const files = [...new Set([...a.conflicts, ...a.outside])];
+      const run = this.repo.createRun({
+        task_id: task.id, stage: last?.stage ?? "code", stage_index: last?.stage_index ?? 0, model: who.model, effort: who.effort, role: "critic",
+        provider: who.provider && who.provider !== ANTHROPIC_PROVIDER_ID ? who.provider : null,
+      });
+      this.bus.publish({ type: "run.updated", run });
+      const prompt = buildReviewPrompt({
+        title: task.title, goal: task.summary || task.spec_md, base: task.resolution?.base ?? "", landed: a.landed, conflicts: a.conflicts,
+        taskSide: await this.git.diffFiles(wt, mb, a.pre, files),
+        baseSide: await this.git.diffFiles(wt, mb, a.baseSha, files),
+        result: await this.git.diffFiles(wt, mb, "HEAD", files),
+        lost: a.lost, outside: a.outside, report: a.report,
+      });
+      const outcome = await this.runQuery({ task, project, run, cwd: wt, ctl, stageStatus: "running", disallowedTools: PLAN_DISALLOWED, verifyCommand: null, prompt });
+      const text = this.repo.getRun(run.id)?.result_md ?? null;
+      return { verdict: outcome.ok ? parseReviewVerdict(text) : null, text, model: who.model, error: outcome.ok ? null : outcome.error };
+    } catch (err) {
+      return { verdict: null, text: null, model: who.model, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
+   * One turn in the session that wrote the task, awaited — the resolution's own version of a chat
+   * message. The stage's result stays the stage's: the turn's reply is returned, not kept as the result.
+   */
+  private async sessionTurn(taskId: string, text: string, ctl: PipelineCtl): Promise<{ ok: boolean; error: string | null; report: string }> {
+    const { task, project } = this.load(taskId);
+    const last = this.repo.latestRun(taskId);
+    if (!last) return { ok: false, error: "the task has no run to continue", report: "" };
+    // A provider that cannot continue a session starts a fresh one in the same worktree: the prompt
+    // carries what it needs, and a resolution without the history beats none.
+    const resume = last.session_id && this.providers.resolve(last.provider).adapter.canResume ? last.session_id : undefined;
+    const before = { status: last.status, error: last.error, ended_at: last.ended_at, result_md: last.result_md };
+    const run = this.setRun(last.id, { status: "running", error: null, ended_at: null });
+    const event = this.repo.insertEvent(run.id, "user:chat", { type: "user_chat", text, board: true });
+    this.bus.publish({ type: "event", runId: run.id, taskId, event });
+    const outcome = await this.runQuery({ task, project, run, cwd: task.worktree_path!, ctl, prompt: text, resume, stageStatus: "running", accumulate: true, verifyCommand: null });
+    const report = outcome.ok ? (this.repo.getRun(run.id)?.result_md ?? "") : "";
+    // Cost stays added to the run; its status and result go back to being the stage's.
+    this.setRun(run.id, before);
+    return { ok: outcome.ok, error: outcome.error, report };
+  }
+
+  /** What landed on the base since this task split from it, with each board task's goal (D354). */
+  private async otherSide(task: Task, base: string): Promise<OtherSide[]> {
+    try {
+      const landed = await this.git.landedSince(task.worktree_path!, base);
+      return landed.map((l) => {
+        const other = l.taskId ? this.repo.getTask(l.taskId) : undefined;
+        return { title: other?.title ?? l.title, goal: other ? other.summary || other.spec_md : null };
+      });
+    } catch {
+      // Context only: a resolver without it is the one this board had before, not a reason to stop.
+      return [];
+    }
+  }
+
+  /** After a restart: roll an interrupted resolution back to the branch's saved starting point. */
+  private async abandonResolution(task: Task): Promise<void> {
+    if (!task.worktree_path || !existsSync(task.worktree_path)) return;
+    const ref = preResolveRef(task.id);
+    const pre = await this.git.revParse(task.worktree_path, ref).catch(() => null);
+    if (pre) {
+      await this.git.rollbackResolution(task.worktree_path, pre);
+      await this.git.setRef(task.worktree_path, ref, null);
+    }
+    this.setTask(task.id, { status: "review", error: null, note: "The board restarted while Claude was resolving a conflict. The task's branch is back as it was; Approve or Fix now to try again." });
+  }
+
+  /**
+   * Fix now (D359): resolve a conflict the board has foreseen, before anyone approves. It never lands
+   * by itself — nobody has approved this task yet.
+   */
+  async resolveConflict(taskId: string): Promise<Task> {
+    return this.hold(taskId, async () => {
+      const { task, project } = this.load(taskId);
+      if (!task.branch || !task.worktree_path || !existsSync(task.worktree_path)) throw new ConflictError("This task has no worktree, so there is nothing to merge.");
+      if (!["review", "failed", "backlog"].includes(task.status)) throw new ConflictError("Wait for the task to finish before resolving its conflict.");
+      const base = project.merge.baseBranch?.trim() || (await this.git.currentBranch(project.path));
+      await this.git.commitAll(task.worktree_path, `kanban: ${task.title}`);
+      const preview = await this.git.previewMerge(task.worktree_path, "HEAD", base);
+      if (preview.clean) {
+        // Nothing to resolve after all (the base moved again): bring it in now, it is cheap and safe.
+        const res = await this.git.updateFromBase(task.worktree_path, base, "merge");
+        return this.setTask(taskId, { conflict_risk: null, note: res.pulled ? `No conflict with "${base}" any more — brought its ${res.pulled} new commit${res.pulled === 1 ? "" : "s"} in.` : `No conflict with "${base}".` });
+      }
+      // The lookup above shows the busy check passed; the pipeline marker set next keeps it busy.
+      return this.beginResolution(task, base, false);
+    });
+  }
+
+  /**
+   * Which unfinished tasks in a project would conflict with its base if landed now (D359). Read-only:
+   * asked of git's object store, so a task that is running is never disturbed.
+   */
+  async refreshConflictRisk(projectId: string, onlyTaskId?: string): Promise<void> {
+    const project = this.repo.getProject(projectId);
+    if (!project || !existsSync(project.path)) return;
+    let base: string;
+    try {
+      base = project.merge.baseBranch?.trim() || (await this.git.currentBranch(project.path));
+    } catch {
+      return;
+    }
+    const tasks = this.repo.listTasks({ project_id: projectId }).filter((t) => t.branch && t.worktree_path && t.status !== "done" && (!onlyTaskId || t.id === onlyTaskId));
+    for (const t of tasks) {
+      if (t.resolution && ["resolving", "checking", "reviewing"].includes(t.resolution.state)) continue;
+      try {
+        const preview = await this.git.previewMerge(project.path, t.branch!, base);
+        const risk: ConflictRisk | null = preview.clean ? null : { base, files: preview.conflicts, checked_at: nowIso() };
+        const fresh = this.repo.getTask(t.id);
+        if (fresh && JSON.stringify(fresh.conflict_risk?.files ?? null) !== JSON.stringify(risk?.files ?? null)) this.setTask(t.id, { conflict_risk: risk });
+      } catch {
+        // A branch git cannot read right now is simply not warned about.
+      }
+    }
   }
 
   /** What the project's verify command runs with: the task's port, and a state folder that is not the board's. */
@@ -2970,14 +3290,15 @@ export class TaskRunner {
 
   // ---------------------------------------------------------------- approvals
 
-  private askApproval(run: Run, taskId: string, toolName: string, input: Record<string, unknown>, o: Parameters<CanUseTool>[2]): Promise<PermissionResult> {
+  private askApproval(run: Run, taskId: string, toolName: string, input: Record<string, unknown>, o: Parameters<CanUseTool>[2], how: { askMode?: boolean } = {}): Promise<PermissionResult> {
     const approval = this.repo.createApproval({ run_id: run.id, task_id: taskId, tool_name: toolName, input, title: o.title ?? o.displayName ?? null });
     this.setRun(run.id, { status: "approval" });
     this.setTask(taskId, { status: "approval" });
     this.bus.publish({ type: "approval.requested", approval });
 
     const question = toolName === QUESTION_TOOL;
-    const waitMin = question ? this.repo.getSettings().questionWaitMin : 0;
+    const settings = this.repo.getSettings();
+    const waitMin = !question ? 0 : how.askMode ? settings.askModeWaitMin : settings.questionWaitMin;
     return new Promise<PermissionResult>((resolve) => {
       let timer: ReturnType<typeof setTimeout> | null = null;
       const done = ({ decision, note, answers }: { decision: ApprovalDecision; note: string | null; answers?: Record<string, string> }) => {
@@ -3173,20 +3494,24 @@ export class TaskRunner {
       const { task, project } = this.load(taskId);
       if (task.status !== "review") throw new ConflictError(`Only tasks in review can be approved (status is "${task.status}").`);
       // Approved work is worth remembering: one line, so later tasks in this project inherit it.
-      this.repo.settleNoteUses(task.id, "approved");
-      const summary = outcomeLine(this.repo.runsForTask(task.id), task.summary);
-      if (summary) this.repo.addNote({ project_id: project.id, task_id: task.id, text: `${task.title}: ${summary}`, source: "board", kind: "outcome" });
+      // Only once it has landed: an approval that hands a conflict to Claude comes back through here.
+      const remember = () => {
+        this.repo.settleNoteUses(task.id, "approved");
+        const summary = outcomeLine(this.repo.runsForTask(task.id), task.summary);
+        if (summary) this.repo.addNote({ project_id: project.id, task_id: task.id, text: `${task.title}: ${summary}`, source: "board", kind: "outcome" });
+      };
 
       // Merge whenever a branch exists — even if the mode was switched after the worktree was made.
       let done: Task;
       if (task.branch) {
         if (task.worktree_path && existsSync(task.worktree_path)) await this.git.commitAll(task.worktree_path, `kanban: ${task.title}`);
-        await this.landBranch(project, task);
+        if ((await this.landBranch(project, task)) === "resolving") return this.repo.getTask(taskId)!;
+        remember();
         // The work is merged: from here the task is done whatever happens to the tidying-up. Marking it
         // only after the worktree and branch were gone left a merged task in Review whenever that
         // failed — always, for a squash, whose branch git never counts as merged — and approving
         // again could not succeed.
-        done = this.setTask(taskId, { status: "done", branch: null, worktree_path: null, note: null });
+        done = this.setTask(taskId, { status: "done", merged_at: nowIso(), branch: null, worktree_path: null, note: null, conflict_risk: null });
         try {
           // A squash leaves the branch "unmerged" as far as git can tell; its content has just landed.
           await this.git.removeWorktree(project.path, task.id, { deleteBranch: project.merge.strategy === "squash" ? "force" : "safe" });
@@ -3198,10 +3523,13 @@ export class TaskRunner {
         }
         this.forgetWorkspace(task);
       } else {
+        remember();
         done = this.setTask(taskId, { status: "done", note: null });
         this.forgetWorkspace(task);
       }
       setImmediate(() => this.promoteReady(project.id)); // anything waiting on this task can start now
+      // The base just moved: say which other cards would now conflict, while it is cheap to act on.
+      if (task.branch) setImmediate(() => void this.refreshConflictRisk(project.id).catch(() => undefined));
       // An approved /init or bootstrap can give the project its verify command. Off the approval
       // path on purpose: it may call a model, and approval must never fail or wait because of it.
       if (task.onboarding) {
@@ -3351,8 +3679,16 @@ export class TaskRunner {
    * never under a run, and never away from a branch that holds work nobody has approved or discarded.
    */
   assertReconfigurable(task: Task, patch: { mode?: Mode; pipeline?: Stage[]; own_branch?: boolean }): void {
-    if ((patch.mode || patch.pipeline || patch.own_branch !== undefined) && this.isBusy(task.id)) {
-      throw new ConflictError("Cannot change mode, branch or pipeline while the task is queued or running.");
+    const busy = this.isBusy(task.id);
+    // Mode and branch pick the folder the run works in, once, when it starts: no switching mid-run.
+    if (busy && ((patch.mode && patch.mode !== task.mode) || (patch.own_branch !== undefined && patch.own_branch !== task.own_branch))) {
+      throw new ConflictError("Mode can't change while the task runs: it chose where to work when it started. Stop it first, then change the mode.");
+    }
+    // The steps still ahead can change: the pipeline is read afresh at every stage (D364).
+    if (busy && patch.pipeline) {
+      const started = this.repo.latestRun(task.id)?.stage_index ?? -1;
+      const kept = patch.pipeline.length > started && task.pipeline.slice(0, started + 1).every((s, i) => sameStage(s, patch.pipeline![i]));
+      if (!kept) throw new ConflictError("Steps that already started can't be changed; you can change the steps after them.");
     }
     if (patch.own_branch !== undefined && patch.own_branch !== task.own_branch && (task.branch || task.worktree_path)) {
       throw new ConflictError(`This task has work on ${task.branch ?? "its worktree"}; approve or discard it before changing where it works.`);
@@ -3473,6 +3809,7 @@ export class TaskRunner {
         live: task.live,
         plan_approval: task.plan_approval,
         own_branch: task.own_branch,
+        may_ask: task.may_ask,
         status: "backlog",
       });
       ids.push(child.id);
@@ -3526,6 +3863,7 @@ export class TaskRunner {
       live: task.live,
       plan_approval: task.plan_approval,
       own_branch: task.own_branch,
+      may_ask: task.may_ask,
       status: "backlog",
     });
     this.setTask(task.id, { related_to: [...new Set([...task.related_to, created.id])].slice(0, 10) });
@@ -3577,6 +3915,14 @@ export class TaskRunner {
       if (t.plan_gate) continue; // nothing was running: the gate is durable and waits for the human
       this.repo.updateTask(t.id, { status: "failed", error: "interrupted (server restarted)" });
     }
+    // A conflict resolution cut off by the restart may have left its worktree mid-merge: put the
+    // branch back where it was before Claude touched it, exactly as a failed attempt is (D355).
+    for (const t of this.repo.listTasks()) {
+      if (!t.resolution || !["resolving", "checking", "reviewing"].includes(t.resolution.state)) continue;
+      this.repo.updateTask(t.id, { resolution: { ...t.resolution, state: "failed", error: "The board restarted while Claude was resolving this conflict.", finished_at: nowIso() } });
+      setImmediate(() => void this.abandonResolution(t).catch(() => undefined));
+    }
+    for (const p of this.repo.listProjects()) setImmediate(() => void this.refreshConflictRisk(p.id).catch(() => undefined));
     for (const t of this.repo.tasksInStatus(["queued"])) {
       // Where it was queued from lived in memory. A task with every stage already done can only have
       // been queued to run again — sent back from Review — so it starts over; "the first stage

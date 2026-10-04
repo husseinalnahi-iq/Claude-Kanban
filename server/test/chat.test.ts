@@ -1,4 +1,7 @@
 import { test } from "node:test";
+import { execFileSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import assert from "node:assert/strict";
 import { fakeQuery, setup } from "./helpers.ts";
 import { cardsLine, ChatService, CHAT_COMMAND_REFUSED, CHAT_COMMANDS_OFF, CHAT_DISALLOWED, chatPrompt, describeTool, turnContext } from "../src/engine/chat.ts";
@@ -134,7 +137,7 @@ test("chat board tools: cards land in Backlog under the project's rules; queue a
   const cards: any[] = [];
   const h = chatBoardHandlers({ repo: s.repo, bus: s.bus, runner: s.runner, scheduler }, s.project.id, null, (c) => cards.push(c));
   try {
-    const made = JSON.parse(h.createTask({ title: "Add a dark mode", spec_md: "Done when…", mode: "autonomous" }).content[0].text).created;
+    const made = JSON.parse(h.createTask({ title: "Add a dark mode", spec_md: "Done when…", mode: "autonomous", stages: [{ stage: "code" }] }).content[0].text).created;
     const t = s.repo.getTask(made.id)!;
     assert.equal(t.status, "backlog");
     assert.equal(t.mode, "supervised", "the project forbids autonomous, so the chat cannot ask for it");
@@ -523,7 +526,7 @@ test("a card made by a chat set to autonomous runs autonomous unless the message
   const chat = new ChatService({ repo: s.repo, bus: s.bus, runner: s.runner });
   try {
     const c = chat.create(s.project.id);
-    assert.equal(c.mode, "supervised", "a chat starts supervised");
+    assert.equal(c.mode, "ask", "a new chat starts on the board's default, Autonomous + asks me (D365)");
     const before = c.updated_at;
     assert.equal(chat.update(c.id, { mode: "autonomous" }).mode, "autonomous");
     assert.equal(s.repo.getChat(c.id)!.updated_at, before, "flipping the switch is not activity");
@@ -740,4 +743,100 @@ test("the chat offers its connectors switch only when a message names a system p
   assert.equal(connectedSystemIn("what is in this spreadsheet?"), null, "an attached spreadsheet is read here or by a card, not a connector");
   assert.equal(connectedSystemIn("fit a linear regression to the sales"), null, "Linear the tracker, not the maths");
   assert.equal(connectedSystemIn("zoom in on the chart"), null);
+});
+
+test("the chat shows how full its context is after each reply, not counting a helper's own, and starts again at zero on a fresh session (D360)", async () => {
+  const usage = (input: number, read: number, out: number) => ({ input_tokens: input, cache_read_input_tokens: read, cache_creation_input_tokens: 0, output_tokens: out });
+  const fn: QueryFn = (params) =>
+    (async function* () {
+      for await (const _ of params.prompt) void _;
+      yield { type: "system", subtype: "init", session_id: "ctx-s1" } as any;
+      yield { type: "assistant", session_id: "ctx-s1", message: { id: "a1", content: [{ type: "tool_use", name: "Read", input: { file_path: "x" } }], usage: usage(2_000, 18_000, 100) } } as any;
+      yield { type: "assistant", session_id: "ctx-s1", message: { id: "a2", content: [{ type: "text", text: "Here it is." }], usage: usage(1_000, 23_000, 900) } } as any;
+      yield { type: "assistant", session_id: "ctx-s1", parent_tool_use_id: "t1", message: { id: "h1", content: [{ type: "text", text: "helper" }], usage: usage(90_000, 0, 10) } } as any;
+      yield {
+        type: "result", subtype: "success", is_error: false, result: "ok", total_cost_usd: 0.01, session_id: "ctx-s1",
+        modelUsage: { "claude-sonnet-5-5": { inputTokens: 3_000, outputTokens: 1_000, contextWindow: 1_000_000 }, "claude-haiku-4-5": { inputTokens: 500, outputTokens: 50, contextWindow: 200_000 } },
+      } as any;
+    })();
+  const s = setup(fn);
+  const chat = new ChatService({ repo: s.repo, bus: s.bus, runner: s.runner });
+  try {
+    s.repo.updateSettings({
+      providers: [{ id: "zai", label: "GLM (z.ai)", kind: "anthropic-compatible", enabled: true, baseUrl: "https://api.z.ai/api/anthropic", authRef: "ZAI_API_KEY", models: [{ id: "glm-5.3", label: "GLM 5.3" }], mayEditFiles: true }],
+    });
+    const c = chat.create(s.project.id);
+    assert.equal(c.context_tokens, 0, "nothing to show before the first reply");
+
+    chat.send(c.id, "Where is the login page?");
+    await until(() => !chat.isBusy(c.id));
+    const after = s.repo.getChat(c.id)!;
+    assert.equal(after.context_tokens, 24_900, "the latest answer: what it read plus what it wrote");
+    assert.equal(after.context_window, 1_000_000, "the chat's own model's window, not a helper model's");
+    const pushed = s.seen.filter((m: WsMessage) => m.type === "chat.updated").map((m: any) => m.chat.context_tokens);
+    assert.ok(pushed.includes(24_900), "the open page is told");
+
+    chat.update(c.id, { provider: "zai", model: "glm-5.3" });
+    const moved = s.repo.getChat(c.id)!;
+    assert.deepEqual([moved.context_tokens, moved.context_window], [0, 0], "a fresh session is measured again by its first reply");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("an \"Autonomous + asks me\" card from a chat puts its question in the chat, and an answer typed there reaches the waiting run (D361)", async () => {
+  const results: any[] = [];
+  const TWO = {
+    questions: [
+      { question: "Which colour?", header: "Colour", multiSelect: false, options: [{ label: "Blue" }, { label: "Green" }] },
+      { question: "Which pages?", header: "Pages", multiSelect: true, options: [{ label: "Home" }, { label: "Shop" }] },
+    ],
+  };
+  const fn: QueryFn = (params) =>
+    (async function* () {
+      for await (const _ of params.prompt) void _;
+      yield { type: "system", subtype: "init", session_id: "s1", model: "m" } as any;
+      results.push(await params.options.canUseTool!("AskUserQuestion", TWO, { signal: new AbortController().signal, toolUseID: "tu", requestId: "rq" } as any));
+      yield { type: "result", subtype: "success", is_error: false, result: "DONE", total_cost_usd: 0, session_id: "s1", modelUsage: {} } as any;
+    })();
+  const s = setup(fn);
+  s.repo.updateSettings({ autoTriage: false });
+  const chat = new ChatService({ repo: s.repo, bus: s.bus, runner: s.runner });
+  const read = (r: { content: { text: string }[] }) => JSON.parse(r.content[0].text);
+  try {
+    // autonomous runs work in a git worktree, so the project must be a repository with a commit
+    const git = (...a: string[]) => execFileSync("git", a, { cwd: s.dir });
+    git("init", "-q", "-b", "main");
+    writeFileSync(join(s.dir, "a.txt"), "a");
+    git("add", "-A");
+    git("-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-qm", "init");
+
+    const c = chat.create(s.project.id);
+    assert.equal(chat.update(c.id, { mode: "ask" }).mode, "ask", "a chat's own switch can be set to asks me");
+    const h = chatBoardHandlers({ repo: s.repo, bus: s.bus, runner: s.runner }, s.project.id, c.id, () => {});
+    const made = read(h.createTask({ title: "Restyle", spec_md: "make it nicer", stages: [{ stage: "code" }] }));
+    assert.equal(made.created.asks_user, true, "the chat's switch made it Autonomous + asks me");
+    const t = s.repo.getTask(made.created.id)!;
+    assert.deepEqual([t.mode, t.may_ask], ["autonomous", true]);
+
+    s.runner.queueTask(t.id);
+    await until(() => s.repo.chatMessages(c.id).some((m) => m.meta.update?.kind === "asks"));
+    const asks = s.repo.chatMessages(c.id).find((m) => m.meta.update?.kind === "asks")!.meta.update!;
+    const card = s.repo.pendingApprovals(t.id)[0];
+    assert.equal(asks.approval_id, card.id, "the chat shows the very card the run waits on");
+    assert.match(asks.text, /Which colour\? \(Blue \/ Green\)\nWhich pages\? \(Home \/ Shop\)/);
+    assert.deepEqual(read(h.taskProgress({ task_id: t.id })).waiting_on_question[0].questions.map((q: any) => q.question), ["Which colour?", "Which pages?"]);
+
+    const partly = h.answerQuestion({ task_id: t.id, answer: "Blue", answers: { "Which colour?": "Blue" } }) as any;
+    assert.equal(partly.isError, true, "two questions need two answers");
+    assert.match(partly.content[0].text, /Which pages\?/);
+    assert.equal(results.length, 0, "still waiting");
+
+    read(h.answerQuestion({ task_id: t.id, answer: "-", answers: { "Which colour?": "Blue", "Which pages?": "Home, Shop" } }));
+    await until(() => results.length === 1);
+    assert.equal(results[0].behavior, "allow");
+    assert.deepEqual(results[0].updatedInput.answers, { "Which colour?": "Blue", "Which pages?": "Home, Shop" });
+  } finally {
+    s.cleanup();
+  }
 });

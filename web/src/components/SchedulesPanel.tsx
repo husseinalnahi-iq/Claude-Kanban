@@ -210,7 +210,7 @@ export function ScheduleModal({ task, onClose }: { task: Task; onClose: () => vo
     run(async () => {
       if (when.kind === "repeat") {
         await api.createSchedule({
-          project_id: task.project_id, title: task.title, spec_md: task.spec_md, mode: task.mode, type: task.type,
+          project_id: task.project_id, title: task.title, spec_md: task.spec_md, mode: task.mode, may_ask: task.may_ask, type: task.type,
           priority: task.priority, pipeline: task.pipeline, skills: task.skills, days: when.days, time: when.time,
         });
       } else {

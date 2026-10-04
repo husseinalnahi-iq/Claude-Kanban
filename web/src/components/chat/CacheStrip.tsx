@@ -5,7 +5,7 @@ import { CACHE_WARN_MIN, CACHE_WINDOW_MIN, KEEP_ALIVE_LEAD_MIN } from "../../../
 import { api } from "../../lib/api.ts";
 import { useWs, useWsReconnect } from "../../lib/ws.ts";
 import { useAppData } from "../../lib/store.tsx";
-import { clock, until } from "../../lib/format.ts";
+import { clock, tokens, until } from "../../lib/format.ts";
 import { Switch } from "../ui.tsx";
 
 /** Re-render twice a minute so the bars drain without a request. */
@@ -30,8 +30,46 @@ function useFiveHour(): UsageLimit | null {
   return limits.find((l) => l.type === "five_hour") ?? null;
 }
 
+/** From here the context bar turns amber and suggests a new chat for a new topic; red from 90%, like a card's (D360). */
+const CONTEXT_WARN_PCT = 70;
+
 /**
- * Two bars above the conversation (D331): how long this chat stays cached, and how much of your Claude
+ * How full this chat's context is (D360): the conversation, what it read and its instructions, all
+ * re-read with every message. Lavender so it stands apart from the cache bar's cyan and the 5h bar's green.
+ */
+function ContextMeter({ chat, inline = false }: { chat: Chat; inline?: boolean }) {
+  const used = chat.context_tokens ?? 0;
+  const win = chat.context_window ?? 0;
+  const pct = used && win ? Math.min(100, (used / win) * 100) : null;
+  const warn = pct !== null && pct >= CONTEXT_WARN_PCT;
+  const fill = pct === null ? "bg-ink-500" : pct >= 90 ? "bg-rust" : warn ? "bg-amber" : "bg-iris";
+  // A sliver even at 1%, so a chat that has started never reads as empty; no window known: a short stub.
+  const width = !used ? 0 : pct === null ? 8 : Math.max(3, pct);
+  const shown = !used ? "—" : `${tokens(used)}${pct === null ? "" : ` · ${pct < 1 ? "<1" : Math.round(pct)}%`}`;
+  const title = used
+    ? `This chat holds ${used.toLocaleString()} tokens${win ? ` of the ${win.toLocaleString()} its model can hold` : ""}: the conversation, the files and pages it read, and its instructions${chat.use_tools ? ", your connectors and skills" : ""}. Claude re-reads all of it with every message, so the fuller it is, the more each message uses of your limit.${warn ? " A new topic goes further in a new chat." : ""}`
+    : "How full this chat is: shown after Claude's next reply.";
+
+  return (
+    <div className={`flex items-center gap-2 ${inline ? "" : "min-w-0 flex-1"}`} title={title}>
+      <span className="shrink-0 font-mono text-[10.5px] uppercase tracking-wide text-ink-500">context</span>
+      <span className={`h-1.5 overflow-hidden rounded-full bg-ink-800 ${inline ? "w-24" : "min-w-10 flex-1"}`}>
+        <span className={`block h-full rounded-full transition-[width] duration-700 ${fill}`} style={{ width: `${width}%` }} />
+      </span>
+      <span className={`shrink-0 font-mono text-[10.5px] ${pct !== null && pct >= 90 ? "text-rust" : warn ? "text-amber" : used ? "text-ink-300" : "text-ink-500"}`}>{shown}</span>
+    </div>
+  );
+}
+
+/** The amber note under a context past 70%: one line, the way the cache warning reads. */
+function contextWarning(chat: Chat): string | null {
+  const pct = chat.context_tokens && chat.context_window ? Math.round((chat.context_tokens / chat.context_window) * 100) : null;
+  if (pct === null || pct < CONTEXT_WARN_PCT) return null;
+  return `This chat is ${Math.min(100, pct)}% full. Each message re-reads all of it, so a new topic goes further in a new chat.`;
+}
+
+/**
+ * Three bars above the conversation (D331, D360): how full this chat is, how long it stays cached, and how much of your Claude
  * 5-hour window is used, like Claude's own usage screen. Claude keeps a conversation cached for an
  * hour after its last reply; a message after that is re-read at full price. Fifteen minutes before
  * the end the bar turns amber and says so; the *Keep warm* switch sends a short message five minutes
@@ -66,7 +104,17 @@ export function CacheStrip({ chat, compact = false, inline = false }: { chat: Ch
   const fiveTone = five?.status === "rejected" || (fivePct ?? 0) >= 90 ? "bg-rust" : (fivePct ?? 0) >= 70 ? "bg-amber" : "bg-moss";
   const resets = five?.resets_at ? five.resets_at * 1000 : null;
 
-  if (!onClaude) return null; // another provider's cache is its own business: no hour to count down
+  const fullNote = contextWarning(chat);
+  // Another provider's cache is its own business: no hour to count down, but its context still fills.
+  if (!onClaude) {
+    return inline ? (
+      <ContextMeter chat={chat} inline />
+    ) : (
+      <div className={`border-b border-ink-800 ${compact ? "px-3 py-1.5" : "px-5 py-2"}`}>
+        <ContextMeter chat={chat} />
+      </div>
+    );
+  }
 
   const cacheTitle = open
     ? `Claude keeps this conversation cached for an hour after its last reply. ${Math.ceil(left!)} min left, until ${clock(Date.parse(chat.warm_at!) + CACHE_WINDOW_MIN * 60_000)}.`
@@ -82,6 +130,9 @@ export function CacheStrip({ chat, compact = false, inline = false }: { chat: Ch
   if (inline) {
     return (
       <div className="flex shrink-0 items-center gap-3">
+        {/* No pill for a full context here: with the cache's own it pushed the chat's title out. The bar turns amber and says why on hover. */}
+        <ContextMeter chat={chat} inline />
+        <span className="h-3 w-px bg-ink-700" aria-hidden />
         <div className="flex items-center gap-2" title={cacheTitle}>
           <span className="font-mono text-[10.5px] uppercase tracking-wide text-ink-500">cache</span>
           <span className="h-1.5 w-24 overflow-hidden rounded-full bg-ink-800">
@@ -110,6 +161,9 @@ export function CacheStrip({ chat, compact = false, inline = false }: { chat: Ch
   return (
     <div className={`border-b border-ink-800 ${compact ? "px-3 py-1.5" : "px-5 py-2"}`}>
       <div className={`flex items-center gap-3 ${compact ? "flex-wrap" : ""}`}>
+        {/* how full the chat is */}
+        <ContextMeter chat={chat} />
+
         {/* the chat's cache window */}
         <div className="flex min-w-0 flex-1 items-center gap-2" title={cacheTitle}>
           <span className="shrink-0 font-mono text-[10.5px] uppercase tracking-wide text-ink-500">cache</span>
@@ -151,6 +205,12 @@ export function CacheStrip({ chat, compact = false, inline = false }: { chat: Ch
             This chat's cache resets in {Math.ceil(left!)} min. Send your next idea before then, or the whole conversation is read again at full price.
             {keepOn && !chat.archived_at ? ` Keep warm is on: the board sends a short message ${KEEP_ALIVE_LEAD_MIN} minutes before the end if you have not.` : ""}
           </span>
+        </div>
+      ) : null}
+      {fullNote ? (
+        <div className="rise mt-1.5 flex items-center gap-2 rounded-md border border-amber/40 bg-amber/10 px-2.5 py-1.5 text-[12px] text-amber">
+          <span className="breathe">◕</span>
+          <span className="min-w-0 flex-1">{fullNote}</span>
         </div>
       ) : null}
     </div>

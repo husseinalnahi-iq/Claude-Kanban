@@ -124,7 +124,7 @@ function schemaFor(labelVocabulary: string[]) {
         properties: {
           stage: { type: "string", enum: ["plan", "code", "review"] },
           tier: { type: "string", enum: ["cheap", "balanced", "strong"], description: "cheap = small fast model; balanced = the everyday model; strong = the most capable and most expensive." },
-          effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max"], description: "How long it may think. `low` for mechanical work; `high` and above only where thinking actually changes the answer." },
+          effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max"], description: "How long it may think. `low` for mechanical work in a one-stage change. A pipeline with a `plan` stage runs every stage at `high` or above: `high` as the rule, `xhigh` or `max` for a stage that is genuinely hard or risky." },
         },
       },
     },
@@ -181,6 +181,7 @@ Rules:
 - If the whole change could be described in one sentence, or it lives in a single file, do not split it: return no subtasks.
 - Split only into parts that can be built and verified separately, and give each the files it will touch. Two subtasks that edit the same file must depend on each other — parallel sessions editing one file overwrite each other.
 - Choose the pipeline honestly. The strong tier and high effort cost several times what the cheap tier costs, and most tasks do not need them; a rename, a copy change, a config tweak or a small bug fix is one \`code\` stage on \`cheap\` or \`balanced\` at \`low\` effort. Spending more than the work needs is a defect, not caution.
+- Once a task needs a \`plan\` stage, every stage runs at \`high\` effort or above: \`high\` as the rule, \`xhigh\` or \`max\` for the stage that is genuinely hard (subtle logic, money, many systems that must agree). Say in \`pipeline_reason\` which stage you raised and why.
 - Size is not the only measure: a change that touches a live or production system, accounting or money, or is hard to reverse gets \`strong\` on its code stage however small it looks. A wrong ledger costs more than the tokens. Only reading one to report a value is not that: size a lookup by how hard it is to find.
 - Priority is a suggestion for the human: p0 only for "production is broken or everything is blocked". Most things are p2.
 - Be honest in \`confidence\`. A vague one-line request rarely deserves more than 0.5.`;
@@ -294,6 +295,9 @@ export async function triageTask(input: TriageInput, queryFn: QueryFn = query as
     }))
     // Whatever the model said: live-system work is never sized down on its code stage (D191).
     .map((x) => (liveChanges && x.stage === "code" ? { ...x, tier: "strong" as Tier, effort: atLeast(x.effort, "high") } : x));
+  // Work worth planning is worth thinking through at every step: high is the floor there, and the
+  // user raises or lowers it on the setup card before anything runs (D366).
+  if (stages.some((x) => x.stage === "plan")) stages.forEach((x) => (x.effort = atLeast(x.effort, "high")));
   // A pipeline with no code stage would never change anything, whatever the model said.
   // The model's reason was written for the tier it picked; say when the board overrode it, so the
   // card does not read "balanced tier" next to a strong model.

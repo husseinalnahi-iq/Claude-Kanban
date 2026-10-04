@@ -1,3 +1,4 @@
+import { StepMark } from "../components/Checklist.tsx";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import type { Attachment, Chat, ChatFile, ChatFolder, ChatMessage, EventRow, FolderColor, TaskCard } from "../../../server/src/types.ts";
 import { FOLDER_COLORS, attachmentKind } from "../../../server/src/types.ts";
@@ -9,6 +10,7 @@ import { useWs } from "../lib/ws.ts";
 import { ago, cost, modelLabel } from "../lib/format.ts";
 import { isQuestion } from "../lib/questions.ts";
 import { waitingOn } from "../lib/phase.ts";
+import { chatSignal, MOVING, NEEDS_YOU, type Signal, type SignalKind } from "../lib/chatSignal.ts";
 import { useAsk } from "../components/Ask.tsx";
 import { ArchiveIcon, Button, Empty, ErrorLine, FolderIcon, OpenIcon, PencilIcon, RestoreIcon, Select, StageDots, TrashIcon, inputCls, useAction, useEscape } from "../components/ui.tsx";
 import { inputSummary } from "../components/Transcript.tsx";
@@ -32,10 +34,52 @@ const IN_PROGRESS = new Set(["queued", "approval", "planning", "running", "pause
 type GroupBy = "folders" | "status";
 const GROUP_KEY = "kanban.studio.groupBy";
 
-/** What each chat's cards are up to, so the list can say "working" or "needs you" without opening it. */
-interface ChatState {
-  working: number;
-  needsYou: number;
+/** How each chat light looks. Lit ones want you and glow; working pulses in grey; the rest sit still. */
+const SIGNAL_STYLE: Record<SignalKind, { dot: string; text: string; motion?: "beacon" | "ping" }> = {
+  question: { dot: "bg-bulb text-bulb", text: "text-bulb", motion: "beacon" },
+  permission: { dot: "bg-ember text-ember", text: "text-ember", motion: "beacon" },
+  plan: { dot: "bg-azure text-azure", text: "text-azure", motion: "beacon" },
+  failed: { dot: "bg-scarlet", text: "text-scarlet" },
+  conflict: { dot: "border-[1.5px] border-ember", text: "text-ember" },
+  working: { dot: "bg-ink-300", text: "text-ink-300", motion: "ping" },
+  paused: { dot: "", text: "text-ink-400" },
+  queued: { dot: "border-[1.5px] border-ink-500", text: "text-ink-400" },
+  review: { dot: "bg-lime", text: "text-lime" },
+  merged: { dot: "", text: "text-grape" },
+  done: { dot: "bg-moss", text: "text-moss" },
+  backlog: { dot: "border border-dashed border-ink-500", text: "text-ink-500" },
+};
+
+/** A chat's light, in a fixed slot so every title in the list starts at the same place. */
+function SignalDot({ signal }: { signal: Signal | null }) {
+  const slot = "relative flex h-2.5 w-2.5 shrink-0 items-center justify-center";
+  if (!signal) return <span className={slot} />;
+  const st = SIGNAL_STYLE[signal.kind];
+  const title = signal.count > 1 ? `${signal.title} (${signal.count} tasks)` : signal.title;
+  if (signal.kind === "merged") {
+    // The merge glyph people know from git hosts: two branches joining into one.
+    return (
+      <span className={`${slot} text-grape`} title={title} role="img" aria-label={signal.label}>
+        <svg viewBox="0 0 16 16" className="h-2.5 w-2.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+          <circle cx="4" cy="3" r="1.6" /><circle cx="4" cy="13" r="1.6" /><circle cx="12" cy="9" r="1.6" />
+          <path d="M4 4.6v6.8M4 4.6c0 3 2.5 4.4 6.4 4.4" />
+        </svg>
+      </span>
+    );
+  }
+  if (signal.kind === "paused") {
+    return (
+      <span className={`${slot} gap-px`} title={title} role="img" aria-label={signal.label}>
+        <span className="h-2 w-[2.5px] rounded-sm bg-ink-400" /><span className="h-2 w-[2.5px] rounded-sm bg-ink-400" />
+      </span>
+    );
+  }
+  return (
+    <span className={slot} title={title} role="img" aria-label={signal.label}>
+      {st.motion === "ping" ? <span className={`kb-ping absolute h-2 w-2 rounded-full ${st.dot}`} /> : null}
+      <span className={`relative h-2 w-2 rounded-full ${st.dot} ${st.motion === "beacon" ? "kb-beacon" : ""}`} />
+    </span>
+  );
 }
 
 const bytes = (n: number) => (n >= 1_048_576 ? `${(n / 1_048_576).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`);
@@ -131,18 +175,17 @@ function StudioBody({ project, projects, onAddProject }: { project: ProjectWithG
     if (chats && chatId === undefined) setChatId(chats.find((c) => !c.archived_at)?.id ?? null);
   }, [chats, chatId]);
 
-  // Per chat: how many of its cards are on their way, and how many wait for you.
-  const states = useMemo(() => {
-    const m = new Map<string, ChatState>();
-    for (const c of cards) {
-      if (!c.chat_id || c.archived_at) continue;
-      const s = m.get(c.chat_id) ?? { working: 0, needsYou: 0 };
-      if (IN_PROGRESS.has(c.status)) s.working++;
-      s.needsYou += pending.filter((a) => a.task_id === c.id).length;
-      m.set(c.chat_id, s);
+  // Per chat: the light its row shows, so the list says what each one is up to without opening it.
+  const signals = useMemo(() => {
+    const byChat = new Map<string, TaskCard[]>();
+    for (const c of cards) if (c.chat_id && !c.archived_at) byChat.set(c.chat_id, [...(byChat.get(c.chat_id) ?? []), c]);
+    const m = new Map<string, Signal>();
+    for (const chat of chats ?? []) {
+      const s = chatSignal(byChat.get(chat.id) ?? [], pending, !!chat.busy);
+      if (s) m.set(chat.id, s);
     }
     return m;
-  }, [cards, pending]);
+  }, [chats, cards, pending]);
 
   const onMessages = useCallback((m: ChatMessage[]) => setMessages(m), []);
   // Both side columns are dragged by their inner edge and remembered on this computer.
@@ -156,7 +199,7 @@ function StudioBody({ project, projects, onAddProject }: { project: ProjectWithG
         projects={projects}
         chats={chats}
         folders={folders}
-        states={states}
+        signals={signals}
         chatId={chatId ?? null}
         onPick={setChatId}
         onAddProject={onAddProject}
@@ -292,13 +335,13 @@ type Pop = { kind: "folder"; id: string } | { kind: "color"; id: string } | { ki
 const DRAG_TYPE = "text/chat-ids";
 
 function ChatList({
-  project, projects, chats, folders, states, chatId, onPick, onAddProject, width,
+  project, projects, chats, folders, signals, chatId, onPick, onAddProject, width,
 }: {
   project: ProjectWithGit;
   projects: ProjectWithGit[];
   chats: Chat[] | null;
   folders: ChatFolder[];
-  states: Map<string, ChatState>;
+  signals: Map<string, Signal>;
   chatId: string | null;
   onPick: (id: string | null) => void;
   onAddProject: () => void;
@@ -451,7 +494,7 @@ function ChatList({
 
   const row = (c: Chat) => {
     shown.push(c.id);
-    const s = states.get(c.id);
+    const s = signals.get(c.id);
     const active = c.id === chatId;
     const picking = pop?.kind === "folder" && pop.id === c.id;
     const checked = selected.has(c.id);
@@ -468,12 +511,12 @@ function ChatList({
       >
         <button className="block w-full min-w-0 cursor-pointer py-1.5 pr-2 pl-6 text-left" onClick={(e) => pick(c, e)} onDoubleClick={() => void rename(c)} title="Double-click to rename · Ctrl-click to select several · drag into a folder">
           <div className="flex items-center gap-1.5">
-            {c.busy ? <span className="breathe h-1.5 w-1.5 shrink-0 rounded-full bg-amber" title="Writing a reply" /> : null}
+            <SignalDot signal={s ?? null} />
             <span className={`truncate text-[12px] leading-snug ${c.archived_at ? "text-ink-500" : active || checked ? "text-ink-100" : "text-ink-300"}`}>{c.title}</span>
           </div>
           <div className="flex items-center gap-1.5 font-mono text-[10px] text-ink-500">
             <span>{ago(c.updated_at)} · {cost(c.cost_usd)}</span>
-            {s?.needsYou ? <span className="text-rose">{s.needsYou} waiting on you</span> : s?.working ? <span className="text-amber">{s.working} working</span> : null}
+            {s ? <span className={`truncate ${SIGNAL_STYLE[s.kind].text}`}>{s.count > 1 ? `${s.count} ` : ""}{s.label}</span> : null}
           </div>
         </button>
         {/* The tick box sits where the row's padding is; it shows on hover, and stays once ticked. */}
@@ -570,8 +613,9 @@ function ChatList({
 
   let groups: ReactElement[];
   if (groupBy === "status") {
-    const needsYou = open.filter((c) => (states.get(c.id)?.needsYou ?? 0) > 0);
-    const working = open.filter((c) => !needsYou.includes(c) && (c.busy || (states.get(c.id)?.working ?? 0) > 0));
+    const inSet = (set: Set<SignalKind>) => open.filter((c) => { const k = signals.get(c.id)?.kind; return k !== undefined && set.has(k); });
+    const needsYou = inSet(NEEDS_YOU);
+    const working = inSet(MOVING);
     const quiet = open.filter((c) => !needsYou.includes(c) && !working.includes(c));
     groups = [
       group("needs-you", "Needs you", needsYou, { tone: needsYou.length ? "text-rose" : "" }),
@@ -943,7 +987,7 @@ function WorkCard({ card, byId, now, children }: { card: TaskCard; byId: Map<str
               {steps.map((x) => (
                 <li key={x.id} className={`flex items-start gap-2 text-[12px] leading-snug ${x.status === "completed" ? "text-ink-500" : x.status === "in_progress" ? "text-ink-100" : "text-ink-300"}`}>
                   <span className={`mt-px w-3.5 shrink-0 text-center ${x.status === "completed" ? "text-moss" : x.status === "in_progress" ? "text-amber" : "text-ink-600"}`}>
-                    {x.status === "completed" ? "✓" : x.status === "in_progress" ? <span className={live ? "breathe" : ""}>▸</span> : "○"}
+                    <StepMark status={x.status} live={live} />
                   </span>
                   <span className={x.status === "completed" ? "line-through decoration-ink-600" : ""}>{x.status === "in_progress" && x.doing ? x.doing : x.text}</span>
                 </li>
@@ -984,7 +1028,8 @@ function WorkCard({ card, byId, now, children }: { card: TaskCard; byId: Map<str
           {card.status === "failed" ? <div className="line-clamp-3 font-mono text-[11px] text-rust">{card.blocked?.reason ?? card.error ?? "It stopped."}</div> : null}
           {card.status === "review" ? <div className="text-[11.5px] text-ink-400">Ready for your review: open it to look at the work and approve it.</div> : null}
           <div className="flex items-center justify-end gap-1.5">
-            {card.status === "backlog" ? <Button size="sm" variant="go" busy={busy} title="Queue it now" onClick={() => run(() => api.queue(card.id))}>▶ Start</Button> : null}
+            {card.status === "backlog" && card.setup_pending ? <Button size="sm" variant="go" title="See its mode and models, then press Start there" onClick={() => navigate({ taskId: card.id })}>Check setup</Button> : null}
+            {card.status === "backlog" && !card.setup_pending ? <Button size="sm" variant="go" busy={busy} title="Queue it now" onClick={() => run(() => api.queue(card.id))}>▶ Start</Button> : null}
             {IN_PROGRESS.has(card.status) ? <Button size="sm" variant="ghost" busy={busy} onClick={() => run(() => api.stop(card.id))}>stop</Button> : null}
             {card.status === "failed" && !needsSwitch ? <Button size="sm" busy={busy} title="Carry on from the stage that failed" onClick={() => run(() => api.retry(card.id))}>Retry</Button> : null}
             <Button size="sm" onClick={() => navigate({ taskId: card.id })}>open</Button>

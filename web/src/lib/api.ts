@@ -1,7 +1,7 @@
 import type { TaskCommand } from "../../../server/src/engine/commands.ts";
 import type {
   ImageStatus,
-  Approval, Attachment, DiffFile, EventRow, FastModeStatus, Message, MergePolicy, Milestone, Mode, Note, Policy, Project, ProjectEnv, Run, RunListItem, SessionTools, Settings, SkillInfo, Stage, Task, TaskCard, UsageLimit,
+  Approval, Attachment, DiffFile, EventRow, FastModeStatus, Message, MergePolicy, Milestone, Mode, Note, RunStyle, Policy, Project, ProjectEnv, Run, RunListItem, SessionTools, Settings, SkillInfo, Stage, Task, TaskCard, UsageLimit,
   Provider, ProviderTestResult, SetupCheckResult, ModelCatalogResult, Schedule, Chat, ChatFile, ChatFolder, ChatMessage, Effort, ClaudeModelsResult, SpecVersion,
   ProviderUsage, ProviderOut, WsMessage, SuggestedSkill, FolderColor } from "../../../server/src/types.ts";
 import type { ProviderPreset } from "../../../server/src/engine/providers/presets.ts";
@@ -25,7 +25,7 @@ export interface SuggestedList {
 }
 export type { TerminalInfo } from "../../../server/src/terminal.ts";
 import type { TerminalInfo } from "../../../server/src/terminal.ts";
-export type ScheduleBody = Partial<Pick<Schedule, "spec_md" | "mode" | "type" | "priority" | "pipeline" | "skills" | "enabled">> &
+export type ScheduleBody = Partial<Pick<Schedule, "spec_md" | "mode" | "may_ask" | "type" | "priority" | "pipeline" | "skills" | "enabled">> &
   Pick<Schedule, "title" | "days" | "time">;
 /** What is in a folder before it is registered: nothing, code, or no folder at all. */
 export type FolderProbe = { path: string; kind: "empty" | "code" | "missing"; hasClaudeMd: boolean };
@@ -129,11 +129,11 @@ export const api = {
 
   tasks: (projectId: string) => req<TaskCard[]>("GET", `/tasks?project=${encodeURIComponent(projectId)}`),
   task: (id: string) => req<TaskDetail>("GET", `/tasks/${id}`),
-  createTask: (b: { project_id: string; title: string; spec_md?: string; mode?: Mode; pipeline?: Stage[]; parent_id?: string | null; milestone_id?: string | null; skills?: string[]; live?: boolean; plan_approval?: boolean | null; own_branch?: boolean; depends_on?: string[] }) =>
+  createTask: (b: { project_id: string; title: string; spec_md?: string; mode?: Mode; pipeline?: Stage[]; parent_id?: string | null; milestone_id?: string | null; skills?: string[]; live?: boolean; plan_approval?: boolean | null; own_branch?: boolean; may_ask?: boolean; depends_on?: string[] }) =>
     req<Task>("POST", "/tasks", b),
   patchTask: (
     id: string,
-    b: Partial<Pick<Task, "title" | "spec_md" | "mode" | "pipeline" | "milestone_id" | "skills" | "position" | "parent_id" | "type" | "priority" | "labels" | "depends_on" | "auto_queue_children" | "suggestion" | "live" | "plan_approval" | "own_branch">>,
+    b: Partial<Pick<Task, "title" | "spec_md" | "mode" | "pipeline" | "milestone_id" | "skills" | "position" | "parent_id" | "type" | "priority" | "labels" | "depends_on" | "auto_queue_children" | "suggestion" | "live" | "plan_approval" | "own_branch" | "may_ask">>,
   ) =>
     req<Task>("PATCH", `/tasks/${id}`, b),
   deleteTask: (id: string) => req<{ ok: true }>("DELETE", `/tasks/${id}`),
@@ -151,7 +151,7 @@ export const api = {
 
   chats: (projectId: string) => req<Chat[]>("GET", `/projects/${projectId}/chats`),
   createChat: (projectId: string) => req<Chat>("POST", `/projects/${projectId}/chats`, {}),
-  patchChat: (id: string, b: { title?: string; model?: string; effort?: Effort; provider?: string; archived?: boolean; folder_id?: string | null; keep_alive?: boolean; use_tools?: boolean; mode?: Mode }) => req<Chat>("PATCH", `/chats/${id}`, b),
+  patchChat: (id: string, b: { title?: string; model?: string; effort?: Effort; provider?: string; archived?: boolean; folder_id?: string | null; keep_alive?: boolean; use_tools?: boolean; mode?: RunStyle }) => req<Chat>("PATCH", `/chats/${id}`, b),
   suggestNext: (id: string) => req<ChatMessage>("POST", `/chats/${id}/suggest`, {}),
   chatFiles: (id: string) => req<ChatFile[]>("GET", `/chats/${id}/files`),
   addChatFile: (id: string, b: { name: string; data: string }) => req<ChatFile>("POST", `/chats/${id}/files`, b),
@@ -168,10 +168,12 @@ export const api = {
   sendChat: (id: string, text: string) => req<ChatMessage>("POST", `/chats/${id}/send`, { text }),
   stopChat: (id: string) => req<{ stopped: boolean }>("POST", `/chats/${id}/stop`),
   /** `force` starts the task beside whatever is running, outside the concurrency caps. */
-  queue: (id: string, force?: boolean) => req<Task>("POST", `/tasks/${id}/queue`, { force }),
+  /** `confirmSetup`: Start pressed on the setup card, where its mode and models were shown (D365). */
+  queue: (id: string, force?: boolean, confirmSetup?: boolean) => req<Task>("POST", `/tasks/${id}/queue`, { force, confirm_setup: confirmSetup || undefined }),
   retry: (id: string, stage_index?: number, force?: boolean) => req<Task>("POST", `/tasks/${id}/retry`, { stage_index, force }),
   stop: (id: string) => req<Task>("POST", `/tasks/${id}/stop`),
   approve: (id: string) => req<Task>("POST", `/tasks/${id}/approve`),
+  resolveConflict: (id: string) => req<Task>("POST", `/tasks/${id}/resolve`),
   reject: (id: string, note: string | null) => req<Task>("POST", `/tasks/${id}/reject`, { note }),
   discard: (id: string) => req<Task>("POST", `/tasks/${id}/discard`),
   escalate: (id: string) => req<Task>("POST", `/tasks/${id}/escalate`),

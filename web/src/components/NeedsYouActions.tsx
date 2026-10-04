@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api, ApiError } from "../lib/api.ts";
 import { openTask, resolveNeed, type Alert, type Outcome } from "../lib/alerts.ts";
-import { isQuestion } from "../lib/questions.ts";
+import { isQuestion, questionsOf } from "../lib/questions.ts";
 import { riskOf } from "./CredentialWarning.tsx";
 
 export const OUTCOME_TEXT: Record<Outcome, { text: string; color: string }> = {
@@ -16,7 +16,8 @@ const btn = "rounded-md px-2.5 py-1 text-[11.5px] font-semibold transition-color
 
 /**
  * What you can do about a "needs you" alert without leaving where you are: Allow or Deny a tool
- * card, or open the task for anything that needs more than a yes (a question, a cost pause). A card
+ * card, pick the answer to a one-question card, or open the task for anything that needs more than a
+ * click (several questions, ticking several options, your own words, a cost pause). A card
  * that would print credentials is never allowed from here — it needs a look at the full card first,
  * the same rule as the Approvals tab's `y` key (D280).
  */
@@ -24,6 +25,24 @@ export function NeedsYouActions({ a }: { a: Alert }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const card = a.approval && !isQuestion(a.approval) ? a.approval : null;
+  // One question with one answer to pick is a click from here; anything more is the full card (D361).
+  const qs = a.approval && isQuestion(a.approval) ? questionsOf(a.approval) : [];
+  const quick = qs.length === 1 && !qs[0].multiSelect && qs[0].options.length ? qs[0] : null;
+
+  const answer = async (label: string) => {
+    if (!a.approval || !quick || !a.key) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.answer(a.approval.id, { [quick.question]: label });
+      resolveNeed(a.key, "answered");
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) resolveNeed(a.key, "handled");
+      else setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const decide = async (decision: "allow" | "deny") => {
     if (!card || !a.key) return;
@@ -48,7 +67,7 @@ export function NeedsYouActions({ a }: { a: Alert }) {
   };
   const open = (
     <button className={`${btn} border border-ink-600 text-ink-200 hover:border-ink-400 hover:text-ink-100`} onClick={stop(() => openTask(a))}>
-      {card ? "Review" : a.approval || a.key?.startsWith("question:") ? "Answer" : "Open"}
+      {card ? "Review" : quick ? "Type an answer…" : a.approval || a.key?.startsWith("question:") ? "Answer" : "Open"}
     </button>
   );
 
@@ -69,6 +88,21 @@ export function NeedsYouActions({ a }: { a: Alert }) {
               Allow
             </button>
           )}
+        </>
+      ) : quick ? (
+        <>
+          {quick.options.slice(0, 4).map((o) => (
+            <button
+              key={o.label}
+              className={`${btn} border border-iris/50 text-iris hover:bg-iris/10`}
+              disabled={busy}
+              title={o.description ? `${o.label}: ${o.description}` : o.label}
+              onClick={stop(() => void answer(o.label))}
+            >
+              {o.label}
+            </button>
+          ))}
+          {open}
         </>
       ) : (
         open

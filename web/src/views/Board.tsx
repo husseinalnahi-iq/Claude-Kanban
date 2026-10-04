@@ -122,7 +122,7 @@ const Card = memo(function Card({
       tabIndex={0}
       aria-label={`Open task: ${card.title}`}
       onKeyDown={(e) => e.key === "Enter" && e.target === e.currentTarget && navigate({ taskId: card.id })}
-      className={`rise group relative cursor-pointer rounded-lg border bg-ink-850 px-3 py-2.5 transition-colors hover:border-ink-500 hover:bg-ink-800 focus-visible:border-amber focus-visible:outline-none ${
+      className={`rise group relative cursor-pointer rounded-lg border bg-ink-850 px-2.5 py-2 transition-colors hover:border-ink-500 hover:bg-ink-800 focus-visible:border-amber focus-visible:outline-none ${
         card.status === "approval" ? "border-rose/60" : live ? "border-amber/40" : "border-ink-700"
       } ${card.archived_at ? "opacity-55 hover:opacity-100" : ""}`}
     >
@@ -148,8 +148,18 @@ const Card = memo(function Card({
             {card.questions.filter((q) => !q.answer).length} question{card.questions.filter((q) => !q.answer).length === 1 ? "" : "s"} for you
           </Chip>
         ) : null}
+        {card.setup_pending && card.status === "backlog" ? (
+          <Chip className="border-amber/60 font-semibold text-amber" title="It waits for you to check its mode and models and press Start — open the task">check setup</Chip>
+        ) : null}
         {card.blocked && card.status === "failed" ? (
           <Chip className="border-rose/60 font-semibold text-rose" title={`${card.blocked.reason} — open the task`}>blocked · needs you</Chip>
+        ) : null}
+        {card.resolution && ["resolving", "checking", "reviewing"].includes(card.resolution.state) ? (
+          <Chip className="border-amber/60 font-semibold text-amber" title={`Claude is combining this task with what landed on ${card.resolution.base} meanwhile`}>resolving conflict</Chip>
+        ) : card.resolution?.state === "failed" && card.status === "review" ? (
+          <Chip className="border-rose/60 font-semibold text-rose" title={`${card.resolution.error ?? "The conflict could not be resolved safely"} — open the task`}>conflict · needs you</Chip>
+        ) : card.conflict_risk && card.status !== "done" ? (
+          <Chip className="border-amber/60 text-amber" title={`Would conflict with ${card.conflict_risk.base} in ${card.conflict_risk.files.join(", ")} — open the task to have Claude fix it now`}>will conflict</Chip>
         ) : null}
         {watching ? (
           <button
@@ -181,11 +191,11 @@ const Card = memo(function Card({
         ) : null}
         <span className="ml-auto flex items-center gap-1">
           {card.live ? <Chip className="border-rose/50 text-rose" title="Touches a live system: plan approval is on and review runs on the live review model">prod</Chip> : null}
-          <ModeChip mode={card.mode} ownBranch={card.own_branch} lookup={isAnswerPipeline(card.pipeline)} />
+          <ModeChip mode={card.mode} ownBranch={card.own_branch} lookup={isAnswerPipeline(card.pipeline)} mayAsk={card.may_ask} />
         </span>
       </div>
-      <div className="text-[13px] font-medium leading-snug text-ink-100">{card.title}</div>
-      {card.summary ? <div className="mt-1.5 line-clamp-2 text-[12px] leading-snug text-ink-300">{card.summary}</div> : null}
+      <div className="text-[12px] font-medium leading-snug text-ink-100">{card.title}</div>
+      {card.summary ? <div className="mt-1.5 line-clamp-2 text-[11px] leading-snug text-ink-300">{card.summary}</div> : null}
       {/* Queued before what it needs was done: it starts by itself once that is (D289). */}
       {waiting?.length && (card.status === "queued" || card.status === "backlog") ? (
         <div className={`mt-1.5 line-clamp-2 text-[11.5px] ${waiting.some((w) => w.status === "failed") ? "text-rust" : card.status === "queued" ? "text-slate" : "text-ink-400"}`}>
@@ -262,7 +272,7 @@ const Card = memo(function Card({
           </button>
         </div>
       ) : null}
-      <div className="relative mt-2.5 flex items-center gap-2.5">
+      <div className="relative mt-2 flex items-center gap-2">
         {/* The stage chips get the row. The hover actions sit over its right end and do not take space
             while hidden: laid out beside the chips, the invisible buttons squeezed them to one letter. */}
         <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
@@ -274,11 +284,12 @@ const Card = memo(function Card({
             <>
               <button
                 className="rounded border border-ink-600 px-1.5 py-px font-mono text-[10.5px] text-ink-300 hover:border-amber hover:text-amber cursor-pointer"
-                onClick={(e) => act(e, () => (card.status === "failed" ? api.retry(card.id) : api.queue(card.id)))}
+                onClick={(e) => (card.setup_pending && card.status === "backlog" ? (e.stopPropagation(), navigate({ taskId: card.id })) : act(e, () => (card.status === "failed" ? api.retry(card.id) : api.queue(card.id))))}
+                title={card.setup_pending && card.status === "backlog" ? "Check its mode and models first, then press Start" : undefined}
               >
-                {card.status === "failed" ? "retry" : "queue"}
+                {card.status === "failed" ? "retry" : card.setup_pending ? "check setup" : "queue"}
               </button>
-              {serial ? (
+              {serial && !card.setup_pending ? (
                 <button
                   className="rounded border border-ink-600 px-1.5 py-px font-mono text-[10.5px] text-ink-300 hover:border-cyan hover:text-cyan cursor-pointer"
                   title="Start it now, beside whatever is already running, instead of waiting its turn"
@@ -394,7 +405,9 @@ export function Board({ project }: { project: ProjectWithGit }) {
     const from = e.dataTransfer.getData("text/task-status");
     if (!id || from === status) return;
     try {
-      if (from === "backlog" && status === "queued") await api.queue(id);
+      // A card waiting on its setup opens on it instead: its mode and models are confirmed first (D365).
+      if (from === "backlog" && status === "queued" && cards.find((c) => c.id === id)?.setup_pending) navigate({ taskId: id });
+      else if (from === "backlog" && status === "queued") await api.queue(id);
       else if (from === "queued" && status === "backlog") await api.stop(id);
     } catch (err) {
       setDragError(err instanceof Error ? err.message : String(err));
@@ -405,7 +418,7 @@ export function Board({ project }: { project: ProjectWithGit }) {
     <div className="flex h-full min-h-0 flex-col">
       <header className="flex flex-wrap items-center gap-3 border-b border-ink-800 px-6 py-3.5">
         <div className="min-w-0">
-          <h1 className="text-[17px] font-semibold tracking-tight text-ink-100">{project.name}</h1>
+          <h1 className="text-[15px] font-semibold tracking-tight text-ink-100">{project.name}</h1>
           <div className="truncate font-mono text-[11px] text-ink-500">{project.path}</div>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
@@ -436,16 +449,16 @@ export function Board({ project }: { project: ProjectWithGit }) {
       <LimitBanner />
       <div className="flex flex-wrap items-center gap-2 border-b border-ink-800 px-6 py-2">
         <input className={`${inputCls} max-w-[220px]`} placeholder="Filter tasks…" value={filter.q} onChange={(e) => setFilter({ ...filter, q: e.target.value })} />
-        <Select className="font-mono text-[12px]" aria-label="Filter by type" value={filter.type} onChange={(e) => setFilter({ ...filter, type: e.target.value })}>
+        <Select className="font-mono text-[11px]" aria-label="Filter by type" value={filter.type} onChange={(e) => setFilter({ ...filter, type: e.target.value })}>
           <option value="">any type</option>
           {Object.keys(TYPE_META).map((t) => <option key={t} value={t}>{t}</option>)}
         </Select>
-        <Select className="font-mono text-[12px]" aria-label="Filter by priority" value={filter.priority} onChange={(e) => setFilter({ ...filter, priority: e.target.value })}>
+        <Select className="font-mono text-[11px]" aria-label="Filter by priority" value={filter.priority} onChange={(e) => setFilter({ ...filter, priority: e.target.value })}>
           <option value="">any priority</option>
           {(Object.keys(PRIORITY_META) as (keyof typeof PRIORITY_META)[]).map((p) => <option key={p} value={p}>{PRIORITY_META[p].short}</option>)}
         </Select>
         {labels.length ? (
-          <Select className="font-mono text-[12px]" aria-label="Filter by label" value={filter.label} onChange={(e) => setFilter({ ...filter, label: e.target.value })}>
+          <Select className="font-mono text-[11px]" aria-label="Filter by label" value={filter.label} onChange={(e) => setFilter({ ...filter, label: e.target.value })}>
             <option value="">any label</option>
             {labels.map((l) => <option key={l} value={l}>{l}</option>)}
           </Select>
@@ -490,7 +503,7 @@ export function Board({ project }: { project: ProjectWithGit }) {
         </div>
       </div>
       {dragError ? (
-        <div className="mx-6 mt-3 flex items-center justify-between rounded-md border border-rust/40 bg-rust/10 px-3 py-2 text-[12.5px] text-rust">
+        <div className="mx-6 mt-3 flex items-center justify-between rounded-md border border-rust/40 bg-rust/10 px-3 py-2 text-[11.5px] text-rust">
           {dragError}
           <button className="cursor-pointer text-rust/70 hover:text-rust" onClick={() => setDragError(null)} aria-label="Dismiss">×</button>
         </div>
@@ -499,7 +512,7 @@ export function Board({ project }: { project: ProjectWithGit }) {
         graphTasks.length ? (
           <DepGraph tasks={graphTasks} />
         ) : (
-          <div className="mx-auto mt-20 max-w-md px-6 text-center text-[12.5px] text-ink-500">
+          <div className="mx-auto mt-20 max-w-md px-6 text-center text-[11.5px] text-ink-500">
             No linked tasks yet. Open a task and press <span className="font-mono text-cyan">Improve</span> to split it into subtasks with dependencies, or tick “show unlinked” and drag one card onto another.
           </div>
         )
@@ -524,7 +537,7 @@ export function Board({ project }: { project: ProjectWithGit }) {
                 columns === "fill" ? "min-w-[188px] flex-1" : "shrink-0"
               } ${dropTarget === status ? "border-amber/60 bg-amber/5" : "border-ink-800"}`}
             >
-              <div className={`flex items-center gap-2 border-t-2 ${meta.color} rounded-t-xl px-3 py-2.5`}>
+              <div className={`flex items-center gap-2 border-t-2 ${meta.color} rounded-t-xl px-3 py-2`}>
                 <span className={`h-1.5 w-1.5 rounded-full ${meta.dot}`} />
                 <span className={`text-[11.5px] font-semibold uppercase tracking-[0.08em] ${meta.text}`}>{meta.label}</span>
                 <span className="font-mono text-[11px] text-ink-500">{list.length}</span>
@@ -541,7 +554,7 @@ export function Board({ project }: { project: ProjectWithGit }) {
                   </button>
                 ) : null}
               </div>
-              <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-3">
+              <div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto px-2 pb-3">
                 {list.map((c) => (
                   <Card
                     key={c.id}

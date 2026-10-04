@@ -31,7 +31,7 @@ export async function chatRoutes(app: FastifyInstance, { repo, runner, chat }: A
         folder_id: z.string().trim().min(1).max(64).nullable().optional(),
         keep_alive: z.boolean().optional(),
         use_tools: z.boolean().optional(),
-        mode: z.enum(["supervised", "autonomous"]).optional(),
+        mode: z.enum(["supervised", "autonomous", "ask"]).optional(),
       })
       .parse(req.body);
     return chat.update(idOf(req), body as never);

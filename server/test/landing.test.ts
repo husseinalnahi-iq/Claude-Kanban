@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { addWorktree, aheadBehind, commitAll, isDirty, mergeTask, removeWorktree, updateFromBase } from "../src/git/worktree.ts";
+import { addWorktree, aheadBehind, checkResolution, commitAll, finishResolveMerge, headSha, isDirty, landedSince, mergeTask, previewMerge, removeWorktree, revParse, rollbackResolution, startResolveMerge, updateFromBase } from "../src/git/worktree.ts";
 import { openDb } from "../src/db.ts";
 import { Repo } from "../src/repo.ts";
 import { Bus } from "../src/bus.ts";
@@ -162,6 +162,36 @@ test("Approve lands a squash and clears its branch, which git itself still calls
   }
 });
 
+test("Approve records when a branch was merged; a task finished without one, or taken back out of done, is not merged", async () => {
+  const dir = makeRepo({ "a.txt": "one\n" });
+  try {
+    const repo = new Repo(openDb(":memory:"));
+    const bus = new Bus();
+    const project = repo.createProject({ name: "merges", path: dir, policy: { worktrees: "allowed", autonomous: "allowed", maxConcurrent: 3 }, merge: DEFAULT_MERGE });
+    const runner = new TaskRunner({ repo, bus, queryFn: () => (async function* () {})() });
+    const pipeline = [{ stage: "code" as const, model: "m", effort: "low" as const }];
+
+    const branched = repo.createTask({ project_id: project.id, title: "merge me", mode: "autonomous", pipeline });
+    const wt = await addWorktree(dir, branched.id);
+    writeFileSync(join(wt.path, "a.txt"), "two\n");
+    await commitAll(wt.path, "task work");
+    repo.updateTask(branched.id, { status: "review", branch: wt.branch, worktree_path: wt.path, base_sha: wt.baseSha });
+    const merged = await runner.approveTask(branched.id);
+    assert.equal(merged.status, "done");
+    assert.ok(merged.merged_at, "the Studio shows a merge icon from this");
+
+    const plain = repo.createTask({ project_id: project.id, title: "nothing to merge", mode: "supervised", pipeline });
+    repo.updateTask(plain.id, { status: "review" });
+    const finished = await runner.approveTask(plain.id);
+    assert.equal(finished.status, "done");
+    assert.equal(finished.merged_at, null, "done, but there was no branch to merge");
+
+    assert.equal(repo.updateTask(merged.id, { status: "backlog" }).merged_at, null, "reopened work is not merged work");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("updating when nothing has landed is a no-op", async () => {
   const repo = makeRepo();
   try {
@@ -171,5 +201,161 @@ test("updating when nothing has landed is a no-op", async () => {
     await removeWorktree(repo, "t_noop", { deleteBranch: "force" });
   } finally {
     rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("a merge can be previewed without touching either checkout: clean, or naming the files that would conflict", async () => {
+  const repo = makeRepo({ "a.txt": "one\n", "b.txt": "one\n" });
+  try {
+    const wt = await addWorktree(repo, "t_preview");
+    writeFileSync(join(wt.path, "a.txt"), "the task's version\n");
+    await commitAll(wt.path, "task work");
+
+    landOnMain(repo, "b.txt", "main changed b\n", "another file");
+    const clean = await previewMerge(wt.path, wt.branch, "main");
+    assert.deepEqual({ clean: clean.clean, conflicts: clean.conflicts }, { clean: true, conflicts: [] });
+    assert.match(clean.tree, /^[0-9a-f]{40,64}$/);
+
+    landOnMain(repo, "a.txt", "main's version\n", "same line");
+    const head = git(wt.path, "rev-parse", "HEAD");
+    const clash = await previewMerge(wt.path, wt.branch, "main");
+    assert.deepEqual({ clean: clash.clean, conflicts: clash.conflicts }, { clean: false, conflicts: ["a.txt"] });
+    assert.equal(git(wt.path, "rev-parse", "HEAD"), head, "the task's branch did not move");
+    assert.equal(await isDirty(wt.path), false, "the worktree was not touched");
+    assert.equal(await isDirty(repo), false, "nor the project's checkout");
+    assert.equal(read(wt.path, "a.txt"), "the task's version\n");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("what landed on the base since a task started is listed, with the board task behind each landing", async () => {
+  const repo = makeRepo({ "a.txt": "one\n" });
+  try {
+    const wt = await addWorktree(repo, "t_since");
+    writeFileSync(join(wt.path, "a.txt"), "task\n");
+    await commitAll(wt.path, "task work");
+    assert.deepEqual(await landedSince(wt.path, "main"), [], "nothing has landed yet");
+
+    landOnMain(repo, "b.txt", "x\n", "Merge kanban/t_other: Add a discount field");
+    landOnMain(repo, "c.txt", "y\n", "kanban: Rename the invoice total");
+    landOnMain(repo, "d.txt", "z\n", "fix typo by hand");
+    assert.deepEqual(await landedSince(wt.path, "main"), [
+      { taskId: null, title: "fix typo by hand" },
+      { taskId: null, title: "Rename the invoice total" },
+      { taskId: "t_other", title: "Add a discount field" },
+    ]);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Two tasks that both added an import at the same spot in app.ts, while the other task also changed
+ * notes.txt: the classic conflict where the right answer keeps both lines.
+ */
+async function conflictScene() {
+  const repo = makeRepo({ "app.ts": "import base\n\nrun()\n", "notes.txt": "one\n", "keep.txt": "keep\n" });
+  const wt = await addWorktree(repo, "t_resolve");
+  writeFileSync(join(wt.path, "app.ts"), "import base\nimport tax\n\nrun()\n");
+  await commitAll(wt.path, "task adds tax");
+  writeFileSync(join(repo, "app.ts"), "import base\nimport discount\n\nrun()\n");
+  writeFileSync(join(repo, "notes.txt"), "the other task's note\n");
+  git(repo, "add", "-A");
+  git(repo, "commit", "-q", "-m", "Merge kanban/t_other: Add discount");
+  const pre = (await headSha(wt.path))!;
+  const baseSha = await revParse(repo, "main");
+  const preview = await previewMerge(wt.path, pre, baseSha);
+  const conflicts = await startResolveMerge(wt.path, baseSha, "Merge main");
+  return { repo, wt, pre, baseSha, preview, conflicts, check: () => checkResolution(wt.path, { pre, baseSha, previewTree: preview.tree, conflicts }) };
+}
+
+test("the board starts the merge at a pinned commit and leaves the conflict, original included, for Claude", async () => {
+  const s = await conflictScene();
+  try {
+    assert.deepEqual(s.conflicts, ["app.ts"]);
+    assert.deepEqual(s.preview.conflicts, ["app.ts"], "the preview foresaw the same conflict");
+    const body = read(s.wt.path, "app.ts");
+    assert.match(body, /^<{7} /m);
+    assert.match(body, /^\|{7} /m, "zdiff3: the original sits between the two sides");
+    assert.equal(read(s.wt.path, "notes.txt"), "the other task's note\n", "git merged the rest itself");
+  } finally {
+    rmSync(s.repo, { recursive: true, force: true });
+  }
+});
+
+test("a resolution that keeps both sides passes every check", async () => {
+  const s = await conflictScene();
+  try {
+    writeFileSync(join(s.wt.path, "app.ts"), "import base\nimport tax\nimport discount\n\nrun()\n");
+    await finishResolveMerge(s.wt.path, "resolved");
+    assert.deepEqual(await s.check(), { hard: [], lost: [], outside: [] });
+  } finally {
+    rmSync(s.repo, { recursive: true, force: true });
+  }
+});
+
+test("a resolution that takes one side whole is caught: the other side's lines are listed as lost", async () => {
+  const s = await conflictScene();
+  try {
+    writeFileSync(join(s.wt.path, "app.ts"), "import base\nimport tax\n\nrun()\n");
+    await finishResolveMerge(s.wt.path, "took ours");
+    const f = await s.check();
+    assert.deepEqual(f.hard, []);
+    assert.deepEqual(f.lost, [{ file: "app.ts", side: "base", lines: ["import discount"] }]);
+  } finally {
+    rmSync(s.repo, { recursive: true, force: true });
+  }
+});
+
+test("conflict markers left behind fail the resolution outright", async () => {
+  const s = await conflictScene();
+  try {
+    await finishResolveMerge(s.wt.path, "forgot");
+    assert.deepEqual((await s.check()).hard.map((h) => h.id), ["markers"]);
+  } finally {
+    rmSync(s.repo, { recursive: true, force: true });
+  }
+});
+
+test("quietly undoing the other task's change in a file that never conflicted is caught, and deleting one fails", async () => {
+  const s = await conflictScene();
+  try {
+    writeFileSync(join(s.wt.path, "app.ts"), "import base\nimport tax\nimport discount\n\nrun()\n");
+    writeFileSync(join(s.wt.path, "notes.txt"), "one\n");
+    rmSync(join(s.wt.path, "keep.txt"));
+    await finishResolveMerge(s.wt.path, "overreached");
+    const f = await s.check();
+    assert.deepEqual(f.hard.map((h) => h.id), ["files"]);
+    assert.match(f.hard[0].detail, /keep\.txt/);
+    assert.ok(f.outside.includes("notes.txt"));
+    assert.deepEqual(f.lost.find((l) => l.file === "notes.txt"), { file: "notes.txt", side: "base", lines: ["the other task's note"] });
+  } finally {
+    rmSync(s.repo, { recursive: true, force: true });
+  }
+});
+
+test("a merge that was abandoned instead of finished fails the history check", async () => {
+  const s = await conflictScene();
+  try {
+    git(s.wt.path, "merge", "--abort");
+    assert.deepEqual((await s.check()).hard.map((h) => h.id), ["history"]);
+  } finally {
+    rmSync(s.repo, { recursive: true, force: true });
+  }
+});
+
+test("a resolution that did not pass is set aside: the branch is back where it was, and the attempt is still in the reflog", async () => {
+  const s = await conflictScene();
+  try {
+    writeFileSync(join(s.wt.path, "app.ts"), "import base\nimport tax\n\nrun()\n");
+    await rollbackResolution(s.wt.path, s.pre);
+    assert.equal(await headSha(s.wt.path), s.pre);
+    assert.equal(await isDirty(s.wt.path), false);
+    assert.equal(read(s.wt.path, "app.ts"), "import base\nimport tax\n\nrun()\n", "the task's own work is intact");
+    assert.match(git(s.wt.path, "reflog", "-3", "--format=%gs"), /set aside a conflict resolution/);
+    assert.equal(await isDirty(s.repo), false, "the project's checkout was never touched");
+  } finally {
+    rmSync(s.repo, { recursive: true, force: true });
   }
 });
