@@ -12,7 +12,7 @@ import { isQuestion } from "../lib/questions.ts";
 import { waitingOn } from "../lib/phase.ts";
 import { chatSignal, MOVING, NEEDS_YOU, type Signal, type SignalKind } from "../lib/chatSignal.ts";
 import { useAsk } from "../components/Ask.tsx";
-import { ArchiveIcon, Button, Empty, ErrorLine, FolderIcon, OpenIcon, PencilIcon, RestoreIcon, Select, StageDots, TrashIcon, inputCls, useAction, useEscape } from "../components/ui.tsx";
+import { ArchiveIcon, Button, Chevron, Empty, ErrorLine, FolderIcon, OpenIcon, PencilIcon, RestoreIcon, Select, StageDots, TrashIcon, inputCls, useAction, useEscape } from "../components/ui.tsx";
 import { inputSummary } from "../components/Transcript.tsx";
 import { BellControl } from "../components/BellControl.tsx";
 import { ThemeControl } from "../components/ThemeControl.tsx";
@@ -576,7 +576,7 @@ function ChatList({
             <span className={`h-3.5 w-[3px] shrink-0 rounded-full ${color ? FOLDER_BG[color] : "bg-ink-600"}`} />
             <span className={`truncate text-[13px] font-bold tracking-tight ${tone}`}>{title}</span>
             <span className="font-mono text-[10.5px] text-ink-500">{list.length}</span>
-            <span className="text-[9px] text-ink-600">{shut ? "▸" : "▾"}</span>
+            <Chevron className={`h-3.5 w-3.5 text-ink-500 transition-transform ${shut ? "-rotate-90" : ""}`} />
           </button>
           {f ? (
             <div className={`flex items-center gap-px transition-opacity ${coloring ? "opacity-100" : "opacity-0 focus-within:opacity-100 group-hover/h:opacity-100"}`}>
@@ -731,8 +731,10 @@ function ChatWork({ chatId, cards, messages, width }: { chatId: string | null; c
   const toggle = (id: string) => setShut((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
 
   const head = (id: string, title: string, n: number) => (
-    <button className={`flex w-full cursor-pointer items-center gap-1.5 text-left hover:text-ink-300 ${section}`} onClick={() => toggle(id)}>
-      <span className="w-2.5 text-[9px]">{shut.has(id) ? "▸" : "▾"}</span>
+    <button className={`group/sec flex w-full cursor-pointer items-center gap-1.5 text-left hover:text-ink-300 ${section}`} aria-expanded={!shut.has(id)} onClick={() => toggle(id)}>
+      <span className="flex h-5 w-5 items-center justify-center rounded text-ink-400 transition-colors group-hover/sec:bg-ink-800 group-hover/sec:text-ink-100">
+        <Chevron className={`h-3.5 w-3.5 transition-transform ${shut.has(id) ? "-rotate-90" : ""}`} />
+      </span>
       <span>{title}</span>
       <span className="font-mono text-ink-600">{n}</span>
     </button>
@@ -774,9 +776,10 @@ function ChatWork({ chatId, cards, messages, width }: { chatId: string | null; c
       {shut.has("files") ? null : all.length ? (
         <div className="space-y-2 px-3 pb-2">
           {images.length ? (
-            <div className="grid grid-cols-3 gap-1.5">
+            // Fixed small thumbnails: a third of a wide panel made each picture a poster; a click opens it full size.
+            <div className="flex flex-wrap gap-1.5">
               {images.map((f) => (
-                <div key={f.id} className="group relative aspect-square overflow-hidden rounded-md border border-ink-700 bg-ink-950 transition-colors hover:border-ink-500">
+                <div key={f.id} className="group relative h-16 w-16 shrink-0 overflow-hidden rounded-md border border-ink-700 bg-ink-950 transition-colors hover:border-ink-500">
                   <a href={f.url} target="_blank" rel="noreferrer" className="block h-full w-full" title={`${f.name} · from ${f.from}${f.description ? `\n${f.description}` : ""}`}>
                     <img src={f.url} alt={f.description ?? f.name} className="h-full w-full object-cover transition-transform group-hover:scale-105" loading="lazy" />
                   </a>
@@ -956,7 +959,7 @@ function WorkCard({ card, byId, now, children }: { card: TaskCard; byId: Map<str
   return (
     <div className={`rounded-lg border ${rose ? "border-rose/50 bg-rose/5" : "border-ink-700 bg-ink-850/60"}`}>
       <button className="flex w-full cursor-pointer items-center gap-2 px-2.5 py-2 text-left" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
-        <span className="w-2.5 shrink-0 text-[9px] text-ink-500">{open ? "▾" : "▸"}</span>
+        <Chevron className={`h-3.5 w-3.5 text-ink-400 transition-transform ${open ? "" : "-rotate-90"}`} />
         <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-100">{card.title}</span>
         <StatusPill card={card} asking={asking} waits={waitingOn(card, byId).length > 0} />
       </button>

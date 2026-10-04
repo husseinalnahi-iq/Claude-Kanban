@@ -67,14 +67,14 @@ const MessageRow = memo(function MessageRow({ m }: { m: ChatMessage }) {
 const kb = (n: number) => (n >= 1_048_576 ? `${(n / 1_048_576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 
 /** The files on a message, or waiting to go with the next one (D334): images as thumbnails, the rest as named chips. */
-function FileChips({ files, onRemove }: { files: Pick<ChatFile, "id" | "name" | "media_type" | "bytes">[]; onRemove?: (id: string) => void }) {
+function FileChips({ files, onRemove }: { files: (Pick<ChatFile, "id" | "name" | "media_type" | "bytes"> & { src?: string })[]; onRemove?: (id: string) => void }) {
   return (
     <div className="flex max-w-[85%] flex-wrap justify-end gap-1.5">
       {files.map((f) =>
         attachmentKind(f.media_type) === "image" ? (
           <span key={f.id} className="relative">
-            <a href={api.chatFileUrl(f.id)} target="_blank" rel="noreferrer" title={f.name}>
-              <img src={api.chatFileUrl(f.id)} alt={f.name} className="h-16 w-16 rounded-md border border-ink-700 object-cover" loading="lazy" />
+            <a href={f.src ?? api.chatFileUrl(f.id)} target="_blank" rel="noreferrer" title={f.name}>
+              <img src={f.src ?? api.chatFileUrl(f.id)} alt={f.name} className="h-16 w-16 rounded-md border border-ink-700 object-cover" loading="lazy" />
             </a>
             {onRemove ? <button className="absolute -right-1.5 -top-1.5 flex h-4 w-4 cursor-pointer items-center justify-center rounded-full bg-ink-700 text-[10px] text-ink-200 hover:bg-rust hover:text-ink-950" onClick={() => onRemove(f.id)} title="Take it back">×</button> : null}
           </span>
@@ -302,7 +302,14 @@ export function ChatThread({
     pinned.current = true;
     await api.suggestNext(chatId).catch(say);
   };
-  const waiting = [...files.map((f) => ({ id: f.id, name: f.name, media_type: f.media_type, bytes: f.bytes })), ...local.map((f, i) => ({ id: `local-${i}`, name: f.name, media_type: f.type || "application/octet-stream", bytes: f.size }))];
+  // A file picked before the chat exists is not on the server yet, so its thumbnail is read from the
+  // browser's own copy; asking the server for "local-0" got a 404 and a broken image.
+  const localUrls = useMemo(() => local.map((f) => URL.createObjectURL(f)), [local]);
+  useEffect(() => () => localUrls.forEach((u) => URL.revokeObjectURL(u)), [localUrls]);
+  const waiting = [
+    ...files.map((f) => ({ id: f.id, name: f.name, media_type: f.media_type, bytes: f.bytes })),
+    ...local.map((f, i) => ({ id: `local-${i}`, name: f.name, media_type: f.type || "application/octet-stream", bytes: f.size, src: localUrls[i] })),
+  ];
 
   const column = wide ? "mx-auto w-full max-w-[860px]" : "";
 
@@ -404,10 +411,13 @@ export function ChatThread({
                   }
                 }}
               />
-              <div className="flex flex-wrap items-center gap-1.5 border-t border-ink-800/70 px-2 py-1.5">
+              {/* Every control is 34px tall (the drop-downs' height), so the row reads as one line; the send
+                  group wraps as a whole and stays on the right instead of breaking apart. */}
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 border-t border-ink-800/70 px-2 py-1.5">
+                <div className="contents">
                 <input ref={picker} type="file" multiple className="hidden" accept=".png,.jpg,.jpeg,.gif,.webp,.svg,.pdf,.csv,.tsv,.xlsx,.xls,.docx,.doc,.pptx,.txt,.md,.log,.json,.yaml,.yml,.xml,.html,.htm" onChange={(e) => { void attach([...(e.target.files ?? [])]); e.target.value = ""; }} />
                 <button
-                  className={`flex shrink-0 cursor-pointer items-center rounded-md px-1.5 py-1 ${uploading ? "breathe text-amber" : "text-ink-400 hover:text-amber"}`}
+                  className={`flex h-[34px] w-[34px] shrink-0 cursor-pointer items-center justify-center rounded-md hover:bg-ink-800 ${uploading ? "breathe text-amber" : "text-ink-400 hover:text-amber"}`}
                   onClick={() => picker.current?.click()}
                   title="Attach a file: an image, a PDF, a spreadsheet, a document. Claude opens images, PDFs and text itself; a spreadsheet or Word file is read by a card."
                   aria-label="Attach a file"
@@ -427,21 +437,21 @@ export function ChatThread({
                   </div>
                 )}
                 <label
-                  className={`flex shrink-0 cursor-pointer items-center gap-1 text-[11px] ${useTools ? "text-ink-200" : "text-ink-500"}`}
+                  className={`flex h-[34px] shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-1 text-[11.5px] ${useTools ? "text-ink-200" : "text-ink-500"}`}
                   title="Give this chat your connected systems (Slack, Gmail, Google Drive, your own MCP servers) and your skills, the way a task gets them. Off, a chat is quicker and cheaper: their tool lists ride on every message. Either way it never changes files; it only reads and runs read-only commands itself."
                 >
                   <Switch on={useTools} onChange={setUseTools} />
                   my connectors and skills
                 </label>
                 {/* The mode the cards of this chat will run in; a message that names one wins (D344). */}
-                <div className="flex shrink-0 items-center overflow-hidden rounded-md border border-ink-700 text-[11px]" role="radiogroup" aria-label="How cards from this chat run">
+                <div className="flex h-[34px] shrink-0 items-stretch overflow-hidden rounded-md border border-ink-700 text-[11.5px]" role="radiogroup" aria-label="How cards from this chat run">
                   {RUN_STYLES.map((m) => (
                     <button
                       key={m}
                       role="radio"
                       aria-checked={mode === m}
                       disabled={m !== "supervised" && !!noAuto}
-                      className={`cursor-pointer px-2 py-1 transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${mode === m ? (m === "ask" ? "bg-iris/15 text-iris" : m === "autonomous" ? "bg-amber/15 text-amber" : "bg-cyan/15 text-cyan") : "text-ink-500 hover:text-ink-200"}`}
+                      className={`flex cursor-pointer items-center px-2.5 transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${mode === m ? (m === "ask" ? "bg-iris/15 text-iris" : m === "autonomous" ? "bg-amber/15 text-amber" : "bg-cyan/15 text-cyan") : "text-ink-500 hover:text-ink-200"}`}
                       title={
                         m === "ask"
                           ? noAuto ?? "Cards this chat makes work like autonomous, but when one needs your answer it stops and asks you — here in the chat, on the card and in a pop-up — and waits. Click an answer, or just tell Claude."
@@ -455,10 +465,12 @@ export function ChatThread({
                     </button>
                   ))}
                 </div>
-                <span className="ml-auto hidden truncate pr-1 text-[10.5px] text-ink-600 2xl:inline">Enter to send · Shift+Enter new line</span>
+                </div>
+                <div className="ml-auto flex shrink-0 items-center gap-2">
+                <span className="hidden whitespace-nowrap text-[10.5px] text-ink-600 2xl:inline">Enter to send · Shift+Enter new line</span>
                 {settings?.nextStepsSuggestions !== false && chatId && messages.some((m) => m.role === "assistant") && !chat?.busy ? (
                   <button
-                    className="shrink-0 cursor-pointer rounded-md border border-iris/50 px-2 py-1.5 text-[11.5px] text-iris hover:bg-iris/10"
+                    className="flex h-[34px] shrink-0 cursor-pointer items-center rounded-md border border-iris/50 px-2.5 text-[12px] text-iris hover:bg-iris/10"
                     onClick={() => void suggest()}
                     title="Ask for the next five things worth doing after this: bugs to fix, security to tighten, follow-up edits, useful additions. One reply at this chat's model; nothing is created until you say so."
                   >
@@ -466,18 +478,19 @@ export function ChatThread({
                   </button>
                 ) : null}
                 {chat?.busy ? (
-                  <button className="shrink-0 cursor-pointer rounded-md border border-rust/50 px-2.5 py-1.5 text-[12px] text-rust hover:bg-rust/10" onClick={() => chat && void api.stopChat(chat.id).catch(say)}>
+                  <button className="flex h-[34px] shrink-0 cursor-pointer items-center rounded-md border border-rust/50 px-3 text-[12px] text-rust hover:bg-rust/10" onClick={() => chat && void api.stopChat(chat.id).catch(say)}>
                     ■ Stop
                   </button>
                 ) : (
                   <button
-                    className="shrink-0 cursor-pointer rounded-md bg-amber px-3 py-1.5 text-[12px] font-semibold text-ink-950 transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+                    className="flex h-[34px] shrink-0 cursor-pointer items-center rounded-md bg-amber px-4 text-[12px] font-semibold text-ink-950 transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
                     disabled={!text.trim() && !waiting.length}
                     onClick={() => void send()}
                   >
                     Send
                   </button>
                 )}
+                </div>
               </div>
             </div>
             {toolsHint ? (

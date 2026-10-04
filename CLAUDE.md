@@ -82,7 +82,13 @@ published first; add it only when that list is right.
 Everything private is handled by the gitignored `.claude/publish.local.json`, which must never be
 committed: `exclude` (paths left out), `replace` (real names swapped for neutral ones in the published
 copy only — the working tree keeps the real ones, D214, D247) and `blocklist` (checked after the
-swaps; any hit refuses the publish).
+swaps; any hit refuses the publish), plus `names` / `nameSources` (people and companies, read fresh
+from the private data on every publish) and `allow`.
+
+**Follow the `publish-public` skill** (`.claude/skills/publish-public/SKILL.md`) for every publish. The
+script scans each added line and the message (`scripts/publish-scan.mjs`, D369): names from the
+private data, your board's own ids, emails, your home folder and key shapes are refused; big amounts
+and unknown web addresses need `--reviewed`. `--audit` scans what is public already.
 
 Rules that do not change:
 
