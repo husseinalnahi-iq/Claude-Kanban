@@ -68,7 +68,7 @@ test("reaching the task ceiling pauses for a decision instead of failing; Contin
     await until(() => s.repo.getTask(task.id)!.status === "review");
     assert.equal(s.repo.runsForTask(task.id).length, 2);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -89,7 +89,7 @@ test("the SDK's own per-stage budget stop pauses too, keeps the session, and Sto
     assert.equal(t.pause_reason, null);
     assert.match(t.error ?? "", /ceiling/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -104,7 +104,7 @@ test("Continue after the SDK budget stop retries the same stage in the same sess
     const runs = s.repo.runsForTask(task.id);
     assert.deepEqual(runs.map((r) => r.stage), ["code", "code", "review"]);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -119,6 +119,6 @@ test("a cost pause is left alone by the usage-limit resume timer", async () => {
     assert.equal(s.repo.getTask(task.id)!.status, "paused");
     assert.equal(s.runner.limitedUntil(), null, "a cost pause does not hold the queue for a usage window");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });

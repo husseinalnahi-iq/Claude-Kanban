@@ -91,18 +91,18 @@ test("supervised one-stage run records session, cost, events and ends in review"
     assert.match(f.calls[0].prompt, /# Stage: code/);
     assert.ok(s.seen.some((m) => m.type === "run.finished"));
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
-test("autonomous task in a project that forbids it is refused with a clear error", () => {
+test("autonomous task in a project that forbids it is refused with a clear error", async () => {
   const s = setup(fakeQuery().fn, { autonomous: "forbidden", worktrees: "forbidden" });
   try {
     const task = s.repo.createTask({ project_id: s.project.id, title: "x", mode: "autonomous", pipeline: ONE_STAGE });
     assert.throws(() => s.runner.queueTask(task.id), (e: unknown) => e instanceof PolicyError && /forbids autonomous/.test((e as Error).message));
     assert.equal(s.repo.getTask(task.id)!.status, "backlog");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -123,7 +123,7 @@ test("supervised approval gate: deny flows back to the SDK and status returns", 
     assert.match(f.decisions[0].message, /not now/);
     assert.equal(s.repo.getApproval(a.id)!.decision, "deny");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -146,11 +146,11 @@ test("failure marks task failed; retry resumes the failed stage's session", asyn
     assert.equal(f2.calls[0].options.resume, "s-fail");
     assert.equal(s.repo.runsForTask(task.id).length, 2);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
-test("recover() fails interrupted runs and their tasks", () => {
+test("recover() fails interrupted runs and their tasks", async () => {
   const s = setup(fakeQuery().fn);
   try {
     const task = s.repo.createTask({ project_id: s.project.id, title: "x", mode: "supervised", pipeline: ONE_STAGE });
@@ -161,11 +161,11 @@ test("recover() fails interrupted runs and their tasks", () => {
     assert.equal(s.repo.getRun(run.id)!.error, "interrupted");
     assert.equal(s.repo.getTask(task.id)!.status, "failed");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
-test("a board restart closes every waiting card with a decided event, so no pop-up waits for ever", () => {
+test("a board restart closes every waiting card with a decided event, so no pop-up waits for ever", async () => {
   const s = setup(fakeQuery().fn);
   try {
     const task = s.repo.createTask({ project_id: s.project.id, title: "waiting", mode: "supervised", pipeline: ONE_STAGE });
@@ -179,7 +179,7 @@ test("a board restart closes every waiting card with a decided event, so no pop-
     assert.equal((decided[0] as any).approval.id, card.id);
     assert.equal((decided[0] as any).approval.task_title, "waiting");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -199,7 +199,7 @@ test("a review that asks for changes fails the task instead of passing it to App
     assert.match(t.error ?? "", /Review asked for changes/);
     assert.equal(s.repo.latestRun(task.id)!.status, "success", "the run itself succeeded");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -227,7 +227,7 @@ test("a failed chat leaves the completed stage's run intact", async () => {
     assert.equal(run.result_md, "DONE", "and its result");
     assert.match(s.repo.getTask(task.id)!.error ?? "", /boom/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -252,7 +252,7 @@ test("a task is not done until the project's verify command passes", async () =>
     assert.match(f.calls.at(-1)!.prompt, /last attempt failed verification/i);
     assert.ok(f.calls.at(-1)!.options.hooks.Stop, "the code stage runs behind a Stop hook gate");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -274,7 +274,7 @@ test("project memory is capped, de-duplicated and injected into later prompts", 
     await until(() => s.repo.getTask(task.id)!.status === "review");
     assert.match(f.calls[0].prompt, /## Decisions from earlier tasks/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -289,7 +289,7 @@ test("a stage prompt carries the project memory about its own task, not only the
     await until(() => s.repo.getTask(task.id)!.status === "review");
     assert.match(f.calls[0].prompt, /## Decisions from earlier tasks[\s\S]*semicolon separator/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -309,7 +309,7 @@ test("runs leave Claude Code's own memory out unless the setting lets them use i
     await until(() => s.repo.getTask(second.id)!.status === "review");
     assert.equal(f.calls[1].options.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, "the board adds nothing of its own");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -331,7 +331,7 @@ test("an approved task is remembered as what it did, and a later task about the 
     assert.match(prompt, new RegExp(`## Earlier tasks in this project that look related[\\s\\S]*Invoice export: [\\s\\S]*\\(\`${first.id}\`\\)`));
     assert.doesNotMatch(prompt, /## Decisions from earlier tasks/, "an outcome is not presented as a rule");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -357,7 +357,7 @@ test("approving or sending back a task is counted on every note its prompts carr
     assert.equal(s.repo.notes(s.project.id).find((n) => n.id === money.id)!.flag?.reason, "Prices are decimals in the new schema.");
     assert.ok("isError" in h.flagMemory({ note: "Nothing like this was ever noted", reason: "a reason" }));
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -378,7 +378,7 @@ test("a Reject note reaches every stage of the next run, and only that run", asy
     await until(() => s.repo.getTask(task.id)!.status === "review" && f.calls.length === 3);
     assert.doesNotMatch(f.calls[2].prompt, /Why this was sent back/, "a later plain retry carries no stale reason");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -409,6 +409,8 @@ function fakeGit(holds: { add?: Promise<void>; merge?: Promise<void> } = {}, ove
     },
     removeWorktree: async () => void calls.push("remove"),
     diffTask: async () => [],
+    headSha: async () => null,
+    changedSince: async () => [],
     ...over,
   };
   return { git: git as any, calls };
@@ -430,7 +432,7 @@ test("stop during worktree setup is honoured (no 409, no stage runs)", async () 
     assert.equal(s.repo.getTask(task.id)!.error, "stopped by user");
     assert.equal(f.calls.length, 0, "no stage started after stop");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -451,7 +453,7 @@ test("approve holds the task busy while git works; double approve is refused", a
     assert.equal(done.status, "done");
     assert.deepEqual(g.calls.filter((c) => c === "merge"), ["merge"]);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -480,7 +482,7 @@ test("Approve marks the task done once the merge lands; a clean-up that fails is
     await runner.approveTask(review("squash").id);
     assert.deepEqual(asked, [{ deleteBranch: "safe" }, { deleteBranch: "force" }], "only a squash, whose branch git never counts as merged, is deleted by force");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -504,7 +506,7 @@ test("a supervised task on its own branch gets a worktree, still asks for every 
     assert.equal(done.status, "done");
     assert.ok(g.calls.includes("merge"), "Approve merges the branch");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 
   const s2 = setup(fakeQuery().fn, { worktrees: "forbidden" });
@@ -514,7 +516,7 @@ test("a supervised task on its own branch gets a worktree, still asks for every 
     const plain = s2.repo.createTask({ project_id: s2.project.id, title: "y", mode: "supervised", pipeline: ONE_STAGE });
     assert.doesNotThrow(() => s2.runner.queueTask(plain.id), "a plain supervised task is unaffected");
   } finally {
-    s2.cleanup();
+    await s2.cleanup();
   }
 });
 
@@ -535,7 +537,7 @@ test("chat that fixes a failed first stage does not jump to review", async () =>
     assert.match(t.error ?? "", /incomplete.*#2/);
     assert.equal(f2.calls[0].options.resume, "s-plan");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -554,11 +556,11 @@ test("supervised runs force approval for writes via a PreToolUse ask hook; quest
     assert.deepEqual(await hook({ tool_name: "Read" }, "tu", { signal: new AbortController().signal }), {});
     assert.deepEqual(await hook({ tool_name: "mcp__board__board_set_summary" }, "tu", { signal: new AbortController().signal }), {});
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
-test("board tools: subtasks inherit parent, messages default to the parent, summary updates the card", () => {
+test("board tools: subtasks inherit parent, messages default to the parent, summary updates the card", async () => {
   const s = setup(fakeQuery().fn, { autonomous: "forbidden" });
   try {
     const parent = s.repo.createTask({ project_id: s.project.id, title: "Big", spec_md: "big spec", mode: "supervised", pipeline: ONE_STAGE });
@@ -577,7 +579,7 @@ test("board tools: subtasks inherit parent, messages default to the parent, summ
     hk.setSummary({ text: "halfway" });
     assert.equal(s.repo.getTask(kids[0].id)!.summary, "halfway");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -594,7 +596,7 @@ test("landing refuses to touch a dirty checkout, or the wrong branch, and never 
       assert.equal(g.calls.includes("merge"), false, "nothing was merged");
       assert.equal(s.repo.getTask(task.id)!.status, "review", "the task is untouched");
     } finally {
-      s.cleanup();
+      await s.cleanup();
     }
   }
 
@@ -610,7 +612,7 @@ test("landing refuses to touch a dirty checkout, or the wrong branch, and never 
       await assert.rejects(runner.approveTask(task.id), /lands work on "main".*some-other-branch/s);
       assert.equal(g.calls.includes("merge"), false);
     } finally {
-      s.cleanup();
+      await s.cleanup();
     }
   }
 
@@ -628,7 +630,7 @@ test("landing refuses to touch a dirty checkout, or the wrong branch, and never 
       assert.equal(g.calls.includes("merge"), false, "a conflict must never fall through to a merge");
       assert.equal(g.calls.includes("remove"), false, "and the worktree holding the work is kept");
     } finally {
-      s.cleanup();
+      await s.cleanup();
     }
   }
 });
@@ -651,6 +653,6 @@ test("a run can search its project's earlier work, and finds neither its own tas
     assert.ok(found.results.some((r) => r.where.endsWith("result")), "a stage's result is searched");
     assert.deepEqual(JSON.parse(h.searchPastWork({ query: "nothing like this anywhere" }).content[0].text).results, []);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });

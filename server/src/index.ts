@@ -35,7 +35,11 @@ const repo = new Repo(openDb(DB_PATH));
 repo.setStateDir(STATE_DIR);
 const bus = new Bus();
 const runner = new TaskRunner({ repo, bus, logDir: LOG_DIR, secrets: new SecretStore(SECRETS_PATH) });
-runner.recover();
+// Set by the launcher when it restarts a board that died on its own. Read once and removed, so
+// it does not travel into every task's environment.
+const afterCrash = process.env.KANBAN_AFTER_CRASH === "1";
+delete process.env.KANBAN_AFTER_CRASH;
+runner.recover({ afterCrash });
 // Your usage changes whenever you use Claude anywhere, not only when the board runs something.
 runner.pollUsage();
 

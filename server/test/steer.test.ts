@@ -27,7 +27,7 @@ function setup() {
   return { dir, repo, bus, project, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-test("messagesAfter returns only messages posted after the cursor", () => {
+test("messagesAfter returns only messages posted after the cursor", async () => {
   const s = setup();
   try {
     const t = s.repo.createTask({ project_id: s.project.id, title: "t", spec_md: "", mode: "supervised", pipeline: [] });
@@ -39,7 +39,7 @@ test("messagesAfter returns only messages posted after the cursor", () => {
     assert.deepEqual(s.repo.messagesAfter(t.id, mid).map((m) => m.body), ["two"]);
     assert.deepEqual(s.repo.messagesAfter(t.id, before).map((m) => m.body), ["one", "two"]);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -88,7 +88,7 @@ test("a message posted while a stage runs reaches Claude through the PostToolUse
     assert.ok(events.some((e) => e.type === "user:chat"), "the message shows in the transcript");
     assert.ok(events.some((e) => e.type === "board:steer"), "delivery is recorded");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -122,7 +122,7 @@ test("a message that arrives with no tool call left blocks the turn's end so it 
     assert.equal(out.decision, "block");
     assert.match(out.reason ?? "", /rename foo to bar/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -147,6 +147,6 @@ test("chat after the run has finished still resumes the session as before", asyn
     assert.equal(prompts[1], "one more thing");
     await until(() => s.repo.getTask(task.id)!.status === "review");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });

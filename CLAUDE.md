@@ -42,6 +42,11 @@ task streams its page" — re-run it alone before chasing it.
   the board you actually use (boot recovery fails whatever was running).
 - `server/scripts/measure-overhead.ts`, `helper-smoke.ts`, `smoke.ts`: real Haiku runs (cents). A cost
   claim is measured with these or a whole-task A/B on the test board before it ships (D272–D274).
+- `server/scripts/measure-chat-handoff.ts`: how much cards made from a chat re-read what the chat had
+  already read, and whether each round found its memory in the cache — from your board's database,
+  read-only and free (D370, D375).
+- `server/scripts/rounds-check.ts`: real Haiku runs (cents) that check a round continues its coder's session
+  in the recreated folder and hits the cache, and that a fork gets a session of its own (D375, D376).
 
 ## How it fits together
 

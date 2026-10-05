@@ -58,6 +58,6 @@ test("the card carries the running stage's list, a subagent's list stays off it,
     await until(() => q.calls.length === 2 && s.repo.getTask(t.id)!.status === "review");
     assert.deepEqual(s.repo.getTask(t.id)!.checklist, [], "a fresh session has no list until it makes one");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });

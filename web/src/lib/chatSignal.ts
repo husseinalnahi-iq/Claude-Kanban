@@ -1,8 +1,8 @@
-import type { Approval, TaskCard } from "../../../server/src/types.ts";
+import { stoppedBy, type Approval, type TaskCard } from "../../../server/src/types.ts";
 import { isQuestion } from "./questions.ts";
 
 /**
- * One light per chat in the Studio's list: what its cards are up to, read without opening it. A chat
+ * One light per chat in the AI Manager's list: what its cards are up to, read without opening it. A chat
  * can start several cards, so it shows the one that most wants you — the order of SIGNALS is that
  * ranking, and a new state goes where it belongs in it rather than at the end.
  */
@@ -39,7 +39,7 @@ const RANK = Object.keys(SIGNALS) as SignalKind[];
 /** Which signal one card gives. `waiting` is its approvals still undecided. */
 export function cardSignal(card: TaskCard, waiting: Approval[]): SignalKind {
   // A question it carried on past still waits for an answer, so a finished card with one is not "done" yet.
-  if (waiting.some(isQuestion) || (card.status === "failed" && card.blocked?.ask) || card.questions.some((q) => q.answer === null)) return "question";
+  if (waiting.some(isQuestion) || (card.status === "failed" && stoppedBy(card)?.ask) || card.questions.some((q) => q.answer === null)) return "question";
   if (card.status === "approval" && card.plan_gate) return "plan";
   if (waiting.length || card.status === "approval") return "permission";
   // A cost ceiling, or a provider out of credit with no time to come back, waits on you; a usage limit does not.
@@ -63,6 +63,6 @@ export function chatSignal(cards: TaskCard[], pending: Approval[], busy: boolean
   return { kind, ...SIGNALS[kind], count: Math.max(1, kinds.filter((k) => k === kind).length) };
 }
 
-/** Signals that want you, then ones still moving: the Studio's "Group by status" sections. */
+/** Signals that want you, then ones still moving: the AI Manager's "Group by status" sections. */
 export const NEEDS_YOU = new Set<SignalKind>(["question", "permission", "plan"]);
 export const MOVING = new Set<SignalKind>(["working", "paused", "queued"]);

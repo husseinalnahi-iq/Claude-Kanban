@@ -67,7 +67,7 @@ test("the default is Claude Haiku at low effort, and the attachment says who des
     assert.equal(calls[0].effort, "low");
     assert.equal(s.repo.getAttachment(id)!.described_by, `claude · ${DEFAULT_VISION_MODEL}`);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -103,7 +103,7 @@ test("Kimi through Claude Code: the same job pointed at Kimi's endpoint; if it c
     assert.equal(calls.at(-1).model, DEFAULT_VISION_MODEL, "the fallback is Claude's default vision model");
     assert.match(s.repo.getAttachment(id2)!.described_by ?? "", /^claude · claude-haiku.* \(fallback: kimi · kimi-k3 could not describe it\)$/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -126,7 +126,7 @@ test("a plain chat API gets the image inline, as a data URL", async () => {
     assert.equal(s.repo.getAttachment(id)!.described_by, "openrouter · google/gemma-4-31b");
   } finally {
     setFetch((...a) => fetch(...a));
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -158,7 +158,7 @@ test("Codex gets the image attached with -i: a plain-named copy, read-only", asy
     assert.equal(s.repo.getAttachment(id)!.described_by, "codex · gpt-5.6-luna");
   } finally {
     setCliSpawn(undefined);
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -176,6 +176,6 @@ test("Try it reports a model that cannot see, instead of quietly falling back", 
     const missing = await s.runner.testVision("nope", "x", image());
     assert.match(missing.error ?? "", /does not exist/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });

@@ -29,7 +29,7 @@ test("a task queued before what it depends on is done waits in Queued, then star
     assert.equal(q.calls.length, 2, "it started by itself once its dependency was done");
     assert.match(q.calls[1].prompt, /## Done before this[\s\S]*Find the latest PO[\s\S]*The latest PO is PUR-0042\./, "and was told what that task reported");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -55,11 +55,11 @@ test("unlinking or deleting what a queued task waits for lets it start; Stop put
     s.bus.publish({ type: "task.deleted", taskId: a.id });
     await until(() => s.repo.getTask(c.id)!.status === "review");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
-test("the chat says a card it started will wait, and for what", () => {
+test("the chat says a card it started will wait, and for what", async () => {
   const s = setup(fakeQuery().fn);
   s.repo.updateSettings({ autoTriage: false });
   const h = chatBoardHandlers({ repo: s.repo, bus: s.bus, runner: s.runner }, s.project.id, null, () => {});
@@ -70,6 +70,6 @@ test("the chat says a card it started will wait, and for what", () => {
     assert.equal(queued.queued.status, "queued");
     assert.match(queued.note, /waits for "Build the API" \(backlog\) to be done, then starts by itself/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });

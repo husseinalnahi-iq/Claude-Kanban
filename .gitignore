@@ -11,3 +11,6 @@ web/dist/
 
 # Built on each computer from scripts/app (scripts/build-app.ps1)
 /Claude Kanban*.exe
+
+# Session handovers written by a local hook (private working notes)
+.claude/handovers/

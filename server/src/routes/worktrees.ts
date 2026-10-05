@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AppDeps } from "../app.ts";
 import { ConflictError, NotFoundError } from "../engine/runner.ts";
-import { inspectWorktrees, removeWorktree } from "../git/worktree.ts";
+import { inspectWorktrees, FolderLeftError, removeWorktree } from "../git/worktree.ts";
 
 /**
  * Worktree housekeeping. Removal is deliberately conservative: a worktree is only removable when it
@@ -37,12 +37,19 @@ export async function worktreeRoutes(app: FastifyInstance, { repo, runner }: App
     const removable = list.filter((w) => w.removable && w.taskId);
     if (!removable.length) throw new ConflictError("Nothing is safe to remove: every worktree still holds work or belongs to a live task.");
     const removed: string[] = [];
+    // A folder something still uses is listed, not a reason to leave the rest (D396).
+    const stuck: string[] = [];
     for (const w of removable) {
-      await removeWorktree(project.path, w.taskId!, { deleteBranch: "safe" });
+      try {
+        await removeWorktree(project.path, w.taskId!, { deleteBranch: "safe" });
+      } catch (err) {
+        if (!(err instanceof FolderLeftError)) throw err;
+        stuck.push(err.path);
+      }
       const task = repo.getTask(w.taskId!);
       if (task) repo.updateTask(task.id, { worktree_path: null, branch: task.status === "done" ? null : task.branch });
       removed.push(w.path);
     }
-    return { removed };
+    return { removed, stuck };
   });
 }

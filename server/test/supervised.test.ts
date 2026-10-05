@@ -109,7 +109,7 @@ test("a supervised run runs a read-only command without a card, and still asks f
     assert.equal((s.repo.pendingApprovals(task.id)[0].input as { command: string }).command, "git log --oneline -3 | head -1", "switched off: every command asks again");
     s.runner.stopTask(task.id);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -142,11 +142,11 @@ test("board_ask puts a question on the card without stopping; the answer reaches
     assert.match(f.calls[1].prompt, /from the user: Answer to "Why is gain\/loss settlement allowed\?": FX margin/);
     assert.throws(() => s.runner.answerQuestion(task.id, "q_nope", "x"), /No question/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
-test("stage stats: median minutes and cost per stage from finished runs, critics left out (D205)", () => {
+test("stage stats: median minutes and cost per stage from finished runs, critics left out (D205)", async () => {
   const s = setup(scripted(() => "x").fn);
   try {
     const task = s.repo.createTask({ project_id: s.project.id, title: "x", mode: "supervised", pipeline: TWO });
@@ -164,7 +164,7 @@ test("stage stats: median minutes and cost per stage from finished runs, critics
     assert.ok(Math.abs(plan.medianMinutes - 7) < 0.2);
     assert.equal(stats.find((x) => x.stage === "code")!.runs, 1);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -200,6 +200,6 @@ test("a supervised run is told which uncommitted files are not its own, and the 
     assert.ok(!s.repo.getTask(task.id)!.checkout!.dirtyAtStart.includes("mine.txt"));
     assert.ok(s.repo.getTask(task.id)!.checkout!.touched!.includes("mine.txt"));
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });

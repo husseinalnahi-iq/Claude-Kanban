@@ -81,6 +81,8 @@ interface Watch {
   msgId: number;
   casting: boolean;
   poll: ReturnType<typeof setInterval> | null;
+  /** Polls in a row that found no browser; polling stops at MAX_MISSES (D391). */
+  misses: number;
   meta: LiveMeta;
   frame: Buffer | null;
   frames: Set<FrameFn>;
@@ -89,6 +91,9 @@ interface Watch {
   /** Where the task last told its browser to go, so the view follows that page. */
   target: string | null;
 }
+
+/** About 30 s of 1.5 s polls with no browser before the board stops looking. */
+const MAX_MISSES = 20;
 
 const FPS_INTERVAL = 200; // about 5 frames a second: smooth enough to follow, light on the CPU
 
@@ -108,7 +113,7 @@ export class BrowserWatch {
     const prev = this.watches.get(taskId);
     if (prev) this.stop(prev);
     const w: Watch = {
-      taskId, runId, port, ended: false, pageId: null, ws: null, msgId: 0, casting: false, poll: null,
+      taskId, runId, port, ended: false, pageId: null, ws: null, msgId: 0, casting: false, poll: null, misses: 0,
       meta: { live: false, url: prev?.meta.url ?? null, title: prev?.meta.title ?? null, action: null, hasFrame: !!prev?.frame },
       frame: prev?.frame ?? null,
       frames: prev?.frames ?? new Set(),
@@ -117,10 +122,26 @@ export class BrowserWatch {
       target: null,
     };
     this.watches.set(taskId, w);
-    // The browser opens only when the task first uses it, maybe never: a cheap local poll finds it,
-    // and keeps following navigation to other pages and tabs.
+    // No polling yet: the browser opens only when the task first uses it, and most runs never do (D391).
+  }
+
+  /**
+   * Look for the task's browser, from its first browser tool until the browser is gone. A poll is a TCP
+   * connect to the debugging port, and polling a port nothing listens on every 1.5 s through a whole
+   * stage crashed the board: Node 24.15's libuv overran its stack in that connect on Windows (0xC0000409,
+   * caught in a dump at 127.0.0.1:<this port>, D391).
+   */
+  private startPolling(w: Watch): void {
+    if (w.poll || w.ended || !w.port) return;
+    w.misses = 0;
     w.poll = setInterval(() => void this.refresh(w), 1500);
     w.poll.unref?.();
+    void this.refresh(w);
+  }
+
+  private stopPolling(w: Watch): void {
+    if (w.poll) clearInterval(w.poll);
+    w.poll = null;
   }
 
   /** The run ended: stop streaming, keep the last picture. */
@@ -137,6 +158,7 @@ export class BrowserWatch {
     if (!w || w.ended) return;
     if (url) w.target = url;
     this.setMeta(w, { action: text });
+    this.startPolling(w);
   }
 
   status(taskId: string): LiveMeta | null {
@@ -154,7 +176,7 @@ export class BrowserWatch {
     if (!w) {
       // Nothing yet: a placeholder the next run for this task will pick the viewers up from.
       w = {
-        taskId, runId: "", port: 0, ended: true, pageId: null, ws: null, msgId: 0, casting: false, poll: null,
+        taskId, runId: "", port: 0, ended: true, pageId: null, ws: null, msgId: 0, casting: false, poll: null, misses: 0,
         meta: { live: false, url: null, title: null, action: null, hasFrame: false }, frame: null,
         frames: new Set(), metas: new Set(), throttle: frameThrottle<Buffer>(FPS_INTERVAL, () => {}), target: null,
       };
@@ -192,8 +214,7 @@ export class BrowserWatch {
 
   private stop(w: Watch): void {
     w.ended = true;
-    if (w.poll) clearInterval(w.poll);
-    w.poll = null;
+    this.stopPolling(w);
     w.throttle.cancel();
     try {
       w.ws?.close();
@@ -212,9 +233,13 @@ export class BrowserWatch {
     try {
       const res = await fetch(`http://127.0.0.1:${w.port}/json/list`, { signal: AbortSignal.timeout(1000) });
       pages = (await res.json()) as PageInfo[];
+      w.misses = 0;
     } catch {
       if (w.meta.live) this.setMeta(w, { live: false });
-      return; // no browser yet, or it closed
+      // No browser yet, or it closed. After about half a minute of nothing, stop knocking on a closed
+      // port; the task's next browser tool starts the search again.
+      if (++w.misses >= MAX_MISSES) this.stopPolling(w);
+      return;
     }
     if (w.ended) return;
     const page = pickPage(pages, w.target);

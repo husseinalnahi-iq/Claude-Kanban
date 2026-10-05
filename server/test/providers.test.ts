@@ -49,7 +49,7 @@ test("a stage on an Anthropic-compatible provider runs the real SDK with env ove
     const types = s.repo.eventsAfter(run.id).map((e) => e.type);
     assert.deepEqual(types, ["user:prompt", "system:init", "assistant", "result:success"]);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -78,10 +78,10 @@ test("a model with no price is a subscription: $0, tokens still counted; Claude 
       assert.equal(r2.provider, null);
       assert.equal(g.calls[0].options.env.ANTHROPIC_BASE_URL, process.env.ANTHROPIC_BASE_URL, "no override for Claude");
     } finally {
-      s2.cleanup();
+      await s2.cleanup();
     }
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -99,7 +99,7 @@ test("the board meters a foreign stage itself and stops it past the per-stage ce
     assert.match(s.repo.getTask(task.id)!.note ?? "", /estimated cost passed the per-stage ceiling/);
     assert.ok(f.calls[0].options.abortController.signal.aborted, "the session was aborted");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -116,7 +116,7 @@ test("a stage naming a missing or disabled provider is refused at queue time", a
     assert.throws(() => s.runner.queueTask(t2.id), /switched off/);
     assert.equal(f.calls.length, 0);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -138,11 +138,11 @@ test("a foreign quota error pauses the task on that provider (not Claude's windo
     assert.equal(s.repo.usageLimits().length, 0, "no Claude window was recorded from a foreign endpoint");
     assert.equal(s.repo.runsForTask(task.id)[0].limit_before, null);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
-test("old string tiers are read as Claude tiers, and a foreign tier sizes a stage with its provider", () => {
+test("old string tiers are read as Claude tiers, and a foreign tier sizes a stage with its provider", async () => {
   const s = setup(fakeQuery().fn);
   try {
     s.repo.db.prepare("UPDATE settings SET value = ? WHERE key = 'tiers'").run(JSON.stringify({ cheap: "claude-haiku-4-5-20251001", balanced: "claude-sonnet-5", strong: "claude-opus-5" }));
@@ -153,7 +153,7 @@ test("old string tiers are read as Claude tiers, and a foreign tier sizes a stag
       { stage: "review", model: "claude-haiku-4-5-20251001", effort: "low" },
     ]);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -174,7 +174,7 @@ test("chat continues an Anthropic-compatible session; the previous result is lab
     await until(() => f.calls.length === 3);
     assert.equal(f.calls[2].options.resume, "s-glm");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 

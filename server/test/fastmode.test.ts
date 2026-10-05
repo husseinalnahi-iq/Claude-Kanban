@@ -66,7 +66,7 @@ test("a ↯ stage on Opus asks the SDK for fast mode; the same flag on another m
     assert.equal(seen[1].settings, undefined, "Sonnet + ↯ → nothing sent");
     assert.equal(seen[2].settings, undefined, "Opus without ↯ → standard speed");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -87,6 +87,6 @@ test("fast-mode availability is read from the init message, before any model cal
     assert.match(status.message, /billed as extra usage, and extra usage is turned off/);
     assert.equal(reachedModel, false, "the check stops at the init message, so it costs nothing");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });

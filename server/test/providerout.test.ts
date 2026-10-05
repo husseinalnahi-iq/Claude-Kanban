@@ -172,7 +172,7 @@ test("a used-up window pauses the task until it resets, holds other work for tha
     await until(() => s.repo.getTask(t.id)!.status === "review" && s.repo.getTask(waiting.id)!.status === "review");
     assert.deepEqual(s.repo.providerOuts(), [], "a stage that worked clears it");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -194,7 +194,7 @@ test("with a fallback set, the stage carries on there at once and the new model 
     const run = s.repo.stageRuns(t.id)[0];
     assert.ok(s.repo.eventsAfter(run.id).some((e) => e.type === "board:switch"), "the switch is in the transcript");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -224,7 +224,7 @@ test("credit that ran out waits for you: switch the stage (and remember it), or 
     assert.equal(s.repo.getTask(other.id)!.status, "failed");
     assert.match(s.repo.getTask(other.id)!.error ?? "", /out of credit/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -239,7 +239,7 @@ test("Claude's usage running out carries the stage on to the Claude fallback whe
     assert.equal(s.repo.getTask(t.id)!.pipeline[0].provider, "zai");
     assert.equal(q.calls.at(-1)!.where, "zai");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -264,6 +264,6 @@ test("an ordinary failure on a provider still fails; the usage panel counts runs
     assert.equal(u.windows[0].used, 1);
     assert.equal(u.out?.kind, "window", "a window the provider says is full holds its work before anything fails");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });

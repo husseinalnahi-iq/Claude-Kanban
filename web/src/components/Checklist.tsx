@@ -37,7 +37,7 @@ export function StepMark({ status, live }: { status: ChecklistItem["status"]; li
 }
 
 /** In the task drawer: Claude's own to-do list for the stage, step by step. */
-export function ChecklistPanel({ list, live }: { list: ChecklistItem[]; live: boolean }) {
+export function ChecklistPanel({ list, live, title }: { list: ChecklistItem[]; live: boolean; title?: string }) {
   const s = checklistSummary(list);
   const [open, setOpen] = useState(true);
   if (!s) return null;
@@ -45,7 +45,7 @@ export function ChecklistPanel({ list, live }: { list: ChecklistItem[]; live: bo
     <div className="border-b border-ink-800 px-5 py-2.5">
       <button type="button" className="flex w-full cursor-pointer items-center gap-2 text-left text-[12px] text-ink-300" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
         <span className="text-[10px] text-ink-500">{open ? "▾" : "▸"}</span>
-        <span className="font-medium text-ink-100">Claude's steps</span>
+        <span className="font-medium text-ink-100">{title ?? "Claude's steps"}</span>
         <span className={`font-mono ${s.done === s.total ? "text-moss" : "text-amber"}`}>{s.done}/{s.total}</span>
         {!open && s.now ? <span className="min-w-0 flex-1 truncate text-ink-400">{s.now}</span> : null}
       </button>

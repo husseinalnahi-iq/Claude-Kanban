@@ -103,7 +103,7 @@ test("a shaky classification is recorded as a suggestion instead of being applie
     assert.equal(after.suggestion?.priority, "p0");
     assert.equal(after.suggestion?.confidence, 0.4);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -115,7 +115,7 @@ test("labels outside the project's vocabulary are dropped", async () => {
     await s.runner.triage(task.id, "classify");
     assert.deepEqual(s.repo.getTask(task.id)!.labels, ["auth"]);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -137,11 +137,11 @@ test("a confident classification sets the type and leaves spec and priority alon
     assert.equal(after.spec_md, "original text", "classification must not rewrite the user's words");
     assert.ok(after.triaged_at);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
-test("applying a refine proposal creates subtasks wired to their dependencies", () => {
+test("applying a refine proposal creates subtasks wired to their dependencies", async () => {
   const s = setup(fakeStructured(null));
   try {
     const task = s.repo.createTask({ project_id: s.project.id, title: "big thing", mode: "supervised", pipeline: ONE_STAGE });
@@ -162,7 +162,7 @@ test("applying a refine proposal creates subtasks wired to their dependencies", 
     assert.deepEqual(subtasks[1].depends_on, [subtasks[0].id], "second waits for the first");
     assert.equal(subtasks[1].priority, "p1", "subtasks inherit the parent's priority");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -186,7 +186,7 @@ test("a follow-up task carries the old task's outcome instead of reopening its s
     assert.deepEqual(s.repo.getTask(done.id)!.related_to, [next.id], "the link goes both ways");
     assert.equal(next.status, "backlog");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -202,7 +202,7 @@ test("dependencies gate queueing, and finishing one releases the next", async ()
     s.repo.updateTask(a.id, { status: "done" });
     assert.deepEqual(s.runner.promoteReady(s.project.id).map((t) => t.title), ["B"], "B is released once A is done");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -294,7 +294,7 @@ test("sizing reaches the task only as a suggestion, and is applied when the huma
     assert.equal(accepted.suggestion?.priority, "p3", "accepting the pipeline does not silently drop the priority suggestion");
     assert.equal(s.runner.acceptSuggestion(task.id, { fields: true }).suggestion, null, "nothing left once every part is decided");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -321,7 +321,7 @@ test("live-system work is never sized down, and the task is offered as a live ta
     assert.equal(accepted.suggestion?.live, undefined, "the accepted part is gone");
     assert.ok(accepted.suggestion?.pipeline, "the pipeline suggestion is still on offer");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -341,7 +341,7 @@ test("a lookup that only reads a live system is neither raised to the strong tie
     assert.equal(sug.sizing_reason, "One read-only query.", "and not described as changing a live system");
     assert.equal(sug.live, undefined, "reading is not changing: no plan approval, no live review");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -359,7 +359,7 @@ test("what the side chat already settled with the user is not suggested again (D
     assert.equal(sug.live, undefined);
     assert.equal(sug.priority, "p2", "type and priority are still classified");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -377,7 +377,7 @@ test("a task that already left Backlog gets no pipeline or mode suggestion", asy
     assert.equal(sug.mode, undefined);
     assert.equal(sug.live, undefined, "nor a live flag: it is already running");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -392,6 +392,6 @@ test("rejecting the suggestion leaves the project default untouched", async () =
     s.repo.updateTask(task.id, { suggestion: null }); // what "Keep default" does
     assert.deepEqual(s.repo.getTask(task.id)!.pipeline, THREE_STAGE);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });

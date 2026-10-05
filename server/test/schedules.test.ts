@@ -64,11 +64,11 @@ test("a card whose start time has come is queued once, and its schedule cleared"
     assert.equal(b.repo.getTask(later.id)!.status, "backlog");
     assert.ok(b.repo.getTask(later.id)!.start_at, "the later card keeps its time");
   } finally {
-    b.cleanup();
+    await b.cleanup();
   }
 });
 
-test("a scheduled card that cannot start keeps a note saying why, and is not retried forever", () => {
+test("a scheduled card that cannot start keeps a note saying why, and is not retried forever", async () => {
   const b = board();
   try {
     // No stages: nothing could ever run it, so retrying at every tick would only fail again.
@@ -80,11 +80,11 @@ test("a scheduled card that cannot start keeps a note saying why, and is not ret
     assert.equal(t.start_at, null);
     assert.match(t.note ?? "", /scheduled start/i);
   } finally {
-    b.cleanup();
+    await b.cleanup();
   }
 });
 
-test("a scheduled card that waits on another is queued at its time and waits in Queued for it (D289)", () => {
+test("a scheduled card that waits on another is queued at its time and waits in Queued for it (D289)", async () => {
   const b = board();
   try {
     const first = b.repo.createTask({ project_id: b.project.id, title: "first", pipeline: ONE });
@@ -95,11 +95,11 @@ test("a scheduled card that waits on another is queued at its time and waits in 
     assert.equal(t.status, "queued");
     assert.equal(t.start_at, null, "the schedule did its job");
   } finally {
-    b.cleanup();
+    await b.cleanup();
   }
 });
 
-test("a card started by hand drops its schedule instead of being queued twice", () => {
+test("a card started by hand drops its schedule instead of being queued twice", async () => {
   const b = board();
   try {
     const t = b.repo.createTask({ project_id: b.project.id, title: "manual", pipeline: ONE, status: "review" });
@@ -108,11 +108,11 @@ test("a card started by hand drops its schedule instead of being queued twice", 
     assert.equal(b.repo.getTask(t.id)!.status, "review");
     assert.equal(b.repo.getTask(t.id)!.start_at, null);
   } finally {
-    b.cleanup();
+    await b.cleanup();
   }
 });
 
-test("'when my limit resets' waits for the five-hour window, then starts", () => {
+test("'when my limit resets' waits for the five-hour window, then starts", async () => {
   const b = board();
   try {
     b.repo.upsertUsageLimit({ type: "five_hour", status: "allowed", utilization: 0.9, resets_at: Math.floor(b.now() / 1000) + 1800 });
@@ -124,11 +124,11 @@ test("'when my limit resets' waits for the five-hour window, then starts", () =>
     b.scheduler.tick();
     assert.notEqual(b.repo.getTask(t.id)!.status, "backlog");
   } finally {
-    b.cleanup();
+    await b.cleanup();
   }
 });
 
-test("a repeating schedule makes a fresh card each time — and only one after days switched off", () => {
+test("a repeating schedule makes a fresh card each time — and only one after days switched off", async () => {
   const b = board();
   try {
     const sc = b.scheduler.create({
@@ -151,11 +151,11 @@ test("a repeating schedule makes a fresh card each time — and only one after d
     b.scheduler.tick();
     assert.equal(b.repo.listTasks({ project_id: b.project.id }).length, 1, "a second tick does nothing");
   } finally {
-    b.cleanup();
+    await b.cleanup();
   }
 });
 
-test("run now makes a card without moving the next run; a paused schedule never fires", () => {
+test("run now makes a card without moving the next run; a paused schedule never fires", async () => {
   const b = board();
   try {
     const sc = b.scheduler.create({
@@ -172,11 +172,11 @@ test("run now makes a card without moving the next run; a paused schedule never 
     const on = b.scheduler.update(sc.id, { enabled: true });
     assert.ok(on.next_run_at, "switching it on works out the next run");
   } finally {
-    b.cleanup();
+    await b.cleanup();
   }
 });
 
-test("the computer is kept awake while anything is queued, running or scheduled", () => {
+test("the computer is kept awake while anything is queued, running or scheduled", async () => {
   const b = board();
   try {
     assert.equal(b.scheduler.wantAwake(), false, "an idle board lets it sleep");
@@ -184,7 +184,7 @@ test("the computer is kept awake while anything is queued, running or scheduled"
     b.repo.updateTask(t.id, { start_at: new Date(b.now() + 3_600_000).toISOString() });
     assert.equal(b.scheduler.wantAwake(), true);
   } finally {
-    b.cleanup();
+    await b.cleanup();
   }
 });
 
@@ -224,11 +224,11 @@ test("API: schedule a card, cancel it; create, pause, run and delete a repeating
     assert.equal(b.repo.listSchedules(b.project.id).length, 0);
   } finally {
     await app.close();
-    b.cleanup();
+    await b.cleanup();
   }
 });
 
-test("a schedule made as \"Autonomous + asks me\" makes cards that may ask you (D361)", () => {
+test("a schedule made as \"Autonomous + asks me\" makes cards that may ask you (D361)", async () => {
   const b = board();
   try {
     const sc = b.scheduler.create({
@@ -241,6 +241,6 @@ test("a schedule made as \"Autonomous + asks me\" makes cards that may ask you (
     assert.equal(card.may_ask, true);
     assert.equal(b.scheduler.update(sc.id, { may_ask: false }).may_ask, false, "and it can be switched off again");
   } finally {
-    b.cleanup();
+    await b.cleanup();
   }
 });

@@ -158,6 +158,9 @@ export function raise(a: Omit<Alert, "id" | "at">) {
   if (ch.desktop && !alert.preview) {
     const n = desktopNotify(alert.label ?? kindInfo(alert.kind).label, `${alert.title} — ${alert.body}`, alert.key ?? `${alert.kind}-${alert.taskId ?? ""}`, {
       sticky: !!alert.key,
+      // Windows chimes for every notification: the speaker must silence that too, and when the board
+      // plays its own sound for this kind the system one would only double it.
+      silent: prefs.muted || ch.sound,
       onClick: () => openTask(alert),
     });
     if (n && alert.key) desk.set(alert.key, n);
@@ -271,6 +274,12 @@ export const clearInbox = () => saveInbox([]);
 if (typeof window !== "undefined") {
   // Read, cleared or added in another tab: this one follows.
   window.addEventListener("storage", (e) => {
+    // Muted in one tab: every other open board goes quiet too, or the speaker looks broken.
+    if (e.key === KEY) {
+      prefs = read();
+      for (const l of prefListeners) l(prefs);
+      return;
+    }
     if (e.key !== INBOX_KEY) return;
     inbox = readInbox();
     for (const l of inboxListeners) l(inbox);

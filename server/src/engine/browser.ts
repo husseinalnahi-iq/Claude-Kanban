@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
@@ -25,11 +25,11 @@ export const CHROME_PREFIX = "mcp__claude-in-chrome__";
  * browser, launched with a debugging port the board connects to for the live view (browserWatch.ts).
  * Playwright still drives it over its own pipe; the port is only for looking.
  */
-export function liveConfig(browser: "chrome" | "msedge" | "chromium" | undefined, port: number, outputDir: string) {
+export function liveConfig(browser: "chrome" | "msedge" | "chromium" | undefined, port: number, outputDir: string, userDataDir?: string) {
   return {
     browser: {
       browserName: "chromium",
-      isolated: true,
+      ...(userDataDir ? { isolated: false, userDataDir } : { isolated: true }),
       launchOptions: { ...(browser && browser !== "chromium" ? { channel: browser } : {}), headless: true, args: [`--remote-debugging-port=${port}`] },
     },
     outputDir,
@@ -41,14 +41,69 @@ export function liveConfig(browser: "chrome" | "msedge" | "chromium" | undefined
  * is Chrome. With `watchPort`, the settings go in a config file in `outputDir` so the launch can carry the
  * debugging port for the live view.
  */
-export function browserServer(outputDir: string, browser?: "chrome" | "msedge" | "chromium", watchPort?: number): McpServerConfig {
+export function browserServer(outputDir: string, browser?: "chrome" | "msedge" | "chromium", watchPort?: number, userDataDir?: string): McpServerConfig {
   if (watchPort) {
     const config = join(outputDir, "playwright.json");
     mkdirSync(outputDir, { recursive: true });
-    writeFileSync(config, JSON.stringify(liveConfig(browser, watchPort, outputDir)));
+    writeFileSync(config, JSON.stringify(liveConfig(browser, watchPort, outputDir, userDataDir)));
     return { type: "stdio", command: "npx", args: ["-y", "@playwright/mcp@latest", "--config", config] };
   }
-  return { type: "stdio", command: "npx", args: ["-y", "@playwright/mcp@latest", "--headless", "--isolated", ...(browser ? ["--browser", browser] : []), "--output-dir", outputDir] };
+  const profile = userDataDir ? ["--user-data-dir", userDataDir] : ["--isolated"];
+  return { type: "stdio", command: "npx", args: ["-y", "@playwright/mcp@latest", "--headless", ...profile, ...(browser ? ["--browser", browser] : []), "--output-dir", outputDir] };
+}
+
+/** The board browser's saved profile: where you sign in once, in the board's state folder (D389). */
+export const BOARD_PROFILE = "browser-profile";
+
+/** Caches and locks are left behind: the sign-ins live in the cookie and storage files, not in them. */
+const NOT_COPIED = /^(Cache|Code Cache|GPUCache|GrShaderCache|ShaderCache|DawnCache|DawnGraphiteCache|DawnWebGPUCache|Crashpad|BrowserMetrics|component_crx_cache|optimization_guide_model_store|Safe Browsing|Singleton.*|lockfile|LOCK)$/i;
+
+/**
+ * A run's own copy of the saved profile, so runs never fight over one folder's lock and nothing a run
+ * does is saved back. A file the sign-in window still holds open is skipped; returns false when
+ * there is no profile yet, or nothing could be copied.
+ */
+export function copyProfile(from: string, to: string): boolean {
+  if (!existsSync(from)) return false;
+  let copied = 0;
+  const walk = (src: string, dest: string) => {
+    mkdirSync(dest, { recursive: true });
+    for (const e of readdirSync(src, { withFileTypes: true })) {
+      if (NOT_COPIED.test(e.name)) continue;
+      const a = join(src, e.name);
+      const b = join(dest, e.name);
+      try {
+        if (e.isDirectory()) walk(a, b);
+        else if (e.isFile()) {
+          copyFileSync(a, b);
+          copied++;
+        }
+      } catch {
+        // open in the sign-in window: the run goes without that file
+      }
+    }
+  };
+  walk(from, to);
+  return copied > 0;
+}
+
+/** `https://erp.example.com/app` and `erp.example.com` are the same site: its host, lower case. */
+export function siteHost(raw: string): string | null {
+  const t = raw.trim().toLowerCase();
+  if (!t) return null;
+  try {
+    const host = new URL(/^[a-z][a-z0-9+.-]*:\/\//.test(t) ? t : `https://${t}`).hostname.replace(/^\[|\]$/g, "");
+    return host.includes(".") || host === "localhost" ? host : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A page on one of the sites you signed in to in the board's browser, or a subdomain of one (D389). */
+export function onSignedInSite(raw: string, sites: string[]): boolean {
+  const host = siteHost(raw);
+  if (!host || !/^https?:/i.test(raw.trim())) return false;
+  return sites.some((s) => host === s || host.endsWith(`.${s}`));
 }
 
 /** What the browser is doing, in words, for the caption under the live view. */
@@ -138,24 +193,29 @@ export function confineOutput(tool: string, input: Record<string, unknown>, outp
  *   open local page   allowed                    allowed
  *   open other site   refused                    approval card
  *   click / type      allowed (local pages)      approval card
+ *   open signed-in    allowed (D389)             approval card
  *   run code, upload  refused                    approval card
- *   Claude in Chrome  refused                    approval card, every call
+ *   Claude in Chrome  refused, or allowed when   approval card, every call
+ *                     Settings choose Chrome
  */
 export function browserDecision(
   toolName: string, raw: Record<string, unknown>, autonomous: boolean, cwd: string, outputDir: string,
+  opts: { sites?: string[]; chrome?: boolean } = {},
 ): BrowserDecision | null {
   if (toolName.startsWith(CHROME_PREFIX)) {
+    // Settings → Browser for tasks → Your Chrome: the owner gives unattended runs their own signed-in browser.
+    if (autonomous && opts.chrome) return { behavior: "allow", input: raw };
     return autonomous
-      ? { behavior: "deny", message: "Autonomous runs never use Claude in Chrome: it is your own browser, signed in to your accounts. Use the board's browser (the browser_* tools) to check local pages." }
+      ? { behavior: "deny", message: "Autonomous runs don't use Claude in Chrome here: it is your own browser, signed in to your accounts. Use the board's browser (the browser_* tools) for local pages and the sites signed in under Settings → Browser for tasks." }
       : { behavior: "ask", input: raw };
   }
   if (!toolName.startsWith(PREFIX)) return null;
   const tool = toolName.slice(PREFIX.length);
   const input = confineOutput(tool, raw, outputDir);
   const url = typeof input.url === "string" ? input.url : null;
-  if (url !== null && !isLocalUrl(url, cwd)) {
+  if (url !== null && !isLocalUrl(url, cwd) && !(autonomous && onSignedInSite(url, opts.sites ?? []))) {
     return autonomous
-      ? { behavior: "deny", message: `Refused ${url}: autonomous runs may only open local pages (localhost, 127.0.0.1, or files in the task's folder). Check the app you are building there.` }
+      ? { behavior: "deny", message: `Refused ${url}: autonomous runs may only open local pages (localhost, 127.0.0.1, or files in the task's folder) and the sites signed in to under Settings → Browser for tasks.` }
       : { behavior: "ask", input };
   }
   if (tool === "browser_navigate" || LOOK.has(tool)) return { behavior: "allow", input };

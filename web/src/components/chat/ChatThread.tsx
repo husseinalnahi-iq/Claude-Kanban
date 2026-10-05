@@ -1,6 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Chat, ChatFile, ChatMessage, Effort, RunStyle } from "../../../../server/src/types.ts";
-import { RUN_STYLES } from "../../../../server/src/types.ts";
 import { ANTHROPIC_PROVIDER_ID, attachmentKind } from "../../../../server/src/types.ts";
 import { effortsFor, useClaudeModels } from "../../lib/claudeModels.ts";
 import { EffortSelect } from "../ClaudeModelPicker.tsx";
@@ -11,7 +10,7 @@ import { useAppData } from "../../lib/store.tsx";
 import { Markdown } from "../../lib/markdown.tsx";
 import { useTaskCards } from "../../views/Board.tsx";
 import { connectedSystemIn } from "../../../../server/src/engine/connected.ts";
-import { PaperclipIcon, Switch } from "../ui.tsx";
+import { PaperclipIcon, RunStyleSwitch } from "../ui.tsx";
 import { autonomousBlocked } from "../forms.tsx";
 import { ChatBoard, ChatCards, ChatTray, ChatUpdateRow } from "./ChatCard.tsx";
 import { CacheStrip } from "./CacheStrip.tsx";
@@ -26,18 +25,6 @@ const STARTERS = [
 /** What you were typing, per project, so closing the panel (or Esc) never loses it. */
 const drafts = new Map<string, string>();
 
-/**
- * The one-line explanation of the connectors switch, shown under the box until you dismiss it. Per
- * machine, like the welcome: the switch itself is three words and a tooltip, which nobody reads.
- */
-const TOOLS_HINT_KEY = "kanban.chat.toolsHint";
-function toolsHintSeen(): boolean {
-  try {
-    return localStorage.getItem(TOOLS_HINT_KEY) === "seen";
-  } catch {
-    return true; // storage blocked: better never than on every load
-  }
-}
 
 /**
  * Memoised: stored messages never change, and a streaming reply re-renders the panel many times a
@@ -102,7 +89,7 @@ function toBase64(file: File): Promise<string> {
 
 /**
  * One conversation: its messages, the reply as it streams, and the box you type in with the model
- * and effort pickers. Shared by the side panel and the Studio, which only differ in what is around
+ * and effort pickers. Shared by the side panel and the AI Manager, which only differ in what is around
  * it. `chatId` null is a chat that does not exist yet: its row is created with the first message, so
  * pressing New never leaves empty chats behind.
  */
@@ -119,9 +106,9 @@ export function ChatThread({
   chatId: string | null;
   /** The thread made the chat's row (first message of a new chat): show it as the open one. */
   onChatId: (id: string) => void;
-  /** Whoever wants the stored messages too (the Studio's Links pane) hears them here. */
+  /** Whoever wants the stored messages too (the AI Manager's Links pane) hears them here. */
   onMessages?: (messages: ChatMessage[]) => void;
-  /** The Studio's middle column: messages in a readable column, with room around them. */
+  /** The AI Manager's middle column: messages in a readable column, with room around them. */
   wide?: boolean;
 }) {
   const { settings } = useAppData();
@@ -129,7 +116,6 @@ export function ChatThread({
   // What a new chat will run on. An empty chat has no row to patch, so the choice waits here.
   const [pending, setPending] = useState<{ model: string; effort: Effort; provider: string } | null>(null);
   // "my connectors and skills" for a chat that does not exist yet: applied to the row once it is made (D335).
-  const [pendingTools, setPendingTools] = useState(false);
   const [pendingMode, setPendingMode] = useState<RunStyle>("supervised");
   // Files attached and not yet sent (D334). A new chat has no row to hold them, so they wait in the browser until the first message.
   const [files, setFiles] = useState<ChatFile[]>([]);
@@ -141,15 +127,6 @@ export function ChatThread({
   const [streaming, setStreaming] = useState("");
   const [text, setText] = useState(() => drafts.get(project.id) ?? "");
   const [error, setError] = useState<string | null>(null);
-  const [toolsHint, setToolsHint] = useState(() => !toolsHintSeen());
-  const dismissToolsHint = () => {
-    setToolsHint(false);
-    try {
-      localStorage.setItem(TOOLS_HINT_KEY, "seen");
-    } catch {
-      // a private window just sees it again next time
-    }
-  };
   const scroller = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
 
@@ -232,8 +209,9 @@ export function ChatThread({
     else setPending({ model: v.model, provider: v.provider, effort: keep });
   };
   const setEffort = (e: Effort) => (chat ? void api.patchChat(chat.id, { effort: e }).catch(say) : setPending({ model, provider, effort: e }));
-  const useTools = chat?.use_tools ?? pendingTools;
-  const setUseTools = (on: boolean) => (chat ? void api.patchChat(chat.id, { use_tools: on }).catch(say) : setPendingTools(on));
+  // Every chat has your connectors and skills unless Settings turned them off (D381): no switch per chat.
+  const useTools = settings?.chatTools !== false;
+  const turnToolsOn = () => void api.patchSettings({ chatTools: true }).catch(say);
   // How the cards this chat makes will run, unless a message says otherwise (D344).
   const mode: RunStyle = chat?.mode ?? pendingMode;
   const setMode = (m: RunStyle) => (chat ? void api.patchChat(chat.id, { mode: m }).catch(say) : setPendingMode(m));
@@ -279,8 +257,8 @@ export function ChatThread({
         const c = await api.createChat(project.id);
         id = c.id;
         // The chat row exists only now, so the model and tools picked before the first message land here.
-        if (pending || pendingTools || pendingMode !== "supervised") {
-          await api.patchChat(c.id, { ...(pending ?? {}), ...(pendingTools ? { use_tools: true } : {}), ...(pendingMode !== "supervised" ? { mode: pendingMode } : {}) }).catch(() => {});
+        if (pending || pendingMode !== "supervised") {
+          await api.patchChat(c.id, { ...(pending ?? {}), ...(pendingMode !== "supervised" ? { mode: pendingMode } : {}) }).catch(() => {});
         }
         for (const f of local) await api.addChatFile(c.id, { name: f.name || "pasted image.png", data: await toBase64(f) });
         setLocal([]);
@@ -316,7 +294,7 @@ export function ChatThread({
   return (
     <ChatBoard.Provider value={board}>
       <div className="flex h-full min-h-0 flex-col">
-        {/* The Studio carries the cache bar on its title row; the panel keeps the strip above the thread. */}
+        {/* The AI Manager carries the cache bar on its title row; the panel keeps the strip above the thread. */}
         {chat && !wide ? <CacheStrip chat={chat} compact /> : null}
         <div
           ref={scroller}
@@ -362,17 +340,17 @@ export function ChatThread({
 
         <footer className={wide ? "px-4 pb-3 pt-1" : "border-t border-ink-800 px-3 pb-3 pt-2.5"}>
           <div className={column}>
-            {/* The Studio has the work on its right; the panel keeps its cards above the box, where they stay in sight. */}
+            {/* The AI Manager has the work on its right; the panel keeps its cards above the box, where they stay in sight. */}
             {wide ? null : <ChatTray chatId={chatId} />}
             {error ? <div className="mb-2 text-[12px] text-rust">{error}</div> : null}
             {offerTools ? (
               <div className="rise mb-2 flex items-center gap-2 rounded-lg border border-amber/40 bg-amber/5 px-3 py-1.5 text-[11.5px] leading-snug text-ink-300">
                 <span className="min-w-0 flex-1">
-                  Asking about {offerTools}? With <span className="font-medium text-ink-100">my connectors and skills</span> on, this chat looks there itself
-                  when {offerTools === "your MCP server" ? "it is" : `${offerTools} is`} connected to your Claude. Off, it makes a card for the lookup.
+                  Asking about {offerTools}? Your connectors and skills are off in Settings, so this chat makes a card for the lookup. Turned on, it looks
+                  there itself when {offerTools === "your MCP server" ? "it is" : `${offerTools} is`} connected to your Claude.
                 </span>
-                <button className="shrink-0 cursor-pointer rounded-md bg-amber/90 px-2 py-1 text-[11px] font-semibold text-ink-950 hover:bg-amber" onClick={() => setUseTools(true)}>
-                  Turn it on
+                <button className="shrink-0 cursor-pointer rounded-md bg-amber/90 px-2 py-1 text-[11px] font-semibold text-ink-950 hover:bg-amber" onClick={turnToolsOn}>
+                  Turn them on
                 </button>
                 <button className="shrink-0 cursor-pointer px-1 text-ink-500 hover:text-ink-200" title="Not for this one" onClick={() => setMutedSystem(offerTools)}>
                   ×
@@ -436,35 +414,19 @@ export function ChatThread({
                     <EffortSelect model={model} value={effort} onChange={setEffort} />
                   </div>
                 )}
-                <label
-                  className={`flex h-[34px] shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-1 text-[11.5px] ${useTools ? "text-ink-200" : "text-ink-500"}`}
-                  title="Give this chat your connected systems (Slack, Gmail, Google Drive, your own MCP servers) and your skills, the way a task gets them. Off, a chat is quicker and cheaper: their tool lists ride on every message. Either way it never changes files; it only reads and runs read-only commands itself."
-                >
-                  <Switch on={useTools} onChange={setUseTools} />
-                  my connectors and skills
-                </label>
                 {/* The mode the cards of this chat will run in; a message that names one wins (D344). */}
-                <div className="flex h-[34px] shrink-0 items-stretch overflow-hidden rounded-md border border-ink-700 text-[11.5px]" role="radiogroup" aria-label="How cards from this chat run">
-                  {RUN_STYLES.map((m) => (
-                    <button
-                      key={m}
-                      role="radio"
-                      aria-checked={mode === m}
-                      disabled={m !== "supervised" && !!noAuto}
-                      className={`flex cursor-pointer items-center px-2.5 transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${mode === m ? (m === "ask" ? "bg-iris/15 text-iris" : m === "autonomous" ? "bg-amber/15 text-amber" : "bg-cyan/15 text-cyan") : "text-ink-500 hover:text-ink-200"}`}
-                      title={
-                        m === "ask"
-                          ? noAuto ?? "Cards this chat makes work like autonomous, but when one needs your answer it stops and asks you — here in the chat, on the card and in a pop-up — and waits. Click an answer, or just tell Claude."
-                          : m === "autonomous"
-                          ? noAuto ?? "Cards this chat makes work on their own branch without asking, and the work lands when you approve it. Say “supervised” in a message to make one card the other way. A lookup card runs in the project's own folder and asks nothing (it changes nothing), unless the project keeps autonomous in a sandbox."
-                          : "Cards this chat makes work in the project's own folder and ask you before each change; “Always allow” on a card stops the asking for that command. Say “autonomous” in a message to make one card the other way."
-                      }
-                      onClick={() => setMode(m)}
-                    >
-                      {m === "ask" ? "asks me" : m}
-                    </button>
-                  ))}
-                </div>
+                <RunStyleSwitch
+                  size="md"
+                  value={mode}
+                  onChange={setMode}
+                  blocked={noAuto}
+                  label="How cards from this chat run"
+                  titles={{
+                    ask: "Cards this chat makes work like autonomous, but when one needs your answer it stops and asks you — here in the chat, on the card and in a pop-up — and waits. Click an answer, or just tell Claude.",
+                    autonomous: "Cards this chat makes work on their own branch without asking, and the work lands when you approve it. Say “supervised” in a message to make one card the other way. A lookup card runs in the project's own folder and asks nothing (it changes nothing), unless the project keeps autonomous in a sandbox.",
+                    supervised: "Cards this chat makes work in the project's own folder and ask you before each change; “Always allow” on a card stops the asking for that command. Say “autonomous” in a message to make one card the other way.",
+                  }}
+                />
                 </div>
                 <div className="ml-auto flex shrink-0 items-center gap-2">
                 <span className="hidden whitespace-nowrap text-[10.5px] text-ink-600 2xl:inline">Enter to send · Shift+Enter new line</span>
@@ -493,17 +455,6 @@ export function ChatThread({
                 </div>
               </div>
             </div>
-            {toolsHint ? (
-              <div className="rise mt-1.5 flex items-start gap-2 px-1 text-[11.5px] leading-snug text-ink-400">
-                <span className="min-w-0 flex-1">
-                  <span className="font-medium text-ink-200">my connectors and skills</span> gives this chat your connected systems (Slack, Gmail, Google Drive, your own MCP servers)
-                  and your skills, so it can look there itself instead of making a card. Leave it off for plain questions about the project: quicker and cheaper.
-                </span>
-                <button className="shrink-0 cursor-pointer text-amber hover:underline" onClick={dismissToolsHint}>
-                  Got it
-                </button>
-              </div>
-            ) : null}
           </div>
         </footer>
       </div>

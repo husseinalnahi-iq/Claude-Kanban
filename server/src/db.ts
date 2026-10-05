@@ -165,6 +165,13 @@ const LATER_COLUMNS: { table: string; column: string; ddl: string; backfill?: st
   { table: "notes", column: "flag_reason", ddl: "flag_reason TEXT" },
   { table: "notes", column: "flagged_at", ddl: "flagged_at TEXT" },
   { table: "notes", column: "flag_task_id", ddl: "flag_task_id TEXT" },
+  { table: "runs", column: "explore_weight", ddl: "explore_weight REAL" },
+  { table: "runs", column: "round", ddl: "round INTEGER NOT NULL DEFAULT 1" },
+  { table: "tasks", column: "round", ddl: "round INTEGER NOT NULL DEFAULT 1" },
+  { table: "tasks", column: "round_cost_base", ddl: "round_cost_base REAL NOT NULL DEFAULT 0" },
+  { table: "tasks", column: "checklist_from", ddl: "checklist_from INTEGER NOT NULL DEFAULT 0" },
+  { table: "tasks", column: "files_json", ddl: "files_json TEXT NOT NULL DEFAULT '[]'" },
+  { table: "tasks", column: "landed_sha", ddl: "landed_sha TEXT" },
 ];
 
 /**
@@ -241,12 +248,17 @@ export function openDb(file: string): DatabaseSync {
   seed.run("chatKeepAliveMessage", "Hi, just keeping this chat warm. Reply in one line.");
   seed.run("chatKeepAliveMaxHours", "8");
   seed.run("nextStepsSuggestions", "true");
+  seed.run("chatTools", "true");
+  seed.run("followUpRouting", "memory");
   seed.run("specModel", "claude-opus-5-5");
   seed.run("specEffort", "high");
   seed.run("loadUserPlugins", "true");
   seed.run("claudeAutoMemory", "false");
+  seed.run("autonomousLive", "true");
   seed.run("browserChecks", "true");
   seed.run("chromeInSupervised", "false");
+  seed.run("taskBrowser", "board");
+  seed.run("browserSites", "[]");
   seed.run("autoAllowReadOnly", "true");
   seed.run("markitdownInTasks", "true");
   seed.run("planApproval", "false");

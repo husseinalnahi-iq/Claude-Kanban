@@ -77,7 +77,7 @@ test("a failure is a usage-limit pause only when a window covering that model wa
     assert.match(t.error ?? "", /TypeError/);
     assert.equal(s.runner.limitedUntil(), null, "so the queue is not held for a window nobody hit");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 
   // The same window shut while an Opus stage ran is that stage's limit.
@@ -94,7 +94,7 @@ test("a failure is a usage-limit pause only when a window covering that model wa
     assert.equal(s2.repo.getTask(task.id)!.status, "paused");
     assert.equal(s2.repo.getTask(task.id)!.pause_reason, "limit");
   } finally {
-    s2.cleanup();
+    await s2.cleanup();
   }
 });
 
@@ -116,7 +116,7 @@ test("a full Opus window does not send a Sonnet stage to the fallback provider",
     await until(() => s.repo.getTask(opus.id)!.status === "review");
     assert.equal(f.calls[1].options.model, "glm-5.3", "the Opus stage is the one that moves");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -151,7 +151,7 @@ test("a chat turn you stop yourself ends as stopped, not as paused by the usage 
     assert.equal(t.error, "stopped by user");
     assert.equal(t.resume_at, null, "nothing was scheduled to resume by itself");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -170,7 +170,7 @@ test("Resume now on one task releases every task the usage limit paused", async 
     await until(() => ids.every((id) => s.repo.getTask(id)!.status === "review"));
     assert.equal(f.calls.length, 2);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -201,7 +201,7 @@ test("an autonomous run's sandbox and blocked list are enforced by a hook too, s
     assert.equal(await ask("mcp__board__board_set_summary", { text: "x" }), undefined);
     assert.equal(await ask("AskUserQuestion", { questions: [] }), undefined);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -217,7 +217,7 @@ test("Update from base brings a task's worktree up to date", async () => {
     assert.match(s.repo.getTask(task.id)!.note ?? "", /Updated from "main" \(2 commits\)/);
     assert.equal(runner.isBusy(task.id), false);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -247,7 +247,7 @@ test("a worktree whose setup command failed is set up again on Retry, and only u
     assert.equal(readFileSync(join(s.dir, "setup.log"), "utf8"), "xx", "once it has worked it is not run again");
     assert.equal(existsSync(`${s.dir}.setup-pending`), false);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -270,7 +270,7 @@ test("a task's sessions and its verify command get a state folder of their own, 
   } finally {
     if (before === undefined) delete process.env.KANBAN_STATE_DIR;
     else process.env.KANBAN_STATE_DIR = before;
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -293,7 +293,7 @@ test("a foreign stage the board stops for cost keeps what it spent, and a reply 
     assert.match(s.repo.getTask(task.id)!.note ?? "", /Stopped at \$15\.00/, "the pause card says what was really spent");
     assert.equal(s.repo.taskCost(task.id), 15, "and the task's ceiling counts it");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -321,7 +321,7 @@ test("a stage whose session cannot start fails cleanly: its run is closed and th
     s.runner.retryTask(task.id);
     await until(() => s.repo.getTask(task.id)!.status === "review");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -341,7 +341,7 @@ test("a critic that cannot run never blocks the work: the plan stands and the co
     const plan = s.repo.stageRuns(task.id)[0];
     assert.ok(s.repo.eventsAfter(plan.id).some((e) => e.type === "debate:skipped"));
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -365,7 +365,7 @@ test("a message whose session cannot start fails the task with the reason and le
     assert.equal(run.status, "success");
     assert.equal(run.result_md, "DONE");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -378,7 +378,7 @@ test("listing Claude's models survives a Claude Code that cannot start", async (
     assert.equal(list.source, "unavailable");
     assert.match(list.error ?? "", /ENOENT/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -401,7 +401,7 @@ test("a message is refused while a task is paused, so it keeps its place", async
     assert.deepEqual([t.status, t.resume_at], ["paused", later], "still paused, still due to resume by itself");
     assert.equal(f.calls.length, 1, "no session was started");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -423,7 +423,78 @@ test("a task sent back from Review and still queued at a restart starts over, no
     assert.equal(f.calls[2].options.resume, undefined, "in a fresh session");
     assert.match(f.calls[3].prompt, /# Stage: code/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
+  }
+});
+
+/** The board died mid-stage: its newest code run is left "running", as a crash leaves it. */
+function cutOffMidCode(s: ReturnType<typeof setup>, taskId: string): string {
+  const code = s.repo.stageRuns(taskId).filter((r) => r.stage_index === 1).at(-1)!;
+  s.repo.updateRun(code.id, { status: "running", ended_at: null, error: null });
+  s.repo.updateTask(taskId, { status: "running" });
+  return code.id;
+}
+
+test("after the board crashes, a stage it cut off carries on in its own session by itself", async () => {
+  const f = fakeQuery({ sessionId: "sess" });
+  const s = setup(f.fn);
+  try {
+    const task = s.repo.createTask({ project_id: s.project.id, title: "x", mode: "supervised", pipeline: PLAN_CODE });
+    s.runner.queueTask(task.id);
+    await until(() => s.repo.getTask(task.id)!.status === "review");
+    const cut = cutOffMidCode(s, task.id);
+
+    new TaskRunner({ repo: s.repo, bus: s.bus, queryFn: f.fn }).recover({ afterCrash: true });
+    await until(() => s.repo.getTask(task.id)!.status === "review" && f.calls.length === 3);
+    assert.equal(s.repo.getRun(cut)!.error, "interrupted", "the cut-off run is still recorded as interrupted");
+    assert.equal(f.calls[2].options.resume, "sess", "the code stage continued its session");
+    const again = s.repo.stageRuns(task.id).at(-1)!;
+    assert.equal(again.stage_index, 1, "from the code stage, not the plan");
+    assert.ok(s.repo.eventsAfter(again.id).some((e) => JSON.stringify(e.payload).includes("stopped unexpectedly")), "the card says why it started again");
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test("after an ordinary restart, a cut-off stage still waits for Retry", async () => {
+  const f = fakeQuery({ sessionId: "sess" });
+  const s = setup(f.fn);
+  try {
+    const task = s.repo.createTask({ project_id: s.project.id, title: "x", mode: "supervised", pipeline: PLAN_CODE });
+    s.runner.queueTask(task.id);
+    await until(() => s.repo.getTask(task.id)!.status === "review");
+    cutOffMidCode(s, task.id);
+
+    new TaskRunner({ repo: s.repo, bus: s.bus, queryFn: f.fn }).recover();
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(s.repo.getTask(task.id)!.status, "failed");
+    assert.equal(f.calls.length, 2, "nothing started");
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test("a stage the board crashed in three times within half an hour is left for you", async () => {
+  const f = fakeQuery({ sessionId: "sess" });
+  const s = setup(f.fn);
+  try {
+    const task = s.repo.createTask({ project_id: s.project.id, title: "x", mode: "supervised", pipeline: PLAN_CODE });
+    s.runner.queueTask(task.id);
+    await until(() => s.repo.getTask(task.id)!.status === "review");
+    for (const calls of [3, 4]) {
+      cutOffMidCode(s, task.id);
+      new TaskRunner({ repo: s.repo, bus: s.bus, queryFn: f.fn }).recover({ afterCrash: true });
+      await until(() => s.repo.getTask(task.id)!.status === "review" && f.calls.length === calls);
+    }
+    cutOffMidCode(s, task.id);
+    new TaskRunner({ repo: s.repo, bus: s.bus, queryFn: f.fn }).recover({ afterCrash: true });
+    await new Promise((r) => setTimeout(r, 100));
+    const t = s.repo.getTask(task.id)!;
+    assert.equal(t.status, "failed");
+    assert.match(t.error ?? "", /stopped 3 times in 30 minutes/);
+    assert.equal(f.calls.length, 4, "the third crash did not start it again");
+  } finally {
+    await s.cleanup();
   }
 });
 
@@ -442,7 +513,7 @@ test("a stage moved to another model after running out of turns gets its whole p
     assert.match(f.calls[1].prompt, /Tidy the importer/);
     assert.doesNotMatch(f.calls[1].prompt, /^You reached this stage's turn limit/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -469,7 +540,7 @@ test("the verify command that passed as the stage ended is not run a second time
       await until(() => s.repo.getTask(task.id)!.status === "review");
       assert.equal(readFileSync(join(s.dir, "verify.log"), "utf8"), runs, why);
     } finally {
-      s.cleanup();
+      await s.cleanup();
     }
   }
 });
@@ -493,7 +564,7 @@ test("a run's growing context is broadcast about once a second, and its last val
     const finished = s.seen.find((m) => m.type === "run.finished" && m.run.id === run.id);
     assert.equal(finished?.type === "run.finished" ? finished.run.context_tokens : null, 40_000);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -523,7 +594,7 @@ test("a pump of the queue reads the settings once, however many tasks are waitin
     await until(() => ids.every((id) => s.repo.getTask(id)!.status === "review"));
   } finally {
     open();
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -550,6 +621,6 @@ test("two screens asking what runs get, or whether fast mode is on, share one ch
     assert.equal(x, y);
     assert.equal(x.servers[0].name, "board");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });

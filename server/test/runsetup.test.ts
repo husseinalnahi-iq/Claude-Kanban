@@ -56,7 +56,7 @@ test("a supervised task updates its to-do list without an approval card (D363)",
     q.release();
     await until(() => s.repo.getTask(task.id)!.status === "review");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -116,7 +116,7 @@ test("a supervised run reads a connector without a card, and the switch for read
     assert.equal(s.repo.pendingApprovals(task.id)[0].tool_name, "mcp__claude_ai_Google_Sheets__get_values");
     s.runner.stopTask(task.id);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -136,7 +136,7 @@ test("a running task can change the model of a step that hasn't started, and tha
     assert.equal(q.calls[1].options.model, "claude-opus-5-5", "the review ran on the model picked mid-run");
     assert.equal(q.calls[1].options.effort, "max");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -156,7 +156,7 @@ test("a running task can't change a step that already started, nor its mode (D36
     q.release();
     await until(() => s.repo.getTask(task.id)!.status === "review");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -184,11 +184,11 @@ test("a planned card the chat made waits for its setup to be confirmed before it
     assert.equal(s.repo.getTask(t.id)!.status, "queued", "Start on the card lets it go");
     s.runner.stopTask(t.id);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
-test("a quick change from the chat, and a card made anywhere else, queue without a setup card (D365)", () => {
+test("a quick change from the chat, and a card made anywhere else, queue without a setup card (D365)", async () => {
   const s = setup(heldQuery().fn);
   const h = chatBoardHandlers({ repo: s.repo, bus: s.bus, runner: s.runner }, s.project.id, null, () => {});
   const read = (r: { content: { text: string }[] }) => JSON.parse(r.content[0].text);
@@ -201,11 +201,11 @@ test("a quick change from the chat, and a card made anywhere else, queue without
     const off = read(h.createTask({ title: "Planned, switch off", spec_md: "x" }));
     assert.equal(s.repo.getTask(off.created.id)!.setup_pending, false, "the setting turns the check off");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
-test("new cards default to high effort at every step and to Autonomous + asks me, and both settings save (D365, D366)", () => {
+test("new cards default to high effort at every step and to Autonomous + asks me, and both settings save (D365, D366)", async () => {
   assert.deepEqual(SEED_PIPELINE.map((x) => x.effort), ["high", "high", "high"]);
   const s = setup(heldQuery().fn);
   try {
@@ -216,6 +216,6 @@ test("new cards default to high effort at every step and to Autonomous + asks me
     assert.equal(s.repo.getSettings().defaultRunStyle, "supervised", "it saves and reads back");
     assert.equal(s.repo.getSettings().confirmSetup, false);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });

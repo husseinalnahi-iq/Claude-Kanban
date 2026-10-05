@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 
-export type View = "board" | "dashboard" | "roadmap" | "approvals" | "sessions" | "skills" | "settings" | "tour" | "setup" | "studio";
+export type View = "board" | "dashboard" | "roadmap" | "approvals" | "sessions" | "skills" | "settings" | "tour" | "setup" | "ai-manager";
 
 export interface Route {
   view: View;
@@ -8,12 +8,16 @@ export interface Route {
   taskId: string | null;
 }
 
-const VIEWS: View[] = ["board", "dashboard", "roadmap", "approvals", "sessions", "skills", "settings", "tour", "setup", "studio"];
+const VIEWS: View[] = ["board", "dashboard", "roadmap", "approvals", "sessions", "skills", "settings", "tour", "setup", "ai-manager"];
 
 /** Hash routes: #/<view>/<projectId>?task=<taskId> */
 function parse(): Route {
   const [path, query = ""] = location.hash.replace(/^#\/?/, "").split("?");
-  const [view, projectId] = path.split("/");
+  const [raw, projectId] = path.split("/");
+  // The AI Manager was the Studio until D371: links and bookmarks to #/studio still open it.
+  const view = raw === "studio" ? "ai-manager" : raw;
+  // Rewritten in place (no hashchange, no history entry) so a bookmark made now gets the new name.
+  if (raw === "studio") history.replaceState(null, "", location.href.replace("#/studio", "#/ai-manager"));
   const params = new URLSearchParams(query);
   return {
     view: VIEWS.includes(view as View) ? (view as View) : "board",

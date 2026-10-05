@@ -14,7 +14,7 @@ import { autonomousGate, markitdownRead, serverRule } from "../src/engine/gate.t
 import { markitdownDir, recommendedChecks, venvPython } from "../src/setup/recommended.ts";
 import type { Probe, RunResult } from "../src/setup/probe.ts";
 import { MARKITDOWN_TOOL, type Mode, type Stage } from "../src/types.ts";
-import { until } from "./helpers.ts";
+import { until, removeTemp } from "./helpers.ts";
 
 test("MarkItDown reads web pages and inline data freely, and files only inside the task's folders", () => {
   const cwd = "/work/proj/.kanban/wt/t1";
@@ -77,7 +77,7 @@ async function stage(mode: Mode, settings: Record<string, unknown>, probe: (o: O
     await until(() => ["review", "failed"].includes(repo.getTask(task.id)!.status));
     assert.equal(repo.getTask(task.id)!.error, null);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    await removeTemp(dir);
   }
 }
 

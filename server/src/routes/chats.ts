@@ -37,7 +37,7 @@ export async function chatRoutes(app: FastifyInstance, { repo, runner, chat }: A
     return chat.update(idOf(req), body as never);
   });
 
-  // Folders on the Studio's chat list: a name over a group of chats, nothing more.
+  // Folders on the AI Manager's chat list: a name over a group of chats, nothing more.
   app.get("/projects/:id/chat-folders", async (req) => chat.folders(idOf(req)));
 
   app.post("/projects/:id/chat-folders", async (req) => {

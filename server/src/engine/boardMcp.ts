@@ -198,7 +198,7 @@ export function boardHandlers(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtasks?: 
     },
 
     /** A decision for the person that does not stop the run: it goes on the card, the run carries on (D203). */
-    ask(args: { question: string; options?: string[]; default?: string }) {
+    ask(args: { question: string; options?: string[]; recommended?: string; default?: string }) {
       const task = own();
       const run = repo.getRun(ctx.runId);
       const asked = args.question.trim().slice(0, 1000);
@@ -209,6 +209,7 @@ export function boardHandlers(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtasks?: 
         text: asked,
         options: (args.options ?? []).map((o) => o.trim().slice(0, 300)).filter(Boolean).slice(0, 6),
         default: args.default?.trim().slice(0, 300) || null,
+        recommended: args.recommended?.trim().slice(0, 300) || null,
         answer: null,
         created_at: new Date().toISOString(),
         answered_at: null,
@@ -221,11 +222,37 @@ export function boardHandlers(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtasks?: 
       );
     },
 
-    /** The stage cannot do the task from here. The board stops the pipeline after this stage (D184). */
+    /**
+     * The stage cannot do the task from here. The board stops the pipeline after this stage (D184) —
+     * except an autonomous run that needs a supervised one: the person chose to let it run, so that is
+     * a suggestion on the card and the run does what the sandbox allows (D382).
+     */
     reportBlocked(args: { reason: string; needs: Blocked["needs"]; ask?: string }) {
       const run = repo.getRun(ctx.runId);
+      const mode = own().mode;
+      if (mode === "autonomous" && args.needs === "supervised") {
+        const advisory: Blocked = {
+          advisory: true,
+          mode,
+          stage_index: run?.stage_index ?? 0,
+          reason: args.reason.trim().slice(0, 1000),
+          needs: "supervised",
+          ask: args.ask?.trim().slice(0, 1000) || null,
+          source: "agent",
+          created_at: new Date().toISOString(),
+        };
+        // A stop already on record outranks a suggestion: it is what the person has to deal with.
+        const current = own().blocked;
+        if (!current || current.advisory) bus.publish({ type: "task.updated", task: repo.updateTask(ctx.taskId, { blocked: advisory }) });
+        return text(
+          "Recorded on the card as a suggestion: the person can switch this task to supervised later. The run is not stopped. " +
+            "Do not try to reach what the sandbox refuses another way. Carry on with everything that can be done inside your folder — " +
+            "plan it, write the code and the tests, prepare the scripts and the exact commands — and end your report with a " +
+            "`## Left for a supervised run` list: each step that needs the access, in order, with what it does and how to check it.",
+        );
+      }
       const blocked: Blocked = {
-        mode: own().mode,
+        mode,
         stage_index: run?.stage_index ?? 0,
         reason: args.reason.trim().slice(0, 1000),
         needs: args.needs,
@@ -288,11 +315,13 @@ export function createBoardServer(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtask
         {
           question: z.string().min(8).describe("The question, answerable without reading your transcript."),
           options: z.array(z.string()).max(6).optional().describe("Choices, when it is one of a few."),
+          recommended: z.string().optional().describe("The option you recommend, copied exactly from options. Give it whenever you give options: the card shows it as recommended, and it is what you carry on with."),
           default: z.string().optional().describe("What you are doing meanwhile."),
         },
         async (a) => h.ask(a as Parameters<typeof h.ask>[0])),
       tool("board_report_blocked",
-        "Report that you cannot do this task from where you run — the sandbox refuses what it needs (live systems, credentials, files outside your folder), or you need a decision or information only the person has. The board stops the pipeline after this stage instead of passing half-done work on as a success, and shows your reason and ask on the card. Call it once, then end your turn.",
+        "Report that you cannot do this task from where you run — the sandbox refuses what it needs (live systems, credentials, files outside your folder), or you need a decision or information only the person has. The board stops the pipeline after this stage instead of passing half-done work on as a success, and shows your reason and ask on the card. Call it once, then end your turn. " +
+          "In an autonomous (sandboxed) run, needs \"supervised\" does not stop the run: it puts a suggestion on the card and you carry on with what can be done inside your folder.",
         {
           reason: z.string().min(8).describe("What stops you, in one or two plain sentences."),
           needs: z.enum(["supervised", "input", "other"]).describe("supervised = it needs access only an approved run has; input = a decision or information from the person; other = anything else."),

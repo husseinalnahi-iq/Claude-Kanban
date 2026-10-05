@@ -178,7 +178,7 @@ test("Approve records when a branch was merged; a task finished without one, or 
     repo.updateTask(branched.id, { status: "review", branch: wt.branch, worktree_path: wt.path, base_sha: wt.baseSha });
     const merged = await runner.approveTask(branched.id);
     assert.equal(merged.status, "done");
-    assert.ok(merged.merged_at, "the Studio shows a merge icon from this");
+    assert.ok(merged.merged_at, "the AI Manager shows a merge icon from this");
 
     const plain = repo.createTask({ project_id: project.id, title: "nothing to merge", mode: "supervised", pipeline });
     repo.updateTask(plain.id, { status: "review" });

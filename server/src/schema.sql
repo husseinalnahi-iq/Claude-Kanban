@@ -261,7 +261,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 );
 CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id, id);
 
--- Folders a project's chats can be filed in (the Studio's left pane). A chat's folder_id names one; deleting
+-- Folders a project's chats can be filed in (the AI Manager's left pane). A chat's folder_id names one; deleting
 -- a folder only empties it, the chats stay.
 CREATE TABLE IF NOT EXISTS chat_folders (
   id          TEXT PRIMARY KEY,
@@ -301,3 +301,17 @@ CREATE TABLE IF NOT EXISTS spec_versions (
   created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS spec_versions_task ON spec_versions(task_id, created_at);
+
+-- Follow-up rounds on a card (D375): round 1 is the card itself; each later one is a row here.
+CREATE TABLE IF NOT EXISTS task_rounds (
+  id             TEXT PRIMARY KEY,
+  task_id        TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  round          INTEGER NOT NULL,
+  request        TEXT NOT NULL,
+  review         INTEGER NOT NULL DEFAULT 0,
+  checklist_from INTEGER NOT NULL DEFAULT 0,
+  fell_back      INTEGER NOT NULL DEFAULT 0,
+  started_at     TEXT NOT NULL,
+  landed_at      TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS task_rounds_task ON task_rounds(task_id, round);

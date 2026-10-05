@@ -48,7 +48,7 @@ const Dashboard = later(() => import("./views/Dashboard.tsx").then((m) => ({ def
 const Settings = later(() => import("./views/Settings.tsx").then((m) => ({ default: m.Settings })));
 const Tour = later(() => import("./views/Tour.tsx").then((m) => ({ default: m.Tour })));
 const Setup = later(() => import("./views/Setup.tsx").then((m) => ({ default: m.Setup })));
-const Studio = later(() => import("./views/Studio.tsx").then((m) => ({ default: m.Studio })));
+const AiManager = later(() => import("./views/AiManager.tsx").then((m) => ({ default: m.AiManager })));
 const TerminalDock = later(() => import("./components/TerminalDock.tsx").then((m) => ({ default: m.TerminalDock })));
 
 const NAV: { view: View; label: string; key: string }[] = [
@@ -61,7 +61,7 @@ const NAV: { view: View; label: string; key: string }[] = [
   { view: "settings", label: "Settings", key: "7" },
   { view: "tour", label: "✦ Tour", key: "8" },
   { view: "setup", label: "Setup", key: "9" },
-  { view: "studio", label: "✦ Studio", key: "0" },
+  { view: "ai-manager", label: "✦ AI Manager", key: "0" },
 ];
 
 const initials = (name: string) =>
@@ -110,8 +110,8 @@ export function App() {
       const n = NAV.find((x) => x.key === e.key);
       if (n && !e.ctrlKey && !e.metaKey && !e.altKey) navigate({ view: n.view });
       if (e.key === "a" && !e.ctrlKey && !e.metaKey && !e.altKey) navigate({ view: "approvals" });
-      // The Studio is the chat: there is no side panel to open over it.
-      if (e.key === "c" && !e.ctrlKey && !e.metaKey && !e.altKey && getRoute().view !== "studio") {
+      // The AI Manager is the chat: there is no side panel to open over it.
+      if (e.key === "c" && !e.ctrlKey && !e.metaKey && !e.altKey && getRoute().view !== "ai-manager") {
         e.preventDefault(); // or the "c" lands in the chat box that just took focus
         setChatting((v) => !v);
       }
@@ -180,13 +180,13 @@ export function App() {
     </>
   );
 
-  // The Studio takes the whole window: no project rail, no tabs, nothing of the board until its Board button.
-  if (route.view === "studio") {
+  // The AI Manager takes the whole window: no project rail, no tabs, nothing of the board until its Board button.
+  if (route.view === "ai-manager") {
     return (
       <div className="h-full">
-        <ErrorBoundary key={`studio:${route.projectId ?? ""}`} onClose={() => navigate({ view: "board" })}>
+        <ErrorBoundary key={`ai-manager:${route.projectId ?? ""}`} onClose={() => navigate({ view: "board" })}>
           <Suspense fallback={<div className="p-6 text-[12px] text-ink-400">Loading…</div>}>
-            <Studio project={project} projects={projects} onAddProject={() => setAdding(true)} onSearch={() => setSearching(true)} />
+            <AiManager project={project} projects={projects} onAddProject={() => setAdding(true)} onSearch={() => setSearching(true)} />
           </Suspense>
         </ErrorBoundary>
         {overlays}

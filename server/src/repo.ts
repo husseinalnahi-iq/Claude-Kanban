@@ -6,10 +6,12 @@ import type {
   Approval, ApprovalDecision, EventRow, Message, Milestone, Mode, Policy, Project, Run, RunListItem, RunStatus,
   Attachment, Note, MergePolicy, Priority, ProjectEnv, Settings, Stage, StageName, Task, TaskCard, TaskStatus, TaskType, UsageLimit,
   Provider, RunRole, CostSource, TierRef, Schedule, Chat, ChatFile, ChatFolder, ChatMessage, Effort, SpecVersion, ProviderOut, UsageTotals,
+  TaskRound,
 } from "./types.ts";
 import { ANTHROPIC_PROVIDER_ID, DEFAULT_MERGE, EMPTY_ENV, HELPER_MODELS, RUN_STYLES, type HelperModel, type RunStyle } from "./types.ts";
 import { DEFAULT_CHECKLIST } from "./engine/onboarding.ts";
 import { isImageProvider } from "./engine/images.ts";
+import { runWeight } from "./engine/explore.ts";
 
 type Row = Record<string, SQLInputValue>;
 
@@ -145,6 +147,11 @@ const toTask = (r: Row): Task => ({
   resume_at: (r.resume_at as string) ?? null,
   pause_reason: (r.pause_reason as Task["pause_reason"]) ?? null,
   budget_extra_usd: Number(r.budget_extra_usd ?? 0),
+  round: Number(r.round ?? 1),
+  round_cost_base: Number(r.round_cost_base ?? 0),
+  checklist_from: Number(r.checklist_from ?? 0),
+  files: json<string[]>(r.files_json, []),
+  landed_sha: (r.landed_sha as string) ?? null,
   start_at: (r.start_at as string) ?? null,
   suggestion: json<Task["suggestion"]>(r.suggestion_json, null),
   onboarding: (r.onboarding as Task["onboarding"]) ?? null,
@@ -294,6 +301,20 @@ const toRun = (r: Row): Run => ({
   other_models_usd: Number(r.other_models_usd ?? 0),
   limit_before: r.limit_before === null || r.limit_before === undefined ? null : Number(r.limit_before),
   limit_after: r.limit_after === null || r.limit_after === undefined ? null : Number(r.limit_after),
+  explore_weight: r.explore_weight === null || r.explore_weight === undefined ? null : Number(r.explore_weight),
+  round: Number(r.round ?? 1),
+});
+
+const toRound = (r: Row): TaskRound => ({
+  id: r.id as string,
+  task_id: r.task_id as string,
+  round: Number(r.round),
+  request: r.request as string,
+  review: Number(r.review ?? 0) === 1,
+  checklist_from: Number(r.checklist_from ?? 0),
+  fell_back: Number(r.fell_back ?? 0) === 1,
+  started_at: r.started_at as string,
+  landed_at: (r.landed_at as string) ?? null,
 });
 
 const toApproval = (r: Row): Approval => ({
@@ -347,6 +368,7 @@ function setClause(patch: Record<string, unknown>, columns: Record<string, (v: u
       : k === "merge" ? "merge_json"
       : k === "labels" ? "labels_json"
       : k === "depends_on" ? "depends_on_json"
+      : k === "files" ? "files_json"
       : k === "related_to" ? "related_to_json"
       : k === "suggestion" ? "suggestion_json"
       : k === "plan_gate" ? "plan_gate_json"
@@ -398,6 +420,11 @@ const TASK_COLUMNS: Record<string, (v: unknown) => SQLInputValue> = {
   setup_pending: (v) => (v ? 1 : 0),
   chat_id: str,
   merged_at: str,
+  round: num,
+  round_cost_base: num,
+  checklist_from: num,
+  files: js,
+  landed_sha: str,
 };
 
 export type NewTask = {
@@ -538,12 +565,17 @@ export class Repo {
       chatKeepAliveMessage: m.get("chatKeepAliveMessage") || "Hi, just keeping this chat warm. Reply in one line.",
       chatKeepAliveMaxHours: Number(m.get("chatKeepAliveMaxHours") ?? 8) || 8,
       nextStepsSuggestions: (m.get("nextStepsSuggestions") ?? "true") !== "false",
+      chatTools: (m.get("chatTools") ?? "true") !== "false",
+      followUpRouting: (["memory", "ask", "new"] as const).find((v) => v === m.get("followUpRouting")) ?? "memory",
       specModel: m.get("specModel") || "claude-opus-5-5",
       specEffort: (m.get("specEffort") as Effort) || "high",
       loadUserPlugins: (m.get("loadUserPlugins") ?? "true") !== "false",
       claudeAutoMemory: m.get("claudeAutoMemory") === "true",
+      autonomousLive: (m.get("autonomousLive") ?? "true") !== "false",
       browserChecks: (m.get("browserChecks") ?? "true") !== "false",
       chromeInSupervised: m.get("chromeInSupervised") === "true",
+      taskBrowser: m.get("taskBrowser") === "chrome" ? "chrome" : "board",
+      browserSites: json(m.get("browserSites"), [] as string[]),
       autoAllowReadOnly: (m.get("autoAllowReadOnly") ?? "true") !== "false",
       markitdownInTasks: (m.get("markitdownInTasks") ?? "true") !== "false",
       planApproval: m.get("planApproval") === "true",
@@ -1036,8 +1068,9 @@ export class Repo {
   // ---------- runs ----------
   createRun(r: { task_id: string; stage: StageName; stage_index: number; model: string; effort: string; provider?: string | null; role?: RunRole }): Run {
     const id = newId("r");
-    this.stmt("INSERT INTO runs(id, task_id, stage, stage_index, model, effort, provider, role, status, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?)")
-      .run(id, r.task_id, r.stage, r.stage_index, r.model, r.effort, r.provider ?? null, r.role ?? "stage", nowIso());
+    // Every run belongs to the round its card is on (D375).
+    this.stmt("INSERT INTO runs(id, task_id, stage, stage_index, model, effort, provider, role, status, started_at, round) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, COALESCE((SELECT round FROM tasks WHERE id = ?), 1))")
+      .run(id, r.task_id, r.stage, r.stage_index, r.model, r.effort, r.provider ?? null, r.role ?? "stage", nowIso(), r.task_id);
     return this.getRun(id)!;
   }
 
@@ -1051,9 +1084,35 @@ export class Repo {
       session_id: str, status: str, ended_at: str, cost_usd: num, input_tokens: num, output_tokens: num, result_md: str,
       error: str, model: str, effort: str, context_tokens: num, context_window: num, limit_before: num, limit_after: num,
       provider: str, role: str, cost_source: str, cache_read_tokens: num, cache_write_tokens: num, other_models_usd: num,
+      explore_weight: num,
     });
     if (sets.length) this.stmt(`UPDATE runs SET ${sets.join(", ")} WHERE id = ?`).run(...vals, id);
     return this.getRun(id)!;
+  }
+
+  addRound(r: { task_id: string; round: number; request: string; review: boolean; checklist_from: number }): TaskRound {
+    const id = newId("rd");
+    this.stmt("INSERT INTO task_rounds(id, task_id, round, request, review, checklist_from, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(id, r.task_id, r.round, r.request, r.review ? 1 : 0, r.checklist_from, nowIso());
+    return toRound(this.stmt("SELECT * FROM task_rounds WHERE id = ?").get(id) as Row);
+  }
+
+  deleteRound(taskId: string, round: number): void {
+    this.stmt("DELETE FROM task_rounds WHERE task_id = ? AND round = ?").run(taskId, round);
+  }
+
+  roundsFor(taskId: string): TaskRound[] {
+    return (this.stmt("SELECT * FROM task_rounds WHERE task_id = ? ORDER BY round").all(taskId) as Row[]).map(toRound);
+  }
+
+  updateRound(taskId: string, round: number, patch: { fell_back?: boolean; landed_at?: string }): void {
+    if (patch.fell_back !== undefined) this.stmt("UPDATE task_rounds SET fell_back = ? WHERE task_id = ? AND round = ?").run(patch.fell_back ? 1 : 0, taskId, round);
+    if (patch.landed_at !== undefined) this.stmt("UPDATE task_rounds SET landed_at = ? WHERE task_id = ? AND round = ?").run(patch.landed_at, taskId, round);
+  }
+
+  /** A run's assistant messages as the SDK sent them (cut ones as stored), oldest first. */
+  assistantMessages(runId: string): unknown[] {
+    return (this.stmt("SELECT payload_json FROM events WHERE run_id = ? AND type = 'assistant' ORDER BY id").all(runId) as Row[]).map((r) => JSON.parse(String(r.payload_json)));
   }
 
   runsForTask(taskId: string): Run[] {
@@ -1065,7 +1124,40 @@ export class Repo {
     return (this.stmt("SELECT * FROM runs WHERE task_id = ? AND role = 'stage' ORDER BY started_at, rowid").all(taskId) as Row[]).map(toRun);
   }
 
-  /** Newest stage run: the session chat, approve and follow-up continue from. */
+  /**
+   * The session that did the work: the newest run of a stage that writes (code, or a custom stage such as
+   * an answer), not the plan before it or the review after it. A follow-up belongs with the one that knows
+   * the files; the reviewer only read the diff (D373). Falls back to the newest stage run.
+   */
+  workRun(taskId: string): Run | undefined {
+    const r = this.stmt("SELECT * FROM runs WHERE task_id = ? AND role = 'stage' AND stage NOT IN ('plan', 'review') ORDER BY started_at DESC, rowid DESC LIMIT 1").get(taskId) as Row | undefined;
+    return r ? toRun(r) : this.latestRun(taskId);
+  }
+
+  /**
+   * What finding its way cost the card the first time: the largest exploration among its work runs. Later
+   * rounds explore little because they remember, and a fresh card would have to do the first one's (D374).
+   */
+  exploreWeight(taskId: string): number | null {
+    const r = this.stmt("SELECT MAX(explore_weight) AS w FROM runs WHERE task_id = ? AND role = 'stage' AND stage NOT IN ('plan', 'review')").get(taskId) as Row | undefined;
+    return r?.w === null || r?.w === undefined ? null : Number(r.w);
+  }
+
+  /**
+   * A model's dollars per weighted token (`engine/explore.ts`) over its last 50 priced runs: the board has
+   * no Claude price list, the SDK reports each run's cost, so your own history is the price. null with none.
+   */
+  usdPerWeight(model: string): number | null {
+    const rows = this.stmt("SELECT cost_usd, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens FROM runs WHERE model = ? AND cost_usd > 0 ORDER BY started_at DESC LIMIT 50").all(model) as Row[];
+    let usd = 0, weight = 0;
+    for (const r of rows) {
+      usd += Number(r.cost_usd);
+      weight += runWeight({ input_tokens: Number(r.input_tokens), output_tokens: Number(r.output_tokens), cache_read_tokens: Number(r.cache_read_tokens ?? 0), cache_write_tokens: Number(r.cache_write_tokens ?? 0) });
+    }
+    return weight > 0 ? usd / weight : null;
+  }
+
+  /** Newest stage run: approve and the record read from it. */
   latestRun(taskId: string): Run | undefined {
     const r = this.stmt("SELECT * FROM runs WHERE task_id = ? AND role = 'stage' ORDER BY started_at DESC, rowid DESC LIMIT 1").get(taskId) as Row | undefined;
     return r && toRun(r);

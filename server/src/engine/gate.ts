@@ -744,8 +744,20 @@ function violationIn(cmd: string, cwd: string, shell: ShellFlavour, depth: numbe
   }
   const lex = lexShell(cmd, shell);
   if (lex.unsure) return `the board cannot read it safely (${lex.unsure}), and an unattended run does not get the benefit of the doubt`;
+  // `W="C:/…/wt/t1"; cd "$W/scripts"`: a name set to a plain path earlier in the same command is
+  // that path. Seen stopping a live task five refusals in (D390); anything else stays unknown.
+  const known = new Map<string, string>();
+  const expand = (w: string) => w.replace(/\$\{(\w+)\}|\$(\w+)/g, (m, a: string | undefined, b: string | undefined) => known.get((a ?? b)!) ?? m);
   for (const c of lex.cmds) {
-    const away = cdViolation(c.words, cwd);
+    if (c.words.length && c.words.every((w) => /^[A-Za-z_]\w*=/.test(w))) {
+      for (const w of c.words) {
+        const eq = w.indexOf("=");
+        const value = w.slice(eq + 1);
+        if (/[$`]/.test(value)) known.delete(w.slice(0, eq));
+        else known.set(w.slice(0, eq), value);
+      }
+    }
+    const away = cdViolation(c.words.map(expand), cwd);
     if (away) return away;
     const out = outsidePath(c, cwd, false);
     if (out) return `it touches ${out}, outside the worktree`;
@@ -1042,13 +1054,15 @@ export function markitdownRead(input: Record<string, unknown>, cwd: string, read
 /**
  * Added to every autonomous refusal. The run it was written for tried four ways round the sandbox —
  * the main checkout's secrets twice, the environment, then a browser at the live site — instead of
- * saying it needed a supervised run (docs/DECISIONS.md D186).
+ * saying it needed a supervised run (docs/DECISIONS.md D186). Saying so no longer ends the run: it is
+ * a suggestion on the card, and the run does the rest (D382).
  */
 export function escalationHint(refusals: number): string {
   const base =
-    " If the task cannot be done without this, do not look for another way in: call `board_report_blocked` with needs \"supervised\", " +
-    "say what access you need and why, then end your turn. The person can switch the task to supervised, where it runs in the main checkout with every write approved.";
-  return refusals >= 3 ? `${base} This is refusal number ${refusals} in this stage: stop trying and report it now.` : base;
+    " If the task needs this, do not look for another way in: call `board_report_blocked` with needs \"supervised\" once, saying what access you need and why — " +
+    "it puts a suggestion on the card and does not stop the run, and the person can switch the task to supervised later, where it runs in the main checkout with every write approved. " +
+    "Then carry on with what can be done inside your folder, and list this step under `## Left for a supervised run`.";
+  return refusals >= 3 ? `${base} This is refusal number ${refusals} in this stage: stop trying to reach it — a few more and the board stops this stage. Report it and carry on with the rest.` : base;
 }
 
 // ---------------------------------------------------------------- read-only commands (supervised)

@@ -140,8 +140,13 @@ test("autonomous plan and code stages are told to report a sandbox wall instead 
   for (const stage of ["plan", "code"] as const) {
     const p = buildStagePrompt({ ...base, stage, capabilities: "sdk" });
     assert.match(p, /board_report_blocked` with needs "supervised"/);
+    assert.match(p, /does not stop the run/, "saying so is a suggestion, not a stop (D382)");
     assert.match(p, /Do not look for a way round the sandbox/);
   }
+  assert.match(buildStagePrompt({ ...base, stage: "plan", capabilities: "sdk" }), /\*\*\(supervised run\)\*\*/, "the plan marks the steps that need the access");
+  assert.match(buildStagePrompt({ ...base, stage: "code", capabilities: "sdk" }), /## Left for a supervised run/, "the code stage lists the steps it left");
+  assert.match(buildStagePrompt({ ...base, stage: "review" }), /are not defects of this run/, "review does not fail a sandboxed run for them");
+  assert.doesNotMatch(buildStagePrompt({ ...base, stage: "review", mode: "supervised", branch: null }), /are not defects of this run/);
   assert.doesNotMatch(buildStagePrompt({ ...base, stage: "code", mode: "supervised", branch: null }), /sandboxed/, "supervised runs are not sandboxed");
 });
 
@@ -167,6 +172,8 @@ test("a rerun after a block is told what stopped it, and a supervised rerun know
   assert.match(p, /It now runs supervised, in the main checkout/);
   const again = buildStagePrompt({ ...base, priorBlock: { ...priorBlock, mode: "supervised" }, mode: "supervised", branch: null });
   assert.match(again, /Check whether what stopped it has changed/, "no claim of new access when the mode did not change");
+  const left = buildStagePrompt({ ...base, mode: "supervised", branch: null, priorBlock: { ...priorBlock, advisory: true } });
+  assert.match(left, /## What the last attempt left for a supervised run\nThe script lives only in live BizApp/, "a suggestion did not stop it");
 });
 
 test("a long plan reaches the code stage whole: the steps in its middle are not trimmed", () => {
@@ -238,4 +245,25 @@ test("the run styles map to a mode and the may-ask switch, and back (D361)", () 
   for (const s of RUN_STYLES) assert.equal(runStyleOf(runStyleFields(s)), s);
   assert.deepEqual(runStyleFields("ask"), { mode: "autonomous", may_ask: true });
   assert.equal(runStyleOf({ mode: "supervised", may_ask: true }), "supervised", "a supervised task ignores the switch");
+});
+
+test("an autonomous run may cd to a folder it named earlier in the same command, and only to that (D390)", () => {
+  const wt = "C:/work/proj/.kanban/wt/t1";
+  const bash = (command: string) => autonomousGate("Bash", { command }, wt).behavior;
+  assert.equal(bash('W="C:/work/proj/.kanban/wt/t1"; cd "$W/scripts" && ls'), "allow");
+  assert.equal(bash('S=C:/work/proj/.kanban/wt/t1/docs && cd "${S}/Server Scripts"'), "allow");
+  assert.equal(bash('W="C:/work/other"; cd "$W" && ls'), "deny", "a name set outside the folder is still outside");
+  assert.equal(bash('cd "$X/scripts"'), "deny", "a name it never set is still unknown");
+  assert.equal(bash('W="$HOME"; cd "$W"'), "deny", "a name set from another name is not followed");
+});
+
+test("an autonomous run may read what Claude Code saved for its own sessions, and not another task's (D392)", async () => {
+  const { claudeSessionRoots } = await import("../src/engine/runner.ts");
+  const wt = String.raw`C:\work\proj\.kanban\wt\t_1`;
+  const roots = claudeSessionRoots(wt, String.raw`C:\Users\me`, String.raw`C:\Users\me\AppData\Local\Temp`);
+  const read = (file_path: string) => autonomousGate("Read", { file_path }, wt, roots).behavior;
+  assert.equal(read(String.raw`C:\Users\me\AppData\Local\Temp\claude\C--work-proj--kanban-wt-t-1\s1\tasks\b1.output`), "allow", "a background command's output");
+  assert.equal(read(String.raw`C:\Users\me\.claude\projects\C--work-proj--kanban-wt-t-1\s1\tool-results\r1.txt`), "allow", "a long tool result");
+  assert.equal(read(String.raw`C:\Users\me\AppData\Local\Temp\claude\C--work-proj--kanban-wt-t-2\s9\tasks\b1.output`), "deny", "another task's sessions stay closed");
+  assert.equal(read(String.raw`C:\Users\me\.claude\projects\C--work-proj\memory\notes.md`), "deny", "so does the project's own folder");
 });

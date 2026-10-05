@@ -69,7 +69,7 @@ test("a chat reply streams, is stored with its tool lines, costs what it cost, a
     const opts = q.calls[0].options;
     assert.equal(opts.cwd, s.project.path);
     assert.equal(opts.includePartialMessages, true);
-    assert.deepEqual(opts.settingSources, ["project"]);
+    assert.deepEqual(opts.settingSources, ["user", "project"], "your connectors and skills by default (D381)");
     for (const t of ["Edit", "Write", "AskUserQuestion"]) assert.ok(CHAT_DISALLOWED.includes(t) && opts.disallowedTools.includes(t), `${t} is not offered`);
     assert.equal(q.denied[0].behavior, "deny", "and refused if tried anyway");
     assert.ok(!opts.disallowedTools.includes("Bash"), "the shell is offered, for read-only commands (D350)");
@@ -81,7 +81,7 @@ test("a chat reply streams, is stored with its tool lines, costs what it cost, a
     assert.equal(q.calls[1].options.resume, "chat-s1", "the second message continues the same session");
     assert.equal(s.repo.getChat(c.id)!.cost_usd, 0.024);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -111,11 +111,11 @@ test("one reply at a time per chat; stop keeps what was written", async () => {
     assert.equal(last.role, "assistant");
     assert.match(last.text, /^Half an ans …\(stopped\)$/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
-test("archive, restore, rename and delete", () => {
+test("archive, restore, rename and delete", async () => {
   const s = setup(replying().fn);
   const chat = new ChatService({ repo: s.repo, bus: s.bus, runner: s.runner });
   try {
@@ -127,11 +127,11 @@ test("archive, restore, rename and delete", () => {
     assert.equal(s.repo.getChat(c.id), undefined);
     assert.ok(s.seen.some((m: WsMessage) => m.type === "chat.deleted"));
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
-test("chat board tools: cards land in Backlog under the project's rules; queue and schedule work; other projects are off-limits", () => {
+test("chat board tools: cards land in Backlog under the project's rules; queue and schedule work; other projects are off-limits", async () => {
   const s = setup(replying().fn, { autonomous: "forbidden" });
   const scheduler = new Scheduler({ repo: s.repo, bus: s.bus, runner: s.runner });
   const cards: any[] = [];
@@ -159,7 +159,7 @@ test("chat board tools: cards land in Backlog under the project's rules; queue a
     const foreign = s.repo.createTask({ project_id: other.id, title: "not yours" });
     assert.equal((h.getTask({ task_id: foreign.id }) as any).isError, true);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -228,7 +228,7 @@ test("chat board tools: the chat can follow a card, tell it something, answer it
     await until(() => s.repo.getTask(bad.id)!.status === "review");
     assert.deepEqual(cards.map((c) => c.action), ["messaged", "answered", "retried"]);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -275,7 +275,7 @@ test("the chat reads only inside its project, and never a file that holds keys",
     assert.equal(off.message, CHAT_COMMANDS_OFF);
     assert.match(q.calls[0].prompt, /^\[Local time: .*\]\n\nhello$/, "the clock rides on the message, not the cached system prompt");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -307,7 +307,7 @@ test("chat board tools: the list counts every status and hides Done; queueing ne
     assert.match((h.queueTask({ task_id: failed.id }) as any).content[0].text, /board_retry_task/);
     assert.equal(s.repo.getTask(reviewed.id)!.status, "review");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -319,7 +319,7 @@ test("a card the chat made and started is counted once under the reply", () => {
 
 const read = (r: { content: { text: string }[] }) => JSON.parse(r.content[0].text);
 
-test("the chat sets each stage's model and effort in words, and an unknown model comes back with the board's list", () => {
+test("the chat sets each stage's model and effort in words, and an unknown model comes back with the board's list", async () => {
   const s = setup(fakeQuery().fn);
   s.repo.updateSettings({ autoTriage: false });
   const h = chatBoardHandlers({ repo: s.repo, bus: s.bus, runner: s.runner }, s.project.id, null, () => {});
@@ -342,7 +342,7 @@ test("the chat sets each stage's model and effort in words, and an unknown model
 
     assert.equal(read(h.updateTask({ task_id: made.id, stages: [{ stage: "code", model: "opus", effort: "low" }] })).updated.pipeline, "code · claude-opus-5-5 · low");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -367,7 +367,7 @@ test("a lookup is one answer stage that runs supervised on the main checkout and
     assert.ok(s.repo.getTask(t.id)!.done_at, "nothing to approve or land: it is done");
     assert.match(q.calls[0].prompt, /Answer the request below/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -418,7 +418,7 @@ test("a card the chat made reports into that chat when it finishes, fails, has a
     const other = chat.create(s.project.id);
     assert.equal(updates(other.id).length, 0, "only the chat that made a card hears about it");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -438,11 +438,11 @@ test("the next message carries what the chat's cards did since, so Claude can ta
     await until(() => q.calls.length === 3 && !chat.isBusy(c.id));
     assert.match(q.calls[2].prompt, /^\[Local time: .*\]\n\nthanks$/, "news is told once");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
-test("the chat can change a Backlog card's mode, branch and stages, and what it settles replaces triage's offer — but not a card with work on a branch", () => {
+test("the chat can change a Backlog card's mode, branch and stages, and what it settles replaces triage's offer — but not a card with work on a branch", async () => {
   const s = setup(fakeQuery().fn);
   s.repo.updateSettings({ autoTriage: false });
   const h = chatBoardHandlers({ repo: s.repo, bus: s.bus, runner: s.runner }, s.project.id, null, () => {});
@@ -463,7 +463,7 @@ test("the chat can change a Backlog card's mode, branch and stages, and what it 
     assert.equal(refused.isError, true);
     assert.match(refused.content[0].text, /approve or discard it/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -488,7 +488,7 @@ test("a chat on a Claude-compatible provider runs through Claude Code with the p
     assert.ok(o.mcpServers.board, "the board's tools are still there");
     assert.notEqual(s.repo.getChat(c.id)!.cost_usd, 0.012, "the SDK's Claude price is not what GLM costs");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -517,11 +517,11 @@ test("switching a chat to another provider starts a fresh session that carries t
 
     assert.throws(() => chat.update(c.id, { provider: "codex", model: "gpt-6-luna" }), /cannot run the side chat/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
-test("a card made by a chat set to autonomous runs autonomous unless the message says otherwise (D344)", () => {
+test("a card made by a chat set to autonomous runs autonomous unless the message says otherwise (D344)", async () => {
   const s = setup(replying().fn);
   const chat = new ChatService({ repo: s.repo, bus: s.bus, runner: s.runner });
   try {
@@ -538,7 +538,7 @@ test("a card made by a chat set to autonomous runs autonomous unless the message
     assert.equal(made({ title: "Latest PO", spec_md: "x", stages: [{ stage: "answer" }] }).mode, "autonomous", "a lookup follows the switch too: the project's own folder, nothing asked (D352)");
     assert.match(chatPrompt(s.project, { models: [], defaults: [], mode: "autonomous" }), /mode switch applies \(it is set to autonomous now\)/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -556,7 +556,7 @@ test("a new folder gets a colour nobody else has, and it can be changed or taken
     const pushed = s.seen.filter((m: WsMessage) => m.type === "chat.folders") as Extract<WsMessage, { type: "chat.folders" }>[];
     assert.equal(pushed.at(-1)!.folders.find((f) => f.id === b.id)!.color, a.color, "the colour rides on the folder list every open page gets");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -579,7 +579,7 @@ test("a reply that fails with a 'success' result shows the real error, not the w
     assert.match(errors[0]!.text, /inference gateway is down/);
     assert.doesNotMatch(errors[0]!.text, /: success/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -610,7 +610,7 @@ test("a chat can be filed in a folder, renamed with it, and deleting the folder 
     const republished = s.seen.filter((m: WsMessage) => m.type === "chat.updated" && m.chat.id === c.id) as Extract<WsMessage, { type: "chat.updated" }>[];
     assert.equal(republished.at(-1)!.chat.folder_id, null, "and the board hears that it moved out");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -680,7 +680,7 @@ test("the cache window: a reply warms the chat, a warning goes out 15 minutes be
     assert.equal(q.calls.length, 2, "the Settings switch wins");
   } finally {
     chat.stopWatch();
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -690,6 +690,8 @@ test("files attached to a chat ride with the next message, are readable by the c
   const chat = new ChatService({ repo: s.repo, bus: s.bus, runner: s.runner });
   try {
     s.repo.setStateDir(s.dir);
+    assert.equal(s.repo.getSettings().chatTools, true, "every chat gets your connectors and skills by default (D381)");
+    s.repo.updateSettings({ chatTools: false });
     const c = chat.create(s.project.id);
     const f = chat.addFile(c.id, { name: "orders.csv", data: Buffer.from("a,b\n1,2\n") });
     assert.equal(f.media_type, "text/csv");
@@ -705,11 +707,11 @@ test("files attached to a chat ride with the next message, are readable by the c
     assert.ok(q.calls[0].prompt.includes("open with Read"));
     const can = q.calls[0].options.canUseTool as (n: string, i: Record<string, unknown>) => Promise<{ behavior: string }>;
     assert.equal((await can("Read", { file_path: f.path })).behavior, "allow", "the chat may read its own files, outside the project");
-    assert.equal((await can("mcp__slack__send", {})).behavior, "deny", "other servers are not offered without my connectors and skills");
+    assert.equal((await can("mcp__slack__send", {})).behavior, "deny", "with the setting off, other servers are not offered");
     assert.equal(q.calls[0].options.strictMcpConfig, true);
     assert.throws(() => chat.removeFile(f.id), /went with a message/);
 
-    chat.update(c.id, { use_tools: true });
+    s.repo.updateSettings({ chatTools: true });
     chat.send(c.id, "Check Slack");
     await until(() => !chat.isBusy(c.id));
     const o = q.calls[1].options;
@@ -731,7 +733,7 @@ test("files attached to a chat ride with the next message, are readable by the c
     assert.ok(s.repo.lastOwnChatMessage(c.id)!.meta.suggest, "but you pressed it, so it counts as your activity for Keep warm");
   } finally {
     chat.stopWatch();
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -780,7 +782,7 @@ test("the chat shows how full its context is after each reply, not counting a he
     const moved = s.repo.getChat(c.id)!;
     assert.deepEqual([moved.context_tokens, moved.context_window], [0, 0], "a fresh session is measured again by its first reply");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -837,6 +839,6 @@ test("an \"Autonomous + asks me\" card from a chat puts its question in the chat
     assert.equal(results[0].behavior, "allow");
     assert.deepEqual(results[0].updatedInput.answers, { "Which colour?": "Blue", "Which pages?": "Home, Shop" });
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });

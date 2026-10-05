@@ -1,4 +1,4 @@
-import type { TaskCard, TaskStatus } from "../../../server/src/types.ts";
+import { stoppedBy, type TaskCard, type TaskStatus } from "../../../server/src/types.ts";
 
 /** The provider of the stage a paused task stopped on: the first one that has not succeeded. */
 export function stoppedProvider(card: TaskCard): string | null {
@@ -24,6 +24,34 @@ export function phase(card: TaskCard, asking?: boolean): { text: string; tone: s
   const stage = i >= 0 ? card.pipeline[i]?.stage : undefined;
   const word = stage === "code" ? "coding" : stage === "review" ? "reviewing" : stage === "plan" ? "planning" : "running";
   return { text: word, tone: "border-amber/50 text-amber", title: stage ? `The ${stage} stage is running` : "A stage is running" };
+}
+
+/**
+ * Whether a card waits on you, for its pulse (D383). `chip` is the word to add when nothing else on the
+ * card already says so; null means another chip or panel on it says it, and a second one would only crowd it.
+ */
+export function waitsOnYou(card: TaskCard, asking?: boolean): { chip: string | null; title: string } | null {
+  if (card.archived_at) return null;
+  const said = (title: string) => ({ chip: null, title });
+  if (card.questions?.some((q) => !q.answer)) return said("Claude asked you something — open the task to answer");
+  if (card.status === "approval") return said(phase(card, asking).title);
+  if (card.status === "paused" && (card.pause_reason === "cost" || (card.pause_reason === "provider" && !card.resume_at))) return said(phase(card).title);
+  if (card.status === "backlog" && card.setup_pending) return said("Check its mode and models, then press Start");
+  if (card.status === "review") {
+    if (card.resolution?.state === "failed") return said("The conflict could not be resolved safely — open the task");
+    // Claude is still at work on it: the review stage, or combining it with what landed meanwhile.
+    if (card.resolution && ["resolving", "checking", "reviewing"].includes(card.resolution.state)) return null;
+    if (card.stage_states.includes("running")) return null;
+    if (card.blocked?.advisory && card.mode === "autonomous") return said("Ready for your review; some live steps were left for a supervised run");
+    return { chip: "your review", title: "Every stage finished — open it to approve, send it back or discard it" };
+  }
+  if (card.status === "failed") {
+    // Stopped on purpose, or set to try again by itself: nothing to decide.
+    if (card.error === "stopped by user" || card.start_at) return null;
+    if (stoppedBy(card)) return said("It was blocked — open the task for what it needs");
+    return { chip: "needs you", title: "It failed — open it to retry, change it or drop it" };
+  }
+  return null;
 }
 
 type Linked = { id: string; title: string; status: TaskStatus };

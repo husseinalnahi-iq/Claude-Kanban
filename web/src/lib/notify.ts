@@ -47,12 +47,12 @@ const lastAt = new Map<string, number>();
  * the approval that arrived a second later (D282). `sticky` keeps it on screen until dealt with;
  * the caller closes it when the thing is handled on the board.
  */
-export function desktopNotify(title: string, body: string, tag: string, opts: { sticky?: boolean; onClick?: () => void } = {}): Notification | null {
+export function desktopNotify(title: string, body: string, tag: string, opts: { sticky?: boolean; silent?: boolean; onClick?: () => void } = {}): Notification | null {
   if (!notifyEnabled() || document.visibilityState === "visible") return null;
   if (Date.now() - (lastAt.get(tag) ?? 0) < 1500) return null;
   lastAt.set(tag, Date.now());
   try {
-    const n = new Notification(title, { body, tag, requireInteraction: !!opts.sticky });
+    const n = new Notification(title, { body, tag, requireInteraction: !!opts.sticky, silent: !!opts.silent });
     n.onclick = () => {
       window.focus();
       opts.onClick?.();

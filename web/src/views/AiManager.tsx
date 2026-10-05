@@ -1,7 +1,7 @@
 import { StepMark } from "../components/Checklist.tsx";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import type { Attachment, Chat, ChatFile, ChatFolder, ChatMessage, EventRow, FolderColor, TaskCard } from "../../../server/src/types.ts";
-import { FOLDER_COLORS, attachmentKind } from "../../../server/src/types.ts";
+import { FOLDER_COLORS, attachmentKind, stoppedBy } from "../../../server/src/types.ts";
 import { checklistSummary, liveChecklist } from "../../../server/src/engine/checklist.ts";
 import { api, type ProjectWithGit } from "../lib/api.ts";
 import { navigate } from "../lib/router.ts";
@@ -32,7 +32,19 @@ import { useColumnWidth } from "../lib/useColumnWidth.ts";
 /** Cards still on their way: anything between Queued and Review, in the board's columns. */
 const IN_PROGRESS = new Set(["queued", "approval", "planning", "running", "paused"]);
 type GroupBy = "folders" | "status";
-const GROUP_KEY = "kanban.studio.groupBy";
+const GROUP_KEY = "kanban.aiManager.groupBy";
+
+// Saved under the Studio's names until D371: moved once, before anything reads them, so nobody's column
+// widths or grouping reset with the rename.
+try {
+  for (const k of ["groupBy", "left", "right"]) {
+    const old = localStorage.getItem(`kanban.studio.${k}`);
+    if (old !== null && localStorage.getItem(`kanban.aiManager.${k}`) === null) localStorage.setItem(`kanban.aiManager.${k}`, old);
+    localStorage.removeItem(`kanban.studio.${k}`);
+  }
+} catch {
+  // storage blocked: the defaults apply, as they would on a new machine
+}
 
 /** How each chat light looks. Lit ones want you and glow; working pulses in grey; the rest sit still. */
 const SIGNAL_STYLE: Record<SignalKind, { dot: string; text: string; motion?: "beacon" | "ping" }> = {
@@ -87,21 +99,21 @@ const section = "px-3 pt-3 pb-1 text-[10.5px] font-semibold uppercase tracking-[
 const tiny = "cursor-pointer rounded px-1.5 py-px font-mono text-[10.5px] text-ink-500 hover:bg-ink-800 hover:text-ink-100";
 
 /**
- * The Studio: the chat as the whole screen. Everything the board shows about a project is one click
+ * The AI Manager: the chat as the whole screen. Everything the board shows about a project is one click
  * away behind the Board button, and nothing else of it is on screen — so a long conversation with
  * Claude reads like a conversation, not a side panel. Left, your chats for the project (switch
  * projects at the top; file chats in folders, or group them by what they are doing); middle, the
  * conversation; right, the work it started: each card with Claude's own steps, the files the cards
  * produced and the links they mentioned.
  */
-export function Studio({ project, projects, onAddProject, onSearch }: { project: ProjectWithGit | null; projects: ProjectWithGit[]; onAddProject: () => void; onSearch: () => void }) {
+export function AiManager({ project, projects, onAddProject, onSearch }: { project: ProjectWithGit | null; projects: ProjectWithGit[]; onAddProject: () => void; onSearch: () => void }) {
   return (
     <div className="flex h-full flex-col bg-ink-950">
       <header className="flex items-center gap-2 border-b border-ink-800 bg-ink-900/80 px-3 py-2">
         <button
           className="flex cursor-pointer items-center gap-2 rounded-md border border-ink-700 px-2 py-1 text-[12.5px] text-ink-200 transition-colors hover:border-amber/60 hover:text-amber"
           onClick={() => navigate({ view: "board", taskId: null })}
-          title="Leave the Studio and go back to the board (press 1)"
+          title="Leave the AI Manager and go back to the board (press 1)"
         >
           <span className="flex h-5 w-5 items-end gap-[2px] rounded bg-ink-800 p-[3px]">
             <span className="h-full w-1 rounded-sm bg-amber" />
@@ -110,7 +122,7 @@ export function Studio({ project, projects, onAddProject, onSearch }: { project:
           </span>
           Board
         </button>
-        <span className="font-mono text-[10.5px] uppercase tracking-[0.18em] text-ink-500">Studio</span>
+        <span className="font-mono text-[10.5px] uppercase tracking-[0.18em] text-ink-500">AI Manager</span>
         <div className="ml-auto flex items-center gap-1">
           <button
             className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-ink-700 px-2.5 py-1 text-[12px] text-ink-400 transition-colors hover:border-ink-500 hover:text-ink-200 cursor-pointer"
@@ -129,7 +141,7 @@ export function Studio({ project, projects, onAddProject, onSearch }: { project:
         </div>
       </header>
       {project ? (
-        <StudioBody key={project.id} project={project} projects={projects} onAddProject={onAddProject} />
+        <AiManagerBody key={project.id} project={project} projects={projects} onAddProject={onAddProject} />
       ) : (
         <div className="mx-auto mt-24 max-w-md space-y-4 text-center">
           <Empty>{projects.length ? "Pick a project to talk about." : "No projects yet. Register a folder to start talking about it."}</Empty>
@@ -147,7 +159,7 @@ export function Studio({ project, projects, onAddProject, onSearch }: { project:
 function ProjectSwitch({ project, projects }: { project: ProjectWithGit | null; projects: ProjectWithGit[] }) {
   return (
     <span className="relative block min-w-0">
-      <Select wide className="text-transparent!" value={project?.id ?? ""} onChange={(e) => navigate({ view: "studio", projectId: e.target.value || null, taskId: null })} title={project ? `${project.name} — which project these chats are about` : "Which project these chats are about"}>
+      <Select wide className="text-transparent!" value={project?.id ?? ""} onChange={(e) => navigate({ view: "ai-manager", projectId: e.target.value || null, taskId: null })} title={project ? `${project.name} — which project these chats are about` : "Which project these chats are about"}>
         {!project ? <option value="">Pick a project…</option> : null}
         {projects.map((p) => (
           <option key={p.id} value={p.id}>{p.name}</option>
@@ -161,7 +173,7 @@ function ProjectSwitch({ project, projects }: { project: ProjectWithGit | null; 
   );
 }
 
-function StudioBody({ project, projects, onAddProject }: { project: ProjectWithGit; projects: ProjectWithGit[]; onAddProject: () => void }) {
+function AiManagerBody({ project, projects, onAddProject }: { project: ProjectWithGit; projects: ProjectWithGit[]; onAddProject: () => void }) {
   const chats = useChats(project.id);
   const folders = useChatFolders(project.id);
   const { cards } = useTaskCards(project.id);
@@ -189,8 +201,8 @@ function StudioBody({ project, projects, onAddProject }: { project: ProjectWithG
 
   const onMessages = useCallback((m: ChatMessage[]) => setMessages(m), []);
   // Both side columns are dragged by their inner edge and remembered on this computer.
-  const left = useColumnWidth("kanban.studio.left", 272, 200, 480);
-  const right = useColumnWidth("kanban.studio.right", 340, 260, 640);
+  const left = useColumnWidth("kanban.aiManager.left", 272, 200, 480);
+  const right = useColumnWidth("kanban.aiManager.right", 340, 260, 640);
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -952,15 +964,19 @@ function WorkCard({ card, byId, now, children }: { card: TaskCard; byId: Map<str
   const waiting = pending.filter((a) => a.task_id === card.id);
   const asking = waiting.some(isQuestion);
   const live = card.status === "running" || card.status === "planning";
-  const steps = liveChecklist(card.checklist);
-  const sum = checklistSummary(card.checklist);
-  const needsSwitch = card.status === "failed" && card.blocked?.needs === "supervised" && card.mode === "autonomous";
+  // A later round shows its own steps: the earlier rounds' are done (D375).
+  const steps = liveChecklist(card.checklist.slice(card.checklist_from));
+  const sum = checklistSummary(card.checklist.slice(card.checklist_from));
+  const needsSwitch = card.status === "failed" && stoppedBy(card)?.needs === "supervised" && card.mode === "autonomous";
   const rose = waiting.length > 0;
   return (
     <div className={`rounded-lg border ${rose ? "border-rose/50 bg-rose/5" : "border-ink-700 bg-ink-850/60"}`}>
       <button className="flex w-full cursor-pointer items-center gap-2 px-2.5 py-2 text-left" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
         <Chevron className={`h-3.5 w-3.5 text-ink-400 transition-transform ${open ? "" : "-rotate-90"}`} />
-        <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-100">{card.title}</span>
+        <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-100">
+          {card.title}
+          {card.round > 1 ? <span className="ml-1.5 font-mono text-[11px] text-iris" title="Its coder continued this card with what it remembered">· round {card.round}</span> : null}
+        </span>
         <StatusPill card={card} asking={asking} waits={waitingOn(card, byId).length > 0} />
       </button>
       {!open && sum ? (
@@ -1028,7 +1044,7 @@ function WorkCard({ card, byId, now, children }: { card: TaskCard; byId: Map<str
               <div className="mt-1"><CommandList taskId={card.id} compact enabled={commands} /></div>
             </details>
           ) : null}
-          {card.status === "failed" ? <div className="line-clamp-3 font-mono text-[11px] text-rust">{card.blocked?.reason ?? card.error ?? "It stopped."}</div> : null}
+          {card.status === "failed" ? <div className="line-clamp-3 font-mono text-[11px] text-rust">{stoppedBy(card)?.reason ?? card.error ?? "It stopped."}</div> : null}
           {card.status === "review" ? <div className="text-[11.5px] text-ink-400">Ready for your review: open it to look at the work and approve it.</div> : null}
           <div className="flex items-center justify-end gap-1.5">
             {card.status === "backlog" && card.setup_pending ? <Button size="sm" variant="go" title="See its mode and models, then press Start there" onClick={() => navigate({ taskId: card.id })}>Check setup</Button> : null}

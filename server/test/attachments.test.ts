@@ -66,7 +66,7 @@ test("an attached image is stored outside the project, served back, and given to
     assert.equal(existsSync(at.path), false, "deleting the row deletes the file");
   } finally {
     await s.app.close();
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -87,7 +87,7 @@ test("uploads are limited to types the board can actually handle, and deleting a
     assert.equal(existsSync(at.path), false, "no orphaned files left behind");
   } finally {
     await s.app.close();
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -134,7 +134,7 @@ test("images a session produces are captured: a screenshot in a tool result, and
     for (const a of kept) assert.ok(a.path.startsWith(s.state), `${a.name} is stored by the board`);
   } finally {
     await s.app.close();
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -177,7 +177,7 @@ test("a spreadsheet or document is accepted, previewed where it can be, and put 
     assert.match(prompt, /open it with a short script/, "and is told not to guess at the xlsx");
   } finally {
     await s.app.close();
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -230,7 +230,7 @@ test("a run's output files are kept as artifacts; source files and vendored file
     assert.match(kept[0].description ?? "", /Totals/, "what is kept is the file as the last write left it, not as it stood when the write was announced");
   } finally {
     await s.app.close();
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -257,7 +257,7 @@ test("archiving hides a task from the board without touching anything else", asy
     assert.equal(s.repo.getTask(done.id)!.archived_at, null, "and it comes straight back");
   } finally {
     await s.app.close();
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -303,6 +303,6 @@ test("an attached image is described once by the cheap vision model, and the sta
     assert.match(prompt, /Open one only when you need more than is shown above/);
   } finally {
     await s.app.close();
-    s.cleanup();
+    await s.cleanup();
   }
 });

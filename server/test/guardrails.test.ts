@@ -49,7 +49,7 @@ test("destructive commands are refused outright, in both modes, before any appro
     assert.match((decisions[0] as { message: string }).message, /blocked-command list/);
     assert.equal(s.repo.pendingApprovals(task.id).length, 0, "a blocked command is never even offered as a card");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -80,7 +80,7 @@ test("a task pauses for a decision once it reaches its own cost ceiling, not jus
     assert.equal(s.repo.runsForTask(task.id).length, 2, "it ran until the cap, then stopped before the next stage");
     assert.equal(s.repo.taskCost(task.id), 8);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -104,7 +104,7 @@ test("a session repeating one tool call is stopped instead of looping", async ()
     assert.match(s.repo.getTask(task.id)!.error ?? "", /repeated 5 times/);
     assert.ok(calls < 20, `the stage was aborted mid-stream (saw ${calls} of 20 messages)`);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 

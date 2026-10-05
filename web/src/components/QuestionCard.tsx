@@ -5,6 +5,8 @@ import { api } from "../lib/api.ts";
 import { ago } from "../lib/format.ts";
 import { Button, ErrorLine, inputCls, useAction } from "./ui.tsx";
 
+const RECOMMENDED = /\s*\(recommended\)\s*$/i;
+
 /**
  * Claude stopped to ask you something. Pick an option (or several, where it allows), or type your
  * own answer; "Let Claude decide" hands the choice back and the task carries on.
@@ -56,13 +58,19 @@ export function QuestionCard({ a, focused = false }: { a: Approval; focused?: bo
             <div className="grid gap-1.5 sm:grid-cols-2">
               {q.options.map((o, k) => {
                 const on = picks[i].includes(o.label);
+                // Claude marks its pick "(Recommended)" in the label; shown as a tag in its own colour (D386).
+                const recommended = RECOMMENDED.test(o.label);
                 return (
                   <button
                     key={o.label}
                     type="button"
                     onClick={() => toggle(i, o.label)}
                     className={`group flex items-start gap-2.5 rounded-lg border px-3 py-2 text-left transition-all duration-150 cursor-pointer active:scale-[0.99] ${
-                      on ? "border-iris bg-iris/15 shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-iris)_15%,transparent)]" : "border-ink-700 bg-ink-900/60 hover:border-ink-500"
+                      on
+                        ? "border-iris bg-iris/15 shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-iris)_15%,transparent)]"
+                        : recommended
+                          ? "border-moss/70 bg-moss/10 hover:border-moss"
+                          : "border-ink-700 bg-ink-900/60 hover:border-ink-500"
                     }`}
                   >
                     <span className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center border text-[10px] ${q.multiSelect ? "rounded" : "rounded-full"} ${on ? "border-iris bg-iris text-ink-950" : "border-ink-500 text-transparent"}`}>
@@ -70,7 +78,9 @@ export function QuestionCard({ a, focused = false }: { a: Approval; focused?: bo
                     </span>
                     <span className="min-w-0">
                       <span className="block text-[12.5px] font-medium text-ink-100">
-                        {o.label} <span className="ml-1 font-mono text-[10px] text-ink-600">{k < 4 ? k + 1 : ""}</span>
+                        {recommended ? o.label.replace(RECOMMENDED, "") : o.label}
+                        {recommended ? <span className="ml-1.5 rounded bg-moss/25 px-1 py-px align-middle font-mono text-[9.5px] uppercase tracking-wide text-moss">Recommended</span> : null}
+                        <span className="ml-1 font-mono text-[10px] text-ink-600">{k < 4 ? k + 1 : ""}</span>
                       </span>
                       {o.description ? <span className="block text-[11.5px] leading-snug text-ink-400">{o.description}</span> : null}
                     </span>

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -11,10 +11,11 @@ import { openDb } from "../src/db.ts";
 import { Repo } from "../src/repo.ts";
 import { Bus } from "../src/bus.ts";
 import { TaskRunner, type QueryFn } from "../src/engine/runner.ts";
-import { browserDecision, confineOutput, isLocalUrl, PLAYWRIGHT_PLUGIN_TOOLS } from "../src/engine/browser.ts";
+import { browserDecision, browserServer, confineOutput, copyProfile, isLocalUrl, onSignedInSite, PLAYWRIGHT_PLUGIN_TOOLS, siteHost } from "../src/engine/browser.ts";
 import { killsByName, serverRule } from "../src/engine/gate.ts";
 import { buildStagePrompt, type PromptCtx } from "../src/engine/prompts.ts";
 import { reviewSkippedBrowser } from "../src/engine/runner.ts";
+import { removeTemp } from "./helpers.ts";
 import type { Mode, Stage } from "../src/types.ts";
 
 const PW = "mcp__playwright__";
@@ -64,11 +65,11 @@ async function optionsFor(mode: Mode, settings: Record<string, unknown>, probe?:
     assert.equal(repo.getTask(task.id)!.error, null);
     return { options: seen[0], repo, task };
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    await removeTemp(dir);
   }
 }
 
-test("only this machine and the task's own files count as local", () => {
+test("only this machine and the task's own files count as local", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "kurl-"));
   try {
     for (const u of ["http://localhost:5173/", "https://localhost/x", "http://127.0.0.1:8080", "http://[::1]:3000/", "http://app.localhost/", "http://0.0.0.0:4000", "about:blank", pathToFileURL(join(cwd, "out", "index.html")).href]) {
@@ -78,7 +79,7 @@ test("only this machine and the task's own files count as local", () => {
       assert.equal(isLocalUrl(u, cwd), false, `not local: ${u}`);
     }
   } finally {
-    rmSync(cwd, { recursive: true, force: true });
+    await removeTemp(cwd);
   }
 });
 
@@ -286,4 +287,53 @@ test("a stage already on a model as cheap as the helper looks for itself: two se
   const opusCode: Stage[] = [{ stage: "code", model: "claude-opus-5-5", effort: "medium" }];
   const opus = await optionsFor("autonomous", { browserChecks: true, liveView: false, browserCheckModel: "sonnet" }, undefined, opusCode);
   assert.ok(opus.options.agents?.["browser-check"], "an Opus stage hands the looking to Sonnet");
+});
+
+test("an autonomous run may open the sites signed in to in the board's browser, and no others (D389)", () => {
+  const cwd = process.cwd();
+  const out = join(tmpdir(), "kb-out");
+  const nav = (url: string, sites: string[]) => browserDecision("mcp__playwright__browser_navigate", { url }, true, cwd, out, { sites })?.behavior;
+  assert.equal(nav("https://erp.example.com/app/purchase-invoice", ["erp.example.com"]), "allow");
+  assert.equal(nav("https://eu.erp.example.com/app", ["erp.example.com"]), "allow", "a subdomain of a signed-in site");
+  assert.equal(nav("https://erp.example.com.evil.io/", ["erp.example.com"]), "deny", "a look-alike host is not the site");
+  assert.equal(nav("https://mail.example.org/", ["erp.example.com"]), "deny");
+  assert.equal(nav("https://erp.example.com/", []), "deny", "nothing signed in: local pages only, as before");
+  assert.equal(siteHost("HTTPS://ERP.Example.com/app?x=1"), "erp.example.com");
+  assert.equal(siteHost("erp.example.com"), "erp.example.com");
+  assert.equal(siteHost("not a site"), null);
+  assert.equal(onSignedInSite("file:///C:/erp.example.com/x", ["erp.example.com"]), false);
+});
+
+test("Claude in Chrome reaches an autonomous run only when the owner chose Chrome for every task (D389)", () => {
+  const out = join(tmpdir(), "kb-out");
+  const chromeTool = "mcp__claude-in-chrome__navigate";
+  assert.equal(browserDecision(chromeTool, {}, true, process.cwd(), out)?.behavior, "deny");
+  assert.equal(browserDecision(chromeTool, {}, true, process.cwd(), out, { chrome: true })?.behavior, "allow");
+  assert.equal(browserDecision(chromeTool, {}, false, process.cwd(), out, { chrome: true })?.behavior, "ask", "a supervised run still asks every time");
+});
+
+test("a run gets its own copy of the signed-in profile, without caches or locks, and launches from it (D389)", async () => {
+  const from = mkdtempSync(join(tmpdir(), "kprof-"));
+  const to = join(mkdtempSync(join(tmpdir(), "krun-")), "profile");
+  try {
+    mkdirSync(join(from, "Default", "Network"), { recursive: true });
+    mkdirSync(join(from, "Default", "Cache"), { recursive: true });
+    writeFileSync(join(from, "Default", "Network", "Cookies"), "cookie-db");
+    writeFileSync(join(from, "Default", "Cache", "data_1"), "big");
+    writeFileSync(join(from, "SingletonLock"), "x");
+    writeFileSync(join(from, "Local State"), "{}");
+    assert.equal(copyProfile(from, to), true);
+    assert.equal(readFileSync(join(to, "Default", "Network", "Cookies"), "utf8"), "cookie-db", "the sign-in comes along");
+    assert.equal(existsSync(join(to, "Default", "Cache")), false, "caches stay behind");
+    assert.equal(existsSync(join(to, "SingletonLock")), false, "so does the lock of a window still open");
+    assert.equal(copyProfile(join(from, "missing"), join(to, "x")), false, "no profile yet: nothing to start from");
+    const cfg = browserServer(out(), "chrome", undefined, to) as { args: string[] };
+    assert.ok(cfg.args.includes("--user-data-dir") && !cfg.args.includes("--isolated"), "the browser starts from the copy");
+  } finally {
+    await removeTemp(from);
+    await removeTemp(to);
+  }
+  function out() {
+    return join(tmpdir(), "kb-out");
+  }
 });

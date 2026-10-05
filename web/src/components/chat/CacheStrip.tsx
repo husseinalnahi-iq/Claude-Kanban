@@ -126,7 +126,7 @@ export function CacheStrip({ chat, compact = false, inline = false }: { chat: Ch
       ? "Switched off for every chat in Settings → Side chat."
       : `Five minutes before the hour ends, the board sends this chat a short message so it stays cached. Costs one short, cached turn each time. Stops ${settings?.chatKeepAliveMaxHours ?? 8} hours after your last own message, and never for an archived chat.`;
 
-  // On the Studio's title row: the cache bar and the switch only, in one line; the 5-hour window is the top bar's (D343).
+  // On the AI Manager's title row: the cache bar and the switch only, in one line; the 5-hour window is the top bar's (D343).
   if (inline) {
     return (
       <div className="flex shrink-0 items-center gap-3">

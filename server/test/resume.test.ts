@@ -7,6 +7,7 @@ import { openDb } from "../src/db.ts";
 import { Repo } from "../src/repo.ts";
 import { Bus } from "../src/bus.ts";
 import { TaskRunner, type QueryFn } from "../src/engine/runner.ts";
+import { removeTemp } from "./helpers.ts";
 import type { Stage } from "../src/types.ts";
 
 const TWO_STAGE: Stage[] = [
@@ -43,10 +44,10 @@ function setup(queryFn: QueryFn) {
   const repo = new Repo(openDb(":memory:"));
   const bus = new Bus();
   const project = repo.createProject({ name: "demo", path: dir, policy: { worktrees: "allowed", autonomous: "allowed", maxConcurrent: 3 } });
-  return { repo, bus, project, runner: new TaskRunner({ repo, bus, queryFn }), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  return { repo, bus, project, runner: new TaskRunner({ repo, bus, queryFn }), cleanup: () => removeTemp(dir) };
 }
 
-test("both windows are recorded with their percentages — the numbers live in unifiedWindows", () => {
+test("both windows are recorded with their percentages — the numbers live in unifiedWindows", async () => {
   const s = setup(() => (async function* () {})());
   try {
     const resets = Math.floor(Date.now() / 1000) + 3600;
@@ -56,7 +57,7 @@ test("both windows are recorded with their percentages — the numbers live in u
     assert.equal(byType.get("seven_day")?.utilization, 0.13, "and the weekly window is recorded at all");
     assert.equal(byType.get("five_hour")?.resets_at, resets);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -86,7 +87,7 @@ test("a run stopped by the usage limit pauses instead of failing, with a resume 
     const at = Date.parse(t.resume_at!);
     assert.ok(at >= resets * 1000 && at <= resets * 1000 + 5 * 60_000, "it resumes just after the window resets, not before");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -127,7 +128,7 @@ test("when the window reopens the task resumes from the stage it was on, in the 
     assert.equal(prompts[2].resume, "s-code", "the code stage resumes its own session rather than starting over");
     assert.ok(!s.repo.usageLimits().some((l) => l.status === "rejected"), "the stale 'limit reached' is cleared once it has reset");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -143,7 +144,7 @@ test("an ordinary failure still fails, and auto-resume can be switched off", asy
     await until(() => s.repo.getTask(task.id)!.status === "failed");
     assert.match(s.repo.getTask(task.id)!.error ?? "", /TypeError/, "a real error is never disguised as a pause");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 
   const resets = Math.floor(Date.now() / 1000) + 3600;
@@ -160,7 +161,7 @@ test("an ordinary failure still fails, and auto-resume can be switched off", asy
     await until(() => s2.repo.getTask(task.id)!.status === "failed");
     assert.equal(s2.repo.getTask(task.id)!.resume_at, null, "with auto-resume off it fails and waits for Retry, as before");
   } finally {
-    s2.cleanup();
+    await s2.cleanup();
   }
 });
 
@@ -177,6 +178,6 @@ test("a paused task survives a restart: recover() resumes anything already due",
     s.runner.recover();
     await until(() => s.repo.getTask(task.id)!.status === "review");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });

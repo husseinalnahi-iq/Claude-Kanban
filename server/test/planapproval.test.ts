@@ -25,7 +25,7 @@ test("plan approval: the task waits after its plan, and Approve carries on to co
     assert.equal(s.repo.getTask(task.id)!.plan_gate, null);
     assert.match(f.calls[1].prompt, /## The plan \(previous stage\)[\s\S]*do it/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -47,7 +47,7 @@ test("plan approval: an edited plan is what the code stage gets; Settings turn i
     await until(() => s.repo.getTask(t2.id)!.status === "review");
     assert.equal(s.repo.getTask(t2.id)!.plan_gate, null, "the task's own choice beats Settings");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -64,7 +64,7 @@ test("plan approval: Send back returns the task to Backlog with the note", async
     assert.equal(back.plan_gate, null);
     assert.match(back.note ?? "", /reuse the existing role/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -99,7 +99,7 @@ test("a task waiting on its plan cannot be messaged, and Stop then Retry brings 
     await until(() => s.repo.getTask(task.id)!.status === "review" && f.calls.length === 5 && !s.runner.isBusy(task.id));
     assert.equal(s.repo.getTask(task.id)!.plan_gate, null);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -119,7 +119,7 @@ test("a live task: plan approval is forced on and review runs on the live review
     assert.match(f.calls[2].prompt, /## Live system[\s\S]*read the live system yourself/);
     assert.match(f.calls[1].prompt, /## Live system[\s\S]*dry-run before every live change/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -146,9 +146,50 @@ test("a stage that runs out of turns carries on in the same session, then stops 
       assert.equal(g.calls.length, 2, "one automatic continue, then it fails as before");
       assert.match(s2.repo.getTask(t2.id)!.error ?? "", /maximum number of turns/);
     } finally {
-      s2.cleanup();
+      await s2.cleanup();
     }
   } finally {
-    s.cleanup();
+    await s.cleanup();
+  }
+});
+
+/** A plan waiting for approval, with a question it asked and carried on past with its default. */
+async function planWithQuestion(f: ReturnType<typeof fakeQuery>, s: ReturnType<typeof setup>) {
+  const task = s.repo.createTask({ project_id: s.project.id, title: "x", mode: "supervised", pipeline: [...PIPE] as never, plan_approval: true });
+  s.runner.queueTask(task.id);
+  await until(() => s.repo.getTask(task.id)!.status === "approval");
+  const q = { id: "q_1", stage_index: 0, text: "Which bracket goes in the supplier name?", options: ["A) internal type", "B) program type"], default: "A) internal type", recommended: "A) internal type", answer: null, created_at: new Date().toISOString(), answered_at: null };
+  s.repo.updateTask(task.id, { questions: [q] });
+  return task.id;
+}
+
+test("an answer that differs from the plan's default, given while the plan waits for approval, writes the plan again (D387)", async () => {
+  const f = fakeQuery({ sessionId: "plan-session", byCall: (i) => (i <= 1 ? { result: "## Execution steps\n1. do it" } : undefined) });
+  const s = setup(f.fn);
+  try {
+    const id = await planWithQuestion(f, s);
+    s.runner.answerQuestion(id, "q_1", "B) program type");
+    await until(() => f.calls.length === 2 && s.repo.getTask(id)!.status === "approval");
+    assert.equal(f.calls[1].options.resume, "plan-session", "the plan continues its own session");
+    assert.match(f.calls[1].prompt, /# Stage: plan/);
+    assert.match(f.calls[1].prompt, /Answer to "Which bracket[\s\S]*B\) program type/, "with the answer in its prompt");
+    assert.match(f.calls[1].prompt, /Revise the plan to match/);
+    assert.equal(s.repo.getTask(id)!.plan_gate?.kind, "approval", "and the new plan waits for approval again");
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test("picking the option the plan already assumed leaves the plan waiting as it is", async () => {
+  const f = fakeQuery({ byCall: (i) => (i === 0 ? { result: "## Execution steps\n1. do it" } : undefined) });
+  const s = setup(f.fn);
+  try {
+    const id = await planWithQuestion(f, s);
+    s.runner.answerQuestion(id, "q_1", "A) internal type");
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(f.calls.length, 1, "no second plan");
+    assert.equal(s.repo.getTask(id)!.status, "approval");
+  } finally {
+    await s.cleanup();
   }
 });

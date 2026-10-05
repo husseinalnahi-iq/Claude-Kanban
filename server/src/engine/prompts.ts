@@ -50,6 +50,8 @@ export interface PromptCtx {
   previousStage?: StageName | null;
   /** The task changes a live system (production data, a live business app…). D233. */
   live?: boolean;
+  /** An autonomous live task that may reach the live system itself (Settings: autonomousLive, D385). */
+  liveAllowed?: boolean;
   /** Settings → Images is on: the run has `generate_image` (D262). */
   imageTool?: boolean;
   /** Who makes the pictures and how long one takes, in a few words (D297). */
@@ -65,7 +67,7 @@ export interface PromptCtx {
   /** Supervised: files already uncommitted in the checkout before this run, not this task's (D204). */
   foreignChanges?: string[];
   /** What stopped the previous attempt, when a stage reported it could not do the work from where it ran. */
-  priorBlock?: { reason: string; needs: "supervised" | "input" | "other"; ask: string | null; mode: Mode } | null;
+  priorBlock?: { reason: string; needs: "supervised" | "input" | "other"; ask: string | null; mode: Mode; advisory?: boolean } | null;
   /** Output of the project's verify command when it failed on the previous attempt. */
   verificationFailure?: string | null;
   /** This stage was started on another model, which ran out partway: what the new one needs to know. */
@@ -84,7 +86,8 @@ export interface PromptCtx {
   verifyCommand?: string | null;
   /** The run has a browser to look at what it built. `port` is reserved for this task's dev server. */
   /** `helper`: a cheaper `browser-check` agent drives the browser, and this stage asks it (D273). */
-  browser?: { port: number | null; chrome: boolean; helper?: boolean } | null;
+  /** `sites`: signed in to in the board browser's saved profile; an autonomous run may open them (D389). */
+  browser?: { port: number | null; chrome: boolean; helper?: boolean; sites?: string[] } | null;
   /**
    * What the model running this stage can do. `sdk`: Claude Code with every tool and the board MCP
    * server. `cli`: another agent with its own tools, no board server. `text`: nothing but the prompt,
@@ -136,9 +139,16 @@ function browserSection(ctx: PromptCtx): string | null {
     "Screenshots are saved to this task on the board, so the person reviewing it sees what you saw. Each one costs about as much as a page of text: take the few that show the result, not one per step. Local addresses (localhost) open freely; anything else is refused or needs approval. Skip all of this when nothing visible changed.",
     ...(verdictLine ? [verdictLine] : []),
   ];
+  if (ctx.browser.sites?.length) {
+    lines.push(
+      `The board's browser is already signed in to ${ctx.browser.sites.join(", ")}: open those with the \`browser_*\` tools to check what you changed there. Never sign out, and never change the account itself.`,
+    );
+  }
   if (ctx.browser.chrome) {
     lines.push(
-      "Claude in Chrome is also available: the user's own Chrome, signed in to their accounts, and every action in it is approved by them. Use it only when the check needs their signed-in session; otherwise use the `browser_*` tools.",
+      ctx.mode === "autonomous"
+        ? "Claude in Chrome is also available: the user's own Chrome, signed in to their accounts. Use it only when the check needs their signed-in session; never sign out, change an account or send anything on their behalf. Otherwise use the `browser_*` tools."
+        : "Claude in Chrome is also available: the user's own Chrome, signed in to their accounts, and every action in it is approved by them. Use it only when the check needs their signed-in session; otherwise use the `browser_*` tools.",
     );
   }
   return lines.join("\n");
@@ -155,15 +165,37 @@ const SPEC_CHECKLIST =
 const VERDICTS =
   "End with a line `VERDICT: APPROVE` (every item delivered), `VERDICT: CHANGES_NEEDED` (something is missing or wrong and the code stage can fix it), or `VERDICT: BLOCKED` (it cannot be delivered from where these stages run — say what is needed), followed by your reasons.";
 
-/** Autonomous runs cannot leave their worktree. Say what to do about it before they try (D186). */
+/**
+ * Autonomous runs cannot leave their worktree. Say what to do about it before they try (D186). Saying
+ * so is a suggestion on the card, not a stop: the person chose to let it run, so it does the rest (D382).
+ */
 function sandboxNote(ctx: PromptCtx): string | null {
   if (ctx.mode !== "autonomous" || (ctx.capabilities ?? "sdk") !== "sdk") return null;
+  if (ctx.liveAllowed) {
+    return (
+      "This run works inside its own folder, and it may change the live system this task is about: the project's key files that git leaves out (such as .env) were copied into your folder, so the project's own scripts can reach it. " +
+      (ctx.stage === "plan"
+        ? "Plan the live steps as steps of this task, not as work for a later supervised run."
+        : "Do the live steps yourself, following the live-system rules below; do not leave them for a supervised run.") +
+      " Let scripts load the key files; never print them. Use `board_report_blocked` with needs \"supervised\" only for access that is still missing."
+    );
+  }
   return (
     "This run is sandboxed: it can only reach files inside its own folder, and no live system that needs credentials from outside it. " +
-    "If the task needs more than that — a live database, ERP or other production system, credentials, files in the main checkout, a website that needs signing in — " +
-    "call `board_report_blocked` with needs \"supervised\" as soon as you know, say exactly what access you need, and end your turn. Do not look for a way round the sandbox."
+    "If part of the task needs more than that — a live database, ERP or other production system, credentials, files in the main checkout, a website that needs signing in — " +
+    "call `board_report_blocked` with needs \"supervised\" once, saying exactly what access you need and for which steps. It puts a suggestion on the card and does not stop the run. " +
+    "Do not look for a way round the sandbox. " +
+    (ctx.stage === "plan"
+      ? "Plan every step as usual, and mark each one that needs that access with **(supervised run)**, so the next stage does the rest and leaves those."
+      : "Then do everything that can be done inside your folder — the code, the tests, the scripts and the exact commands — and end your summary with a `## Left for a supervised run` list: each step that needs the access, in order, with what it does and how to check it.")
   );
 }
+
+/** A sandboxed run leaves the live steps for a supervised one; review must not fail it for that alone (D382). */
+const LEFT_FOR_SUPERVISED =
+  "This run was sandboxed. Steps that need a live system, credentials or files outside the task's folder, listed under `## Left for a supervised run`, are not defects of this run: " +
+  "mark each ⏸ left for a supervised run, check that it is listed with what it does and how to check it, and judge everything else. " +
+  "Do not answer `CHANGES_NEEDED` or `BLOCKED` for those steps alone — the card already suggests the supervised run.";
 
 /** A plan the stage must work to: the one just before it, or (for review) any earlier one. */
 const hasPlan = (ctx: PromptCtx) => ctx.previousStage === "plan" || (ctx.earlierResults ?? []).some((e) => e.stage === "plan");
@@ -238,6 +270,7 @@ function stageInstructions(ctx: PromptCtx): string {
           SPEC_CHECKLIST,
           ...(plan ? [REVIEW_PLAN] : []),
           "Point at concrete defects with file and line; do not expand scope.",
+          ...(ctx.mode === "autonomous" && !ctx.liveAllowed ? [LEFT_FOR_SUPERVISED] : []),
           VERDICTS,
         ].join("\n");
       }
@@ -247,6 +280,7 @@ function stageInstructions(ctx: PromptCtx): string {
         SPEC_CHECKLIST,
         ...(plan ? [REVIEW_PLAN] : []),
         "Fix only clear defects; do not expand scope. A previous stage that says it was blocked or only partly done has not delivered: never approve it.",
+        ...(ctx.mode === "autonomous" && !ctx.liveAllowed ? [LEFT_FOR_SUPERVISED] : []),
         VERDICTS,
       ].join("\n");
     }
@@ -311,7 +345,9 @@ export function buildStagePrompt(ctx: PromptCtx): string {
       b.mode === "autonomous" && ctx.mode === "supervised"
         ? "It now runs supervised, in the main checkout: you can reach what the sandbox refused, and every write waits for the person's approval — so say what each one is for."
         : "Check whether what stopped it has changed before you start.";
-    out.push(`\n## What stopped the last attempt\n${b.reason.trim()}${b.ask ? `\nIt asked: ${b.ask}` : ""}\n${now}`);
+    // The sandboxed attempt ran to the end; only the part that needed access was left (D382).
+    const head = b.advisory ? "What the last attempt left for a supervised run" : "What stopped the last attempt";
+    out.push(`\n## ${head}\n${b.reason.trim()}${b.ask ? `\nIt asked: ${b.ask}` : ""}\n${now}`);
   }
   if (ctx.verificationFailure?.trim()) {
     out.push(
@@ -444,7 +480,8 @@ export function buildStagePrompt(ctx: PromptCtx): string {
             : "Nobody is watching this run, so every question for the person goes through `board_ask` — with the default you carry on with — not only into your report: a report is read after the fact, the card is seen now. ") +
         "Use `board_report_blocked` when you cannot do the task from where you run" +
         (ctx.mode === "autonomous" && ctx.mayAsk ? "" : ", or cannot go on without an answer") +
-        ": the board stops after this stage and shows your ask, instead of passing unfinished work on as done.",
+        ": the board stops after this stage and shows your ask, instead of passing unfinished work on as done." +
+        (ctx.mode === "autonomous" ? " Needing a supervised run is the exception: with needs \"supervised\" it is a suggestion on the card, and you carry on with what the sandbox allows." : ""),
     );
     if (ctx.imageTool) {
       out.push(
@@ -461,4 +498,41 @@ export function buildStagePrompt(ctx: PromptCtx): string {
     );
   }
   return out.join("\n");
+}
+
+/**
+ * A follow-up round, sent into the session that did the card's work (D375). Short on purpose: the session
+ * remembers the files, the decisions and the first spec, so the prompt says only what is new and what
+ * may have moved under it.
+ */
+export function buildRoundPrompt(o: { round: number; request: string; changedByOthers: string[]; worktree: boolean }): string {
+  return [
+    `## Round ${o.round}: ${o.request}`,
+    "",
+    `This is a follow-up on the work you did earlier in this session; round ${o.round - 1} was approved${o.worktree ? " and landed" : ""}. Do only what this round asks.`,
+    o.worktree
+      ? "Your folder is at the same path as before and holds the project as it is now, including your earlier rounds."
+      : "You work in the project's own folder, as before.",
+    o.changedByOthers.length
+      ? `Since your last round, other work changed these files of yours: ${o.changedByOthers.slice(0, 25).map((f) => `\`${f}\``).join(", ")}. Read each again before you change it.`
+      : "None of the files you changed were changed by anyone else since, but read a file again before you edit it all the same.",
+    "Keep your to-do list for this round only, and end with a short report of what you changed.",
+  ].join("\n");
+}
+
+/**
+ * The same round when its session could not be continued (deleted, or lost): a fresh session with D56's
+ * handoff, so it starts from what the card did instead of from nothing.
+ */
+export function buildRoundFallbackPrompt(o: { round: number; request: string; handoff: string }): string {
+  return [
+    `## Round ${o.round} of an earlier task: ${o.request}`,
+    "",
+    "You are continuing a task done earlier in this project, but its own session could not be reopened, so here is what it did.",
+    "Start from the current state of the repository: the code may have moved on since.",
+    "",
+    o.handoff,
+    "",
+    "Do only what this round asks, and end with a short report of what you changed.",
+  ].join("\n");
 }

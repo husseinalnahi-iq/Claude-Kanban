@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { setup } from "./helpers.ts";
 import { questionResult } from "../src/engine/runner.ts";
 import type { QueryFn } from "../src/engine/runner.ts";
-import type { Stage, WsMessage } from "../src/types.ts";
+import { recommendedOption, type Stage, type WsMessage } from "../src/types.ts";
 
 const ONE: Stage[] = [{ stage: "code", model: "m", effort: "low" }];
 const Q = {
@@ -57,7 +57,7 @@ test("an autonomous run is told to use board_ask instead: no card, no stall (D23
     assert.match(q.results[0].message, /board_ask/);
     assert.equal(s.repo.pendingApprovals(task.id).length, 0, "nothing waits on a card");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -92,7 +92,7 @@ test("an \"Autonomous + asks me\" task stops on a question card and waits for yo
     assert.equal(q.results[0].behavior, "allow");
     assert.deepEqual(q.results[0].updatedInput.answers, { "Which colour should the button be?": "Blue, Green" });
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -121,7 +121,7 @@ test("an \"Autonomous + asks me\" question follows its own wait setting, not the
     assert.match(q.results[0].message, /No answer after 30 minutes/);
   } finally {
     t.mock.timers.reset();
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -147,7 +147,7 @@ test("a question in a supervised run becomes a card, and your answer goes back i
       assert.deepEqual(q.results[0].updatedInput.answers, { "Which colour should the button be?": "Green" });
       assert.deepEqual(q.results[0].updatedInput.questions, Q.questions, "the questions themselves are passed back unchanged");
     } finally {
-      s.cleanup();
+      await s.cleanup();
     }
   }
 });
@@ -168,7 +168,7 @@ test("an approval event names its task and project, so the pop-up can say which 
     assert.equal(decided.approval.task_title, "Name me", "the decided event is named too");
     assert.equal(decided.approval.decision, "answered");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -187,7 +187,7 @@ test("by default a question waits for you: no timer, still pending", async () =>
     assert.equal(q.results[0].behavior, "deny", "stopping the task expires the card");
     assert.equal(s.repo.approvalsForTask(task.id)[0].decision, "expired");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -224,6 +224,14 @@ test("with a wait set, an unanswered question times out and the task carries on"
     assert.match(row.note ?? "", /Claude decided/);
   } finally {
     t.mock.timers.reset();
-    s.cleanup();
+    await s.cleanup();
   }
+});
+
+test("a card question shows the option Claude recommends: the one it names, else the one its default is (D386)", () => {
+  const options = ["A) internal type [T1]", "B) plan type [Monthly (fixed)]", "C) plan id [PL-…]"];
+  assert.equal(recommendedOption({ options, recommended: "b) plan type [monthly (fixed)]", default: null }), options[1], "named, matched loosely");
+  assert.equal(recommendedOption({ options, default: 'B) plan type verbatim, e.g. "[Monthly (fixed)] Sample"' }), options[1], "a default with the same letter");
+  assert.equal(recommendedOption({ options: ["Only on the bonus invoice", "Also on every new supplier"], default: "Only on the bonus invoice. Blank behaves as today." }), "Only on the bonus invoice", "a default that starts with the option");
+  assert.equal(recommendedOption({ options, recommended: "D) something else", default: "Keep the supplier's own payment method" }), null, "nothing matches: no tag rather than a wrong one");
 });

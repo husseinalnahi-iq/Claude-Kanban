@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { openDb } from "../src/db.ts";
 import { Repo } from "../src/repo.ts";
 import { Bus } from "../src/bus.ts";
-import { TaskRunner, type QueryFn } from "../src/engine/runner.ts";
+import { TaskRunner, type QueryFn, settled } from "../src/engine/runner.ts";
 import { SecretStore } from "../src/secrets.ts";
 import type { WsMessage } from "../src/types.ts";
 
@@ -68,6 +68,26 @@ export function fakeQuery(opts: FakeOpts = {}) {
   return { fn, calls, decisions };
 }
 
+/**
+ * Deletes a test's temp folder once the runner's background git work in it has finished. Windows refuses
+ * to delete a folder something still uses; a brief retry covers the antivirus, and a folder still held
+ * after that fails the test, because that is a leak to find.
+ */
+export async function removeTemp(dir: string): Promise<void> {
+  // First the git work the runner itself started in it (its conflict check after Review): that is what held it.
+  await settled(dir);
+  // A loop, not rmSync's maxRetries: Node 24's rmSync gives up on the first Windows EPERM without retrying.
+  for (let waited = 0; ; waited += 100) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch (e) {
+      if (waited >= 3000) throw e;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+}
+
 export function setup(queryFn: QueryFn, policy: Record<string, unknown> = {}, extra: { secrets?: SecretStore } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "krun-"));
   const repo = new Repo(openDb(":memory:"));
@@ -80,14 +100,7 @@ export function setup(queryFn: QueryFn, policy: Record<string, unknown> = {}, ex
   });
   const secrets = extra.secrets ?? new SecretStore(":memory:");
   const runner = new TaskRunner({ repo, bus, queryFn, secrets });
-  // On Windows a git subprocess can still hold a handle briefly; a failed rm must not fail the test.
-  const cleanup = () => {
-    try {
-      rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
-    } catch {
-      /* temp dir; the OS reclaims it */
-    }
-  };
+  const cleanup = () => removeTemp(dir);
   return { dir, repo, bus, seen, project, runner, secrets, cleanup };
 }
 

@@ -64,7 +64,7 @@ test("codex JSONL becomes SDK-shaped events; the last-message file is the result
     assert.ok(!rec.args.some((a) => a.includes("Stage:")), "the prompt is never an argument");
   } finally {
     setCliSpawn(undefined);
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -88,7 +88,7 @@ test("the child env is an allowlist plus the provider's own key — no ANTHROPIC
   } finally {
     delete process.env.ANTHROPIC_API_KEY;
     setCliSpawn(undefined);
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -105,7 +105,7 @@ test("read-only vs write args, and the stage matrix at queue time", async () => 
     const sup = s.repo.createTask({ project_id: s.project.id, title: "s", spec_md: "x", mode: "supervised", pipeline: [{ stage: "code", model: "gpt-5.6-sol", effort: "low", provider: "codex" }] });
     assert.throws(() => s.runner.queueTask(sup.id), (e: Error) => e instanceof ProviderError && /autonomous/.test(e.message));
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -124,7 +124,7 @@ test("a read-only stage that leaves the worktree dirty fails, and nothing is com
     assert.match(s.repo.getTask(task.id)!.error ?? "", /was run read-only on the plan stage but changed sneaky\.txt/);
   } finally {
     setCliSpawn(undefined);
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -144,7 +144,7 @@ test("a read-only stage in a checkout that already held uncommitted work passes 
     assert.equal(s.repo.getTask(task.id)!.status, "review", s.repo.getTask(task.id)!.error ?? "");
   } finally {
     setCliSpawn(undefined);
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -176,7 +176,7 @@ test("Gemini stats become usage; an overloaded error pauses to try again later, 
     assert.match(s.repo.getTask(t2.id)!.error ?? "", /model overloaded/);
   } finally {
     setCliSpawn(undefined);
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -199,7 +199,7 @@ test("a custom command gets the prompt in a file and its stdout as the result; u
     assert.ok(promptPath, "the prompt went to a file");
   } finally {
     setCliSpawn(undefined);
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -232,7 +232,7 @@ test("stop and timeout kill the child and fail the run", async () => {
     assert.equal(s.repo.getTask(task.id)!.error, "stopped by user");
   } finally {
     setCliSpawn(undefined);
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -270,7 +270,7 @@ async function runCodexStage(provider: Provider, opts: { model?: string; effort?
     return { rec, task: s.repo.getTask(task.id)! };
   } finally {
     setCliSpawn(undefined);
-    s.cleanup();
+    await s.cleanup();
   }
 }
 

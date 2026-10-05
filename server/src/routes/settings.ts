@@ -5,6 +5,9 @@ import { mergeSchema, stageSchema } from "./projects.ts";
 import { ANTHROPIC_PROVIDER_ID, DEBATE_MODES, DEBATE_ROUND_CEILING, EFFORTS, HELPER_MODELS, IMAGE_PROVIDERS, MODEL_SURFACES, type DebateMode, type ModelSurface } from "../types.ts";
 import { PROVIDER_PRESETS } from "../engine/providers/presets.ts";
 import { fileURLToPath } from "node:url";
+import { siteHost } from "../engine/browser.ts";
+import { openSignIn } from "../engine/signIn.ts";
+import { realProbe } from "../setup/probe.ts";
 
 /** A real screenshot with text in it, shipped with the board (the README's approval card). */
 const VISION_SAMPLE = fileURLToPath(new URL("../../../docs/images/approval.png", import.meta.url));
@@ -94,12 +97,17 @@ const patchSchema = z.object({
   chatKeepAliveMessage: z.string().trim().min(1).max(300).optional(),
   chatKeepAliveMaxHours: z.number().int().min(1).max(72).optional(),
   nextStepsSuggestions: z.boolean().optional(),
+  chatTools: z.boolean().optional(),
+  followUpRouting: z.enum(["memory", "ask", "new"]).optional(),
   specModel: z.string().trim().min(1).max(120).optional(),
   specEffort: z.enum(EFFORTS as [string, ...string[]]).optional(),
   loadUserPlugins: z.boolean().optional(),
   claudeAutoMemory: z.boolean().optional(),
+  autonomousLive: z.boolean().optional(),
   browserChecks: z.boolean().optional(),
   chromeInSupervised: z.boolean().optional(),
+  taskBrowser: z.enum(["board", "chrome"]).optional(),
+  browserSites: z.array(z.string().trim().toLowerCase().min(3).max(200)).max(50).optional(),
   autoAllowReadOnly: z.boolean().optional(),
   markitdownInTasks: z.boolean().optional(),
   planApproval: z.boolean().optional(),
@@ -121,6 +129,22 @@ const patchSchema = z.object({
 
 export async function settingsRoutes(app: FastifyInstance, { repo, bus, runner }: AppDeps) {
   app.get("/settings", async () => repo.getSettings());
+
+  /**
+   * Settings → Browser for tasks → Sign in to a site: opens the board browser's saved profile at that
+   * site for you to sign in, and lets autonomous runs open it from now on (D389).
+   */
+  app.post("/browser/sign-in", async (req, reply) => {
+    const { url } = z.object({ url: z.string().trim().min(3).max(500) }).parse(req.body ?? {});
+    const host = siteHost(url);
+    if (!host) return reply.code(400).send({ error: "That is not a web address. Type one like erp.example.com." });
+    const opened = openSignIn(repo.getSettings().stateDir, /^https?:\/\//i.test(url) ? url : `https://${url}`, realProbe);
+    if (!opened.ok) return reply.code(409).send({ error: opened.error });
+    const sites = [...new Set([...repo.getSettings().browserSites, host])].slice(0, 50);
+    const settings = repo.updateSettings({ browserSites: sites } as never);
+    bus.publish({ type: "settings.updated", settings });
+    return { host, sites };
+  });
 
   /**
    * Intake models → Try it: the README's approval screenshot, described by exactly this provider and

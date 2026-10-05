@@ -1,10 +1,12 @@
-import type { RunStyle } from "../../../server/src/types.ts";
+import { RUN_STYLE_LABEL, RUN_STYLES, type RunStyle } from "../../../server/src/types.ts";
 import { useEffect, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode, type RefObject, type SelectHTMLAttributes } from "react";
 import { createPortal } from "react-dom";
 import { pageZoom } from "../lib/view.ts";
 import type { StageState, TaskCard } from "../../../server/src/types.ts";
 import { isAnswerStage, stageLabel } from "../../../server/src/engine/answer.ts";
 import { shortModel } from "../lib/format.ts";
+import { memoryLine } from "../lib/memory.ts";
+import type { MemoryFacts } from "../../../server/src/engine/memory.ts";
 
 type Variant = "primary" | "ghost" | "danger" | "outline" | "go";
 
@@ -101,6 +103,130 @@ export const RUN_STYLE_TONE: Record<RunStyle, string> = {
   autonomous: "border-amber/60 bg-amber/10 text-amber",
   ask: "border-iris/60 bg-iris/10 text-iris",
 };
+
+/** The sliding highlight for each choice. Asks me is autonomous that stops to ask, so it spans both, amber into iris. */
+const SWITCH_GLOW: Record<RunStyle, string> = {
+  supervised: "border-cyan/45 bg-cyan/12",
+  autonomous: "border-amber/45 bg-amber/12",
+  ask: "border-iris/40 bg-linear-to-r from-amber/14 to-iris/20",
+};
+const SWITCH_WORD_TONE: Record<RunStyle, string> = { supervised: "text-cyan", autonomous: "text-amber", ask: "text-iris" };
+const SWITCH_SIZE = {
+  sm: { box: "inline-flex items-stretch rounded-md p-0.5", seg: "h-[26px] px-2.5 text-[11.5px]" },
+  md: { box: "inline-flex h-[34px] items-stretch rounded-md p-0.5", seg: "px-2.5 text-[11.5px]" },
+  lg: { box: "grid gap-1 rounded-lg p-1 sm:grid-cols-3", seg: "px-3 py-2 text-left text-[12.5px]" },
+} as const;
+
+/**
+ * The one way a mode is picked: the chat, the New task form, a card's setup, the task drawer and Settings (D372).
+ * A single highlight slides to the choice; on asks me it stretches over autonomous and asks me as one piece.
+ */
+export function RunStyleSwitch({
+  value, onChange, size = "sm", blocked, titles, detail, disabled, capitalized, label = "How it runs",
+}: {
+  value: RunStyle;
+  onChange: (s: RunStyle) => void;
+  size?: keyof typeof SWITCH_SIZE;
+  /** Why autonomous and asks me can't be picked here; null or absent when they can. */
+  blocked?: string | null;
+  titles?: Partial<Record<RunStyle, string>>;
+  /** A second line under each choice, for the large tiles. */
+  detail?: Partial<Record<RunStyle, ReactNode>>;
+  disabled?: boolean;
+  capitalized?: boolean;
+  label?: string;
+}) {
+  const box = useRef<HTMLDivElement>(null);
+  const seg = useRef<Partial<Record<RunStyle, HTMLButtonElement | null>>>({});
+  const [glow, setGlow] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  // The first placement must not slide in from nowhere; only later changes move.
+  const [placed, setPlaced] = useState(false);
+  useLayoutEffect(() => {
+    const place = () => {
+      const from = seg.current[value === "ask" ? "autonomous" : value];
+      const to = seg.current[value];
+      if (!from || !to) return setGlow(null);
+      // A union of the two boxes, so it also joins them when the tiles stack on a narrow screen.
+      const left = Math.min(from.offsetLeft, to.offsetLeft);
+      const top = Math.min(from.offsetTop, to.offsetTop);
+      setGlow({
+        left, top,
+        width: Math.max(from.offsetLeft + from.offsetWidth, to.offsetLeft + to.offsetWidth) - left,
+        height: Math.max(from.offsetTop + from.offsetHeight, to.offsetTop + to.offsetHeight) - top,
+      });
+    };
+    place();
+    const ro = new ResizeObserver(place);
+    if (box.current) ro.observe(box.current);
+    const t = requestAnimationFrame(() => setPlaced(true));
+    return () => {
+      ro.disconnect();
+      cancelAnimationFrame(t);
+    };
+  }, [value]);
+  const s = SWITCH_SIZE[size];
+  const word = (m: RunStyle) => {
+    const w = m === "ask" ? "asks me" : m;
+    return capitalized ? w.charAt(0).toUpperCase() + w.slice(1) : w;
+  };
+  return (
+    <div ref={box} role="radiogroup" aria-label={label} className={`relative shrink-0 border border-ink-700 ${s.box}`}>
+      {glow ? (
+        <div
+          aria-hidden
+          className={`pointer-events-none absolute rounded-[5px] border ${SWITCH_GLOW[value]} ${placed ? "transition-all duration-200 ease-out motion-reduce:transition-none" : ""}`}
+          style={glow}
+        />
+      ) : null}
+      {RUN_STYLES.map((m) => {
+        const off = !!disabled || (m !== "supervised" && !!blocked);
+        const lit = value === m || (value === "ask" && m === "autonomous");
+        return (
+          <button
+            key={m}
+            ref={(el) => {
+              seg.current[m] = el;
+            }}
+            type="button"
+            role="radio"
+            aria-checked={value === m}
+            aria-label={RUN_STYLE_LABEL[m]}
+            disabled={off}
+            title={(m !== "supervised" && blocked) || titles?.[m]}
+            onClick={() => m !== value && onChange(m)}
+            className={`relative z-[1] flex cursor-pointer flex-col justify-center rounded-[5px] transition-colors duration-200 motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-40 ${s.seg} ${
+              lit ? SWITCH_WORD_TONE[m] : "text-ink-500 hover:text-ink-200"
+            }`}
+          >
+            {m === "ask" ? (
+              // On the seam between autonomous and asks me: "autonomous ▸ asks me", only while it is the choice.
+              <span
+                aria-hidden
+                className={`absolute top-1/2 -left-[0.45em] -translate-y-1/2 text-[0.8em] text-iris transition-opacity duration-200 motion-reduce:transition-none ${size === "lg" ? "hidden sm:block" : ""} ${value === "ask" ? "opacity-100" : "opacity-0"}`}
+              >
+                ▸
+              </span>
+            ) : null}
+            <span className={size === "lg" ? "font-semibold" : undefined}>{word(m)}</span>
+            {detail?.[m] ? <span className="text-[11px] font-normal opacity-80">{detail[m]}</span> : null}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** A card's memory at a glance (D374): a green dot while warm, a grey ring once cooled. */
+export function MemoryDot({ facts }: { facts: MemoryFacts }) {
+  const warm = facts.memory === "warm";
+  return (
+    <span
+      className={`inline-block h-2 w-2 shrink-0 rounded-full ${warm ? "bg-moss shadow-[0_0_0_3px_color-mix(in_oklab,var(--color-moss)_22%,transparent)]" : "border border-ink-500"}`}
+      title={memoryLine(facts)}
+      aria-label={warm ? "Memory warm" : "Memory cooled"}
+    />
+  );
+}
 
 export function ModeChip({ mode, ownBranch, lookup, mayAsk }: { mode: "autonomous" | "supervised"; ownBranch?: boolean; lookup?: boolean; mayAsk?: boolean }) {
   return mode === "autonomous" && mayAsk ? (

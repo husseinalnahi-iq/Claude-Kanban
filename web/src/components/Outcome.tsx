@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { Run } from "../../../server/src/types.ts";
+import { recommendedOption, supervisedFrom, type Run } from "../../../server/src/types.ts";
 import { api, type TaskDetail } from "../lib/api.ts";
 import { Markdown } from "../lib/markdown.tsx";
 import { Button, ErrorLine, inputCls, useAction } from "./ui.tsx";
@@ -20,25 +20,35 @@ const lastOf = (runs: Run[], ok: (r: Run) => boolean) => [...runs].reverse().fin
 /**
  * Shown above the tabs while a stage's report of "I can't do this from here" stands. It replaces
  * the green Approve the old board offered on the same situation (docs/DECISIONS.md D184, D185).
+ * A suggestion the run carried on past (D382) is shown in amber, with the switch as an offer.
  */
 export function BlockedPanel({ d }: { d: TaskDetail }) {
   const t = d.task;
   const b = t.blocked!;
   const { busy, error, run } = useAction();
   const dialog = useAsk();
+  const advisory = !!b.advisory;
   const stage = t.pipeline[b.stage_index]?.stage ?? "stage";
   const report = lastOf(stageRuns(d), (r) => r.stage_index === b.stage_index)?.result_md;
   const hasWork = !!(t.branch || t.worktree_path);
   const canSwitch = b.needs === "supervised" && t.mode === "autonomous";
   const n = b.stage_index + 1;
+  // The same rule as the server's supervisedFrom: the plan is not made again, the stage that writes reruns.
+  const from = advisory ? supervisedFrom(t.pipeline, b.stage_index) : b.stage_index;
+  const fromStage = t.pipeline[from]?.stage ?? "stage";
 
   const switchAndRun = async () => {
     const ok = await dialog.confirm({
       title: "Switch to supervised and run again?",
       message: (
         <>
-          {hasWork ? <p className="mb-2">The sandboxed work on <span className="font-mono text-amber">{t.branch}</span> is discarded — it was done without the access this task needs.</p> : null}
-          <p>The task runs again from stage #{n} ({stage}) in your main checkout. Earlier stages are kept and handed on. Every write waits for your approval on the Approvals tab.</p>
+          {hasWork ? (
+            <p className="mb-2">
+              The sandboxed work on <span className="font-mono text-amber">{t.branch}</span> is discarded
+              {advisory ? " — the supervised run does it again, with the access it was missing. To keep it instead, approve it and do the live steps yourself." : " — it was done without the access this task needs."}
+            </p>
+          ) : null}
+          <p>The task runs again from stage #{from + 1} ({fromStage}) in your main checkout. Earlier stages are kept and handed on. Every write waits for your approval on the Approvals tab.</p>
         </>
       ),
       confirmLabel: "Switch and run",
@@ -47,15 +57,24 @@ export function BlockedPanel({ d }: { d: TaskDetail }) {
   };
 
   return (
-    <div className="border-b border-rose/30 bg-rose/5 px-5 py-3">
+    <div className={`border-b px-5 py-3 ${advisory ? "border-amber/30 bg-amber/5" : "border-rose/30 bg-rose/5"}`}>
       {dialog.element}
       <div className="mb-1 flex items-center gap-2">
-        <span className="pulse-rose inline-block h-2 w-2 rounded-full bg-rose" />
-        <span className="text-[12.5px] font-semibold text-rose">Blocked at stage #{n} · {stage} — needs you</span>
+        <span className={`inline-block h-2 w-2 rounded-full ${advisory ? "bg-amber" : "pulse-rose bg-rose"}`} />
+        {advisory ? (
+          <span className="text-[12.5px] font-semibold text-amber">Suggested at stage #{n} · {stage}: part of this needs a supervised run</span>
+        ) : (
+          <span className="text-[12.5px] font-semibold text-rose">Blocked at stage #{n} · {stage} — needs you</span>
+        )}
       </div>
       <div className="text-[13px] text-ink-100">{b.reason}</div>
-      {b.ask ? <div className="mt-1 text-[13px] text-ink-200"><span className="text-rose">It asks:</span> {b.ask}</div> : null}
-      {canSwitch ? (
+      {b.ask ? <div className="mt-1 text-[13px] text-ink-200">{advisory ? <span className="text-amber">It suggests:</span> : <span className="text-rose">It asks:</span>} {b.ask}</div> : null}
+      {advisory ? (
+        <div className="mt-1.5 text-[12px] text-ink-400">
+          It did not stop: it carried on with everything its sandbox allows, and its report lists the steps left for a supervised run. Approve the work as it is, or
+          switch — a supervised run works in your main checkout and asks you before every write.
+        </div>
+      ) : canSwitch ? (
         <div className="mt-1.5 text-[12px] text-ink-400">
           Autonomous runs are sandboxed: nothing outside their own folder, no live systems, no credentials from your main checkout. A supervised run works in your
           main checkout and asks you before every write.
@@ -70,11 +89,11 @@ export function BlockedPanel({ d }: { d: TaskDetail }) {
       ) : null}
       <div className="mt-2.5 flex flex-wrap items-center gap-2">
         {canSwitch ? (
-          <Button variant="primary" busy={busy} disabled={d.busy} onClick={() => void switchAndRun()}>Switch to supervised &amp; run from #{n}</Button>
+          <Button variant={advisory ? "ghost" : "primary"} busy={busy} disabled={d.busy} onClick={() => void switchAndRun()}>Switch to supervised &amp; run from #{from + 1}</Button>
         ) : (
           <Button variant="primary" busy={busy} disabled={d.busy} onClick={() => run(() => api.retry(t.id, b.stage_index))}>↻ Retry from #{n}</Button>
         )}
-        <Button variant="ghost" busy={busy} disabled={d.busy} onClick={() => run(() => api.reject(t.id, `Blocked: ${b.reason}`))}>Back to backlog</Button>
+        {advisory ? null : <Button variant="ghost" busy={busy} disabled={d.busy} onClick={() => run(() => api.reject(t.id, `Blocked: ${b.reason}`))}>Back to backlog</Button>}
       </div>
       <div className="mt-2"><ErrorLine error={error} /></div>
     </div>
@@ -157,9 +176,16 @@ export function QuestionsPanel({ d }: { d: TaskDetail }) {
             <div className="text-[13px] text-ink-100">{q.text}</div>
             {q.default ? <div className="text-[11.5px] text-ink-400">Meanwhile: {q.default}</div> : null}
             <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-              {q.options.map((o) => (
-                <Button key={o} size="sm" busy={busy} onClick={() => answer(q.id, o)}>{o}</Button>
-              ))}
+              {q.options.map((o) =>
+                o === recommendedOption(q) ? (
+                  <Button key={o} size="sm" busy={busy} onClick={() => answer(q.id, o)} className="border-moss! bg-moss/15! text-moss!" title="What Claude recommends, and what it carries on with">
+                    {o}
+                    <span className="rounded bg-moss/25 px-1 font-mono text-[9.5px] uppercase tracking-wide">Recommended</span>
+                  </Button>
+                ) : (
+                  <Button key={o} size="sm" busy={busy} onClick={() => answer(q.id, o)}>{o}</Button>
+                ),
+              )}
               <input
                 className={`${inputCls} h-7 min-w-[220px] flex-1 py-0 text-[12.5px]`}
                 placeholder={q.options.length ? "…or your own answer" : "Your answer"}

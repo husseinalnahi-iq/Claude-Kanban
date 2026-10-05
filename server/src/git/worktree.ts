@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import type { DiffFile, MergeStrategy } from "../types.ts";
+import { removeKeyCopies } from "./bootstrap.ts";
 
 const EXCLUDE_LINE = ".kanban/";
 
@@ -133,6 +134,19 @@ export async function headSha(path: string): Promise<string | null> {
     return (await git(path, ["rev-parse", "HEAD"])).trim();
   } catch {
     return null;
+  }
+}
+
+/**
+ * Which of `files` changed between `from` and HEAD: what others did to a card's files since it last landed,
+ * for the next round's prompt (D375). Empty when nothing did, or when `from` is no longer known.
+ */
+export async function changedSince(cwd: string, from: string, files: string[]): Promise<string[]> {
+  if (!files.length) return [];
+  try {
+    return (await git(cwd, ["diff", "--name-only", `${from}..HEAD`, "--", ...files.slice(0, 200)])).split("\n").map((l) => l.trim()).filter(Boolean);
+  } catch {
+    return [];
   }
 }
 
@@ -304,21 +318,21 @@ export async function removeWorktree(
   opts: { deleteBranch: "safe" | "force" | false },
 ): Promise<void> {
   const path = worktreePathFor(projectPath, taskId);
+  let leftOver: unknown = null;
   if (existsSync(path)) {
+    // Keys first: git ignores them, so the snapshot below never holds them, and a folder that then cannot
+    // be removed kept a full copy of the project's keys with nothing said (D396).
+    await removeKeyCopies(path);
     // Snapshot leftovers so `worktree remove` succeeds without --force; the branch keeps them until deleted.
     await commitAll(path, "kanban: snapshot before worktree removal");
     try {
       await git(projectPath, ["worktree", "remove", path]);
     } catch (err) {
-      // On Windows a program whose working folder is the worktree (a dev server, a terminal) lets git
-      // empty and unregister it but not delete the folder itself. That is nothing to stop for: the
-      // branch still has to go, and once git has let go of the worktree no screen lists it any more.
+      // On Windows a program whose working folder is the worktree (a dev server, a terminal), or CloudSync
+      // syncing it, can stop git deleting the folder. Once git has let go of the worktree, the folder is
+      // retried here for a while; Node's rmSync gives up on the first EPERM by itself.
       if ((await listWorktrees(projectPath)).some((p) => samePath(p, path))) throw err;
-      try {
-        rmSync(path, { recursive: true, force: true });
-      } catch {
-        // still in use: an empty folder under .kanban is harmless, and the next removal tries again
-      }
+      leftOver = await removeFolder(path);
     }
   }
   await git(projectPath, ["worktree", "prune"]);
@@ -326,6 +340,33 @@ export async function removeWorktree(
     const branch = branchFor(taskId);
     if (await branchExists(projectPath, branch)) await git(projectPath, ["branch", opts.deleteBranch === "force" ? "-D" : "-d", branch]);
   }
+  // Said, not swallowed: the caller puts it on the card so the folder is not forgotten (D396).
+  if (leftOver) throw new FolderLeftError(path, String((leftOver as NodeJS.ErrnoException).code ?? leftOver));
+}
+
+/**
+ * The worktree is gone as far as git is concerned (unregistered, branch handled, keys removed), but its
+ * folder could not be deleted. Callers finish what they were doing and say so (D396).
+ */
+export class FolderLeftError extends Error {
+  constructor(readonly path: string, readonly reason: string) {
+    super(`the folder ${path} could not be deleted (${reason}); its key files were removed`);
+  }
+}
+
+/** Deletes a folder, retrying for about ten seconds; returns the last error when it is still there. */
+async function removeFolder(path: string): Promise<unknown> {
+  let last: unknown = null;
+  for (let waited = 0; waited <= 10_000; waited += 500) {
+    try {
+      rmSync(path, { recursive: true, force: true });
+      if (!existsSync(path)) return null;
+    } catch (e) {
+      last = e;
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return existsSync(path) ? last ?? new Error("still present") : null;
 }
 
 export interface WorktreeInfo {

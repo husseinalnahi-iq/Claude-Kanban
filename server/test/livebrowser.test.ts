@@ -47,8 +47,10 @@ test("frames are paced, and a late frame is replaced by a newer one rather than 
 /** A stand-in browser: /json/list names one page; its socket answers screencast calls with a frame. */
 async function fakeBrowser() {
   const calls: string[] = [];
+  let lists = 0;
   const jpeg = Buffer.from("fake-jpeg-bytes").toString("base64");
   const http = createServer((req, res) => {
+    lists++;
     const port = (http.address() as { port: number }).port;
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify([{ id: "P1", type: "page", url: "http://localhost:5173/cart", title: "Cart", webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/page/P1` }]));
@@ -63,7 +65,7 @@ async function fakeBrowser() {
     });
   });
   await new Promise<void>((r) => http.listen(0, "127.0.0.1", () => r()));
-  return { port: (http.address() as { port: number }).port, calls, close: () => (wss.close(), http.close()) };
+  return { port: (http.address() as { port: number }).port, calls, lists: () => lists, close: () => (wss.close(), http.close()) };
 }
 
 test("a watched task streams its page, only while someone watches, and keeps the last picture after the run", async () => {
@@ -72,6 +74,7 @@ test("a watched task streams its page, only while someone watches, and keeps the
   const watch = new BrowserWatch({ publish: (m: unknown) => published.push(m) } as never);
   try {
     watch.begin("t1", "r1", b.port);
+    watch.action("t1", "opening the cart", "http://localhost:5173/cart"); // the run used its browser
     const frames: Buffer[] = [];
     const metas: LiveMeta[] = [];
     const v = watch.watch("t1", (f) => frames.push(f), (m) => metas.push(m));
@@ -112,4 +115,21 @@ test("the view follows the task's page, not an extension's welcome tab", async (
   assert.equal(pickPage(pages, "https://docs.example.org/guide")!.id, "other", "where the task navigated wins");
   assert.equal(pickPage([P("only", "https://a.example/")], null)!.id, "only");
   assert.equal(pickPage([{ ...P("bg", "chrome-extension://abc/bg.html") }], null), undefined, "an extension page is never shown");
+});
+
+test("a run that never uses its browser never has its debugging port polled (D391)", async () => {
+  const b = await fakeBrowser();
+  const watch = new BrowserWatch();
+  try {
+    watch.begin("t1", "r1", b.port);
+    const v = watch.watch("t1", () => {}, () => {});
+    await new Promise((r) => setTimeout(r, 3500));
+    assert.equal(b.lists(), 0, "not one connection: on Windows each one to a closed port risked crashing the board");
+    watch.action("t1", "opening the cart", "http://localhost:5173/cart");
+    await until(() => b.lists() > 0);
+    v.unwatch();
+  } finally {
+    watch.stopAll();
+    b.close();
+  }
 });

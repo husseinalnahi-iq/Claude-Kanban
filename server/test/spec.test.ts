@@ -61,7 +61,7 @@ test("Rewrite: Opus at high by default, read-only tools, your text kept as the o
     assert.ok(r.events().some((e) => e.note === "read src/app.ts"), "progress says what it is reading");
     assert.equal(r.repo.specCost(r.project.id), 0.12, "counted on the dashboard");
   } finally {
-    r.cleanup();
+    await r.cleanup();
   }
 });
 
@@ -87,7 +87,7 @@ test("Regenerate with another model starts from your words, not the first rewrit
     const kinds = r.specs.status(r.task.id).versions.map((v) => v.kind);
     assert.deepEqual(kinds, ["yours", "ai", "ai", "yours", "ai"]);
   } finally {
-    r.cleanup();
+    await r.cleanup();
   }
 });
 
@@ -103,7 +103,7 @@ test("Back to any version: the original returns, and what was there is kept firs
     assert.ok(r.specs.status(r.task.id).versions.some((v) => v.spec_md === "an edit nobody saved as a version"), "restoring never loses text");
     assert.throws(() => r.specs.restore(r.task.id, "sv_nope"), /No such version/);
   } finally {
-    r.cleanup();
+    await r.cleanup();
   }
 });
 
@@ -120,7 +120,7 @@ test("Stop and a failed answer leave the spec untouched", async () => {
     assert.equal(r.events().at(-1)!.state, "stopped");
     assert.equal(r.repo.getTask(r.task.id)!.spec_md, "make search faster pls");
   } finally {
-    r.cleanup();
+    await r.cleanup();
   }
 
   const bad = rig(writer({ empty: true }));
@@ -131,7 +131,7 @@ test("Stop and a failed answer leave the spec untouched", async () => {
     assert.match(bad.events().at(-1)!.error!, /without a spec/);
     assert.equal(bad.repo.getTask(bad.task.id)!.spec_md, "make search faster pls");
   } finally {
-    bad.cleanup();
+    await bad.cleanup();
   }
 });
 
@@ -153,6 +153,6 @@ test("API: settings choose the default model and effort; the routes start, list 
     assert.equal(back.json().spec_md, "make search faster pls");
   } finally {
     await app.close();
-    r.cleanup();
+    await r.cleanup();
   }
 });

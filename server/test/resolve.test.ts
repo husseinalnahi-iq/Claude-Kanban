@@ -112,7 +112,7 @@ test("Approve on a conflicting task: Claude combines both sides, every check pas
     assert.ok(review.options.disallowedTools.includes("Edit"), "the reviewer changes nothing");
     assert.equal(s.repo.getRun(s.repo.latestRun(s.task.id)!.id)!.result_md, "Added tax.", "the stage's own result is kept");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -129,7 +129,7 @@ test("a resolution that drops a side is set aside, and the second try is told ex
     assert.match(second, /import discount/, "the lost line is named");
     assert.match(second, /The reviewer said: import discount is gone/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -152,7 +152,7 @@ test("when no try passes, nothing lands, the branch is back where it was, and th
     assert.equal(git(s.wt.path, "status", "--porcelain"), "");
     assert.equal(a.reviewCalls().length, 0, "a resolution that fails the board's checks never costs a review");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -171,7 +171,7 @@ test("with automatic landing off, a resolved conflict waits in Review for Approv
     assert.equal(s.get().status, "done");
     assert.equal(read(s.dir, "app.ts"), BOTH);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -196,7 +196,7 @@ test("a conflict the board foresees is shown on the card, and Fix now resolves i
     assert.equal(s.get().status, "done", "and it now lands without a conflict");
     assert.equal(read(s.dir, "app.ts"), BOTH);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -212,7 +212,7 @@ test("the project's verify command must pass on the combined code", async () => 
     assert.equal(r.checks.find((c) => c.id === "verify")?.ok, false);
     assert.equal(a.reviewCalls().length, 0, "verification failing stops before the review");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -224,7 +224,7 @@ test("the reviewer runs on the model the project names, or else the one that wro
     await until(() => s.get().status === "done");
     assert.equal(a.reviewCalls()[0].options.model, "claude-sonnet-5-5");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
   const b = actor({ resolve: () => BOTH });
   const s2 = await scene(b.fn);
@@ -233,7 +233,7 @@ test("the reviewer runs on the model the project names, or else the one that wro
     await until(() => s2.get().status === "done");
     assert.equal(b.reviewCalls()[0].options.model, "claude-haiku-4-5-20251001");
   } finally {
-    s2.cleanup();
+    await s2.cleanup();
   }
 });
 
@@ -258,7 +258,7 @@ test("Stop during a resolution sets it aside and leaves the branch as it was", a
     assert.equal(await headSha(s.wt.path), s.pre);
     assert.equal(git(s.wt.path, "status", "--porcelain"), "");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -307,6 +307,6 @@ test("Stop while the result is being reviewed sets it aside: a resolution nobody
     assert.equal(git(s.dir, "rev-parse", "HEAD"), mainBefore, "nothing landed");
     assert.equal(await headSha(s.wt.path), s.pre, "and the branch is back where it was");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });

@@ -34,7 +34,7 @@
   --color-slate: #8d93a8;   /* queued */
   --color-iris: #a394f0;    /* paused by a usage limit */
 
-  /* the Studio's chat lights (chatSignal.ts): hues people already read as "answer me", "plan", "broken" */
+  /* the AI Manager's chat lights (chatSignal.ts): hues people already read as "answer me", "plan", "broken" */
   --color-bulb: #f5cf3d;    /* a question for you */
   --color-ember: #f08a24;   /* wants your OK */
   --color-azure: #5b9cf5;   /* a plan to approve */
@@ -419,6 +419,22 @@ select:focus-visible {
 }
 .kb-beacon { animation: kb-beacon 2s ease-in-out infinite; }
 
+/* A board card that waits on you (D383): its border breathes rose with a faint halo. On a ::after ring,
+   because the card's own `animation` is already its `rise` entrance. */
+@keyframes kb-needs {
+  0%, 100% { border-color: color-mix(in srgb, var(--color-rose) 25%, transparent); box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-rose) 0%, transparent); }
+  50% { border-color: color-mix(in srgb, var(--color-rose) 85%, transparent); box-shadow: 0 0 10px 1px color-mix(in srgb, var(--color-rose) 22%, transparent); }
+}
+.kb-needs::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border: 1px solid transparent;
+  border-radius: inherit;
+  pointer-events: none;
+  animation: kb-needs 2.4s ease-in-out infinite;
+}
+
 @keyframes rise {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: none; }
@@ -491,6 +507,7 @@ select:focus-visible {
   .rise, .slide-in, .slide-in-right, .slide-out-right, .fade-in, .fade-out, .dock-in, .settle { animation-duration: 1ms !important; }
   .sweep, .pulse-rose, .breathe, .kb-ping, .kb-spin { animation: none; }
   .kb-beacon { animation: none; box-shadow: 0 0 5px 1px currentColor; }
+  .kb-needs::after { animation: none; border-color: color-mix(in srgb, var(--color-rose) 70%, transparent); }
 }
 
 /* rendered markdown */

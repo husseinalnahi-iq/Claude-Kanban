@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
+import { removeTemp } from "./helpers.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { shellFor, TerminalManager } from "../src/terminal.ts";
@@ -16,14 +17,6 @@ const FAKE_SHELL = {
   args: ["-e", "process.stdout.write('$ ');process.stdin.on('data',d=>process.stdout.write(String(d).trim().toUpperCase()+'\\n$ '))"],
 };
 
-/** Windows keeps a dead shell's folder busy for a moment: never fail a test on cleanup. */
-const tidy = (dir: string) => {
-  try {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-  } catch {
-    // left for the OS temp cleaner
-  }
-};
 
 async function until(cond: () => boolean, ms = 15_000) {
   const t0 = Date.now();
@@ -65,7 +58,7 @@ test("basic mode: typing is echoed, Enter runs the line, the scrollback replays 
     assert.equal(t.list().length, 0);
   } finally {
     t.killAll();
-    tidy(dir);
+    await removeTemp(dir);
   }
 });
 
@@ -83,7 +76,7 @@ test("full mode runs in a real terminal when node-pty is installed", async (tt) 
     t.resize(info.id, 120, 30);
   } finally {
     t.killAll();
-    tidy(dir);
+    await removeTemp(dir);
   }
 });
 
@@ -109,6 +102,71 @@ test("API: a terminal opens only in a registered project (or its task), never an
     assert.equal(cross.statusCode, 403, "another website cannot reach it");
   } finally {
     await app.close();
-    tidy(dir);
+    await removeTemp(dir);
+  }
+});
+
+test("closing a full terminal on Windows also stops what was started in it (D393)", async (tt) => {
+  if (process.platform !== "win32") return tt.skip("the Windows console behaviour this guards");
+  // A "shell" that starts a long-running program, as `npm run dev` would, and says its PID.
+  const starter = {
+    command: process.execPath,
+    args: ["-e", "const c=require('child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});process.stdout.write('CHILD '+c.pid+' ');setInterval(()=>{},1000)"],
+  };
+  const t = new TerminalManager({ shell: starter });
+  if (!(await t.fullMode())) return tt.skip("node-pty is not installed here");
+  const dir = mkdtempSync(join(tmpdir(), "kterm-"));
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  try {
+    const info = await t.create({ project_id: "p", cwd: dir, title: "dev server" });
+    let seen = "";
+    t.attach(info.id, (d) => (seen += d), () => {});
+    await until(() => /CHILD \d+/.test(seen));
+    const child = Number(/CHILD (\d+)/.exec(seen)![1]);
+    assert.equal(alive(child), true);
+    t.kill(info.id);
+    await until(() => !alive(child), 5000);
+  } finally {
+    t.killAll();
+    await removeTemp(dir);
+  }
+});
+
+test("closing a basic terminal on Windows also stops what was started in it (D393)", async (tt) => {
+  if (process.platform !== "win32") return tt.skip("the Windows console behaviour this guards");
+  // A "shell" that starts a long-running program, as `npm run dev` would, and says its PID.
+  const starter = {
+    command: process.execPath,
+    args: ["-e", "const c=require('child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});process.stdout.write('CHILD '+c.pid+' ');setInterval(()=>{},1000)"],
+  };
+  const t = new TerminalManager({ forceBasic: true, shell: starter });
+  const dir = mkdtempSync(join(tmpdir(), "kterm-"));
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  try {
+    const info = await t.create({ project_id: "p", cwd: dir, title: "dev server" });
+    let seen = "";
+    t.attach(info.id, (d) => (seen += d), () => {});
+    await until(() => /CHILD \d+/.test(seen));
+    const child = Number(/CHILD (\d+)/.exec(seen)![1]);
+    assert.equal(alive(child), true);
+    t.kill(info.id);
+    await until(() => !alive(child), 5000);
+  } finally {
+    t.killAll();
+    await removeTemp(dir);
   }
 });

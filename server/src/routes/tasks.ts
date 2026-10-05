@@ -1,3 +1,4 @@
+import type { MemoryInput } from "../engine/memory.ts";
 import type { FastifyInstance } from "fastify";
 import { commandsForTask } from "../engine/commands.ts";
 import { z } from "zod";
@@ -329,6 +330,15 @@ export async function taskRoutes(app: FastifyInstance, { repo, bus, runner }: Ap
     return runner.chat(idOf(req), body.body);
   });
   app.get("/tasks/:id/diff", async (req) => runner.diff(idOf(req)));
+  // What the board knows about each card's memory, for the web to draw with memoryFacts as the cache cools (D374).
+  app.get("/projects/:id/memory", async (req) => {
+    const projectId = (req.params as { id: string }).id;
+    const out: Record<string, MemoryInput> = {};
+    for (const t of repo.listTasks({ project_id: projectId })) {
+      if (["running", "planning", "review", "failed", "done"].includes(t.status)) out[t.id] = runner.memoryInput(t.id);
+    }
+    return out;
+  });
 
   /** Every shell command the task ran, is running or waits to run, read off its transcripts (D337). */
   app.get("/tasks/:id/commands", async (req) => {
@@ -342,5 +352,18 @@ export async function taskRoutes(app: FastifyInstance, { repo, bus, runner }: Ap
       .object({ title: z.string().trim().optional(), note: z.string().trim().optional(), type: z.enum(TASK_TYPES as [string, ...string[]]).optional() })
       .parse(req.body ?? {});
     return runner.followUp(idOf(req), body as never);
+  });
+
+  // A follow-up round on a done card: its coder continues with what it remembers (D375).
+  app.post("/tasks/:id/rounds", async (req) => {
+    const body = z.object({ request: z.string().trim().min(1), review: z.boolean().optional(), force: z.boolean().optional() }).parse(req.body ?? {});
+    return runner.startRound(idOf(req), body.request, { review: body.review, force: body.force });
+  });
+  app.get("/tasks/:id/rounds", async (req) => repo.roundsFor(idOf(req)));
+  app.get("/tasks/:id/memory", async (req) => runner.memoryInput(idOf(req)));
+  // A new card that starts with a copy of this card's coder memory (D376).
+  app.post("/tasks/:id/fork", async (req) => {
+    const body = z.object({ title: z.string().trim().default(""), request: z.string().trim().min(1), review: z.boolean().optional(), force: z.boolean().optional() }).parse(req.body ?? {});
+    return runner.forkTask(idOf(req), body);
   });
 }

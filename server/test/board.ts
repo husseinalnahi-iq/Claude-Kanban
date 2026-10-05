@@ -38,7 +38,7 @@ export async function board(queryFn: QueryFn = okQuery) {
   const get = async (url: string) => (await app.inject({ method: "GET", url })).json();
   const close = async () => {
     await app.close();
-    s.cleanup();
+    await s.cleanup();
     rmSync(state, { recursive: true, force: true });
   };
   return { ...s, app, state, get, close };

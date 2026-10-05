@@ -1,10 +1,12 @@
 import { SetupCard } from "../components/RunSetup.tsx";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Approval, Stage } from "../../../server/src/types.ts";
-import { IMAGE_TOOL, RUN_STYLE_LABEL, RUN_STYLES, runStyleFields, runStyleOf } from "../../../server/src/types.ts";
+import type { Approval, Stage, TaskRound } from "../../../server/src/types.ts";
+import { IMAGE_TOOL, runStyleFields, runStyleOf, stoppedBy } from "../../../server/src/types.ts";
 import { api, type TaskDetail } from "../lib/api.ts";
 import { useWs, useWsReconnect, watchTask } from "../lib/ws.ts";
 import { navigate } from "../lib/router.ts";
+import { memoryLine, useTaskMemory } from "../lib/memory.ts";
+import { MEMORY_WARM_MIN } from "../../../server/src/engine/memory.ts";
 import { ConflictPanel } from "../components/ConflictPanel.tsx";
 import { ScheduleModal, startLabel } from "../components/SchedulesPanel.tsx";
 import { QuestionCard, QuestionHistory } from "../components/QuestionCard.tsx";
@@ -18,7 +20,7 @@ import type { Stage as PipelineStage } from "../../../server/src/types.ts";
 import { PRIORITIES, TASK_TYPES } from "../../../server/src/types.ts";
 import { RefineModal } from "../components/RefineModal.tsx";
 import { SpecSection } from "../components/SpecSection.tsx";
-import { Button, Chip, Empty, ErrorLine, inputCls, ModeChip, ModeHelp, RUN_STYLE_TONE, Select, useAction, useEscape, useFocusTrap } from "../components/ui.tsx";
+import { Button, Chip, Empty, ErrorLine, inputCls, ModeChip, ModeHelp, RunStyleSwitch, Select, useAction, useEscape, useFocusTrap } from "../components/ui.tsx";
 import { PipelineEditor, pipelineLine } from "../components/PipelineEditor.tsx";
 import { Transcript } from "../components/Transcript.tsx";
 import { DiffView } from "../components/DiffView.tsx";
@@ -240,21 +242,13 @@ function SpecTab({ d }: { d: TaskDetail }) {
           <div className="mb-1 flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-ink-500">
             Mode <ModeHelp />
           </div>
-          <div className="flex gap-1.5">
-            {RUN_STYLES.map((m) => (
-              <button
-                key={m}
-                disabled={d.busy || (m !== "supervised" && !!blocked) || runStyleOf(t) === m}
-                title={m !== "supervised" && blocked ? blocked : undefined}
-                onClick={() => run(() => api.patchTask(t.id, runStyleFields(m)))}
-                className={`rounded border px-2 py-1 text-[11px] cursor-pointer disabled:cursor-default ${
-                  runStyleOf(t) === m ? RUN_STYLE_TONE[m] : "border-ink-700 text-ink-400 hover:text-ink-200 disabled:opacity-40"
-                }`}
-              >
-                {RUN_STYLE_LABEL[m]}
-              </button>
-            ))}
-          </div>
+          <RunStyleSwitch
+            capitalized
+            value={runStyleOf(t)}
+            onChange={(m) => run(() => api.patchTask(t.id, runStyleFields(m)))}
+            disabled={d.busy}
+            blocked={blocked}
+          />
           {d.busy ? (
             <div className="mt-1.5 text-[11.5px] leading-snug text-ink-400">
               Mode can't change while it runs: it chose where to work when it started.{" "}
@@ -631,6 +625,106 @@ function MessagesTab({ d }: { d: TaskDetail }) {
   );
 }
 
+/**
+ * A card that remembers (D374–D376): how warm its coder's memory is, the rounds it has done, and — on a
+ * done card — the next round, or a new card branched from that memory.
+ */
+function RoundsPanel({ d }: { d: TaskDetail }) {
+  const t = d.task;
+  const memory = useTaskMemory(t.id, `${t.status}:${t.updated_at}:${d.runs.length}`);
+  const [rounds, setRounds] = useState<TaskRound[]>([]);
+  useEffect(() => {
+    let gone = false;
+    api.rounds(t.id).then((r) => !gone && setRounds(r), () => {});
+    return () => {
+      gone = true;
+    };
+  }, [t.id, t.round, t.status]);
+  const [ask, setAsk] = useState("");
+  const [review, setReview] = useState(false);
+  const { busy, error, run } = useAction();
+  if (!memory || !(t.status === "done" || t.round > 1)) return null;
+  const hasReview = t.pipeline.some((st) => st.stage === "review");
+  const next = t.round + 1;
+  const price = (usd: number | null, w: number) => (usd !== null ? `about $${usd.toFixed(2)}` : `about ${Math.round(w / 1000)}k tokens`);
+  const leftMin = memory.warmUntil ? Math.max(0, (Date.parse(memory.warmUntil) - Date.now()) / 60_000) : 0;
+  return (
+    <div className="border-b border-ink-800 px-5 py-3">
+      <div className="flex items-center gap-2 text-[12px]">
+        <span className="font-medium text-ink-100">What it remembers</span>
+        {memory.memory === "warm" && memory.warmUntil ? (
+          <span className="h-1.5 w-24 overflow-hidden rounded-full bg-ink-800" title={memoryLine(memory)}>
+            <span className="block h-full rounded-full bg-moss transition-[width] duration-500" style={{ width: `${Math.min(100, (100 * leftMin) / MEMORY_WARM_MIN)}%` }} />
+          </span>
+        ) : null}
+        <span className={`font-mono text-[11px] ${memory.memory === "warm" ? "text-moss" : memory.memory === "cool" ? "text-ink-300" : "text-ink-500"}`}>
+          {memory.memory === "warm" ? (memory.warmUntil ? `warm · ${Math.round(leftMin)} min left` : "working") : memory.memory === "cool" ? "cooled" : "gone"}
+        </span>
+        {memory.memory !== "gone" ? <span className="font-mono text-[11px] text-ink-500" title="How full its memory is, against what its model can hold">{memory.contextPct}% full</span> : null}
+      </div>
+      <p className="mt-1 text-[11.5px] leading-snug text-ink-400">{memoryLine(memory)}</p>
+      {rounds.length ? (
+        <ol className="mt-2 space-y-0.5 text-[11.5px]">
+          <li className="text-ink-400"><span className="font-mono text-ink-500">1</span> · {t.title}</li>
+          {rounds.map((r) => (
+            <li key={r.id} className="text-ink-300" title={r.fell_back ? "Its session could not be reopened, so this round started fresh with what the card did" : undefined}>
+              <span className="font-mono text-ink-500">{r.round}</span> · {r.request}
+              <span className="ml-1.5 text-ink-500">{r.landed_at ? "· landed" : r.round === t.round ? `· ${t.status}` : ""}{r.fell_back ? " · started fresh" : ""}</span>
+            </li>
+          ))}
+        </ol>
+      ) : null}
+      {t.status === "done" && memory.memory !== "gone" ? (
+        <div className="mt-2.5 space-y-1.5">
+          <textarea
+            className={`${inputCls} min-h-[56px] text-[12.5px]`}
+            value={ask}
+            onChange={(e) => setAsk(e.target.value)}
+            placeholder={`What should round ${next} do? Its coder continues with what it remembers.`}
+          />
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="primary"
+              disabled={busy || !ask.trim()}
+              title={`Its coder continues in its own session: ${price(memory.continueUsd, memory.continueWeight)}, against ${price(memory.freshUsd, memory.freshWeight)} for a new card finding the same files`}
+              onClick={() => run(async () => {
+                await api.startRound(t.id, { request: ask.trim(), review });
+                setAsk("");
+              })}
+            >
+              Start round {next}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy || !ask.trim()}
+              title="A new card that starts with a copy of this card's memory, for new work beside it. This card stays as it is."
+              onClick={() => run(async () => {
+                const created = await api.forkTask(t.id, { request: ask.trim(), review });
+                setAsk("");
+                navigate({ taskId: created.id });
+              })}
+            >
+              Branch a new card
+            </Button>
+            {hasReview ? (
+              <label className="flex cursor-pointer items-center gap-1.5 text-[11.5px] text-ink-300" title="A fresh review of this round's changes after the coder; worth it for new work, not for a small change">
+                <input type="checkbox" className="accent-amber" checked={review} onChange={(e) => setReview(e.target.checked)} />
+                review it after
+              </label>
+            ) : null}
+            <span className="text-[11px] text-ink-500">
+              round {price(memory.continueUsd, memory.continueWeight)} · new card {price(memory.freshUsd, memory.freshWeight)}
+            </span>
+          </div>
+          <ErrorLine error={error} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function Actions({ d }: { d: TaskDetail }) {
   const t = d.task;
   const { settings } = useAppData();
@@ -735,7 +829,7 @@ function Actions({ d }: { d: TaskDetail }) {
             <Button busy={busy} onClick={retry}>↻ Retry</Button>
           </div>
         ) : null}
-        {t.status === "failed" && !live && !t.blocked ? <Button variant="ghost" busy={busy} onClick={() => run(() => api.reject(t.id, null))}>Back to backlog</Button> : null}
+        {t.status === "failed" && !live && !stoppedBy(t) ? <Button variant="ghost" busy={busy} onClick={() => run(() => api.reject(t.id, null))}>Back to backlog</Button> : null}
         {["done", "review"].includes(t.status) && !live ? (
           <Button busy={busy} title="Start a fresh task that carries this one's outcome — better than reopening an old session days later" onClick={() => void followUp()}>
             ↪ Follow-up task
@@ -875,7 +969,7 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
                   </button>
                 </div>
                 <TitleEditor d={d} />
-                {d.task.error && d.task.status === "failed" && !d.task.blocked ? <div className="mt-1 font-mono text-[11.5px] text-rust">{d.task.error}</div> : null}
+                {d.task.error && d.task.status === "failed" && !stoppedBy(d.task) ? <div className="mt-1 font-mono text-[11.5px] text-rust">{d.task.error}</div> : null}
                 {/* A task that ran out says so in its own panel below, with the ways on. */}
                 {d.task.note && !(d.task.status === "paused" && d.task.pause_reason !== "cost") ? (
                   <div className="mt-1 text-[11px] italic text-ink-400">Note: {d.task.note}</div>
@@ -885,10 +979,12 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
             </div>
             {showCost ? <div className="border-b border-ink-800 px-5 py-3"><CostPanel runs={d.runs} /></div> : null}
             {d.task.plan_gate ? <PlanGate d={d} /> : null}
-            {d.task.blocked && !d.busy ? <BlockedPanel d={d} /> : null}
+            {/* A suggestion matters only while the work it is about waits on you (D382). */}
+            {(stoppedBy(d.task) || (d.task.blocked?.advisory && ["review", "failed"].includes(d.task.status))) && !d.busy ? <BlockedPanel d={d} /> : null}
             <QuestionsPanel d={d} />
+            <RoundsPanel d={d} />
             {/* While it works, and after a stop or failure: where it got to. A finished task's list is only noise. */}
-            {d.task.checklist?.length && !["done", "review", "backlog"].includes(d.task.status) ? <ChecklistPanel list={d.task.checklist} live={d.busy} /> : null}
+            {d.task.checklist?.length && !["done", "review", "backlog"].includes(d.task.status) ? <ChecklistPanel list={d.task.checklist.slice(d.task.checklist_from)} live={d.busy} title={d.task.round > 1 ? `Round ${d.task.round}'s steps` : undefined} /> : null}
             <Actions d={d} />
             <nav className="flex shrink-0 gap-0.5 overflow-x-auto overflow-y-hidden border-b border-ink-800 px-3">
               {TABS.filter((t) => t !== "result" || result).map((t) => {

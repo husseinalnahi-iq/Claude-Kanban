@@ -43,7 +43,7 @@ test("a task's record is one file: what was asked, each stage, every step in ord
     assert.equal((await app.inject({ method: "GET", url: "/api/tasks/t_nope/record" })).statusCode, 404);
   } finally {
     await app.close();
-    s.cleanup();
+    await s.cleanup();
   }
 });
 

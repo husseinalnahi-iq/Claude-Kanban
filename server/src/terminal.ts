@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { newId, nowIso } from "./db.ts";
@@ -74,6 +74,33 @@ export function shellFor(platform: NodeJS.Platform, env: NodeJS.ProcessEnv, exis
   return { command: env.SHELL || (exists("/bin/bash") ? "/bin/bash" : "/bin/sh"), args: ["-l"] };
 }
 
+/** A Windows process and everything it started, stopped at once; one that is already gone is fine. */
+export function killTree(pid: number): void {
+  try {
+    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore", timeout: 10_000 });
+  } catch {
+    // taskkill missing or refused: the caller's own kill still runs
+  }
+}
+
+/**
+ * node-pty's Windows kill() without its process-list helper (D393): the same steps, reached through its
+ * agent, which node-pty 1.1 does not expose. False when that shape is not there, and the caller uses kill().
+ */
+function closeQuietly(p: unknown): boolean {
+  const a = (p as { _agent?: Record<string, any> })._agent;
+  if (!a || a._useConptyDll || !a._ptyNative || !a._inSocket || !a._outSocket) return false;
+  try {
+    a._inSocket.readable = false;
+    a._outSocket.readable = false;
+    a._ptyNative.kill(a._pty, false);
+    a._conoutSocketWorker?.dispose();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 type PtyModule = typeof import("node-pty");
 let ptyLoad: Promise<PtyModule | null> | null = null;
 /** node-pty is optional: a failed native install must never stop the board from starting. */
@@ -131,7 +158,23 @@ export class TerminalManager {
       const p = pty.spawn(shell.command, shell.args, { name: "xterm-256color", cols: o.cols ?? 100, rows: o.rows ?? 28, cwd: o.cwd, env });
       p.onData(out);
       p.onExit(({ exitCode }) => exit(exitCode));
-      session.proc = { write: (d) => p.write(d), resize: (c, r) => p.resize(Math.max(2, c), Math.max(1, r)), kill: () => p.kill() };
+      session.proc = {
+        write: (d) => p.write(d),
+        resize: (c, r) => p.resize(Math.max(2, c), Math.max(1, r)),
+        kill: () => {
+          // On Windows node-pty's kill() starts a helper to find what the shell started, then closes the
+          // console before the helper can attach to it: the helper fails ("AttachConsole failed"), and
+          // five seconds later only the shell is stopped, so a dev server started in it kept running
+          // (D393). The whole tree is stopped here first; node-pty is asked only if the shell outlives it.
+          if (process.platform === "win32" && p.pid) {
+            killTree(p.pid);
+            // What kill() does besides starting that helper: close the console and its reader thread.
+            if (!closeQuietly(p)) p.kill();
+            return;
+          }
+          p.kill();
+        },
+      };
     } else {
       session.proc = basicShell(shell, o.cwd, env, out, exit);
       out("\x1b[2mBasic terminal: commands work, but full-screen programs (editors, pickers) don't. See Setup.\x1b[0m\r\n");
@@ -210,6 +253,7 @@ function basicShell(
       }
     },
     resize: () => {},
-    kill: () => child.kill(),
+    // The shell alone, on Windows, left what it started running (a dev server holding its port) (D393).
+    kill: () => (process.platform === "win32" && child.pid ? killTree(child.pid) : child.kill()),
   };
 }

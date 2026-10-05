@@ -1,11 +1,16 @@
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
-import { isAnswerPipeline, type TaskCard, type TaskStatus } from "../../../server/src/types.ts";
+import { isAnswerPipeline, stoppedBy, type TaskCard, type TaskStatus } from "../../../server/src/types.ts";
 import { api, type ProjectWithGit } from "../lib/api.ts";
 import { useWs, useWsReconnect } from "../lib/ws.ts";
 import { navigate } from "../lib/router.ts";
 import { useAppData } from "../lib/store.tsx";
 import { clock, cost, PRIORITY_META, STATUS_META, TYPE_META, until } from "../lib/format.ts";
-import { Button, Chip, ModeChip, Select, StageDots, inputCls } from "../components/ui.tsx";
+import { Button, Chip, MemoryDot, ModeChip, Select, StageDots, inputCls } from "../components/ui.tsx";
+import { useProjectMemory } from "../lib/memory.ts";
+import type { MemoryFacts } from "../../../server/src/engine/memory.ts";
+
+/** Cards whose memory a follow-up can use: waiting for review, failed, or done. */
+const MEMORY_STATUSES = new Set(["review", "failed", "done"]);
 import { NewTaskForm } from "../components/forms.tsx";
 import { LimitBanner, SerialSwitch } from "../components/QueueControls.tsx";
 import { DepGraph } from "../components/DepGraph.tsx";
@@ -15,7 +20,7 @@ import { liveTasks } from "../components/LiveBrowser.tsx";
 import { openTaskOn } from "./TaskDrawer.tsx";
 import { COLUMN_SIZES, setViewPrefs, useViewPrefs } from "../lib/view.ts";
 import { ChecklistLine } from "../components/Checklist.tsx";
-import { phase, stoppedProvider, waitingOn, waitLine } from "../lib/phase.ts";
+import { phase, stoppedProvider, waitingOn, waitLine, waitsOnYou } from "../lib/phase.ts";
 
 
 /**
@@ -80,6 +85,7 @@ const Card = memo(function Card({
   serial,
   asking,
   watching,
+  memory,
 }: {
   card: TaskCard;
   parentTitle?: string;
@@ -92,6 +98,8 @@ const Card = memo(function Card({
   asking?: boolean;
   /** Its browser is open right now: offer to watch. */
   watching?: boolean;
+  /** What its coder still remembers, for a card in review or done (D374). */
+  memory?: MemoryFacts;
 }) {
   const draggable = card.status === "backlog" || card.status === "queued";
   const live = ["planning", "running", "approval"].includes(card.status);
@@ -107,7 +115,9 @@ const Card = memo(function Card({
     }
   };
   // Retrying a sandbox block in the same mode would only hit the same wall: that is decided in the task.
-  const needsSwitch = card.status === "failed" && card.blocked?.needs === "supervised" && card.mode === "autonomous";
+  const stopped = stoppedBy(card);
+  const needsSwitch = card.status === "failed" && stopped?.needs === "supervised" && card.mode === "autonomous";
+  const yours = waitsOnYou(card, asking);
   return (
     <div
       draggable={draggable}
@@ -120,10 +130,10 @@ const Card = memo(function Card({
       // Reachable without a mouse: Tab to the card, Enter to open it.
       role="link"
       tabIndex={0}
-      aria-label={`Open task: ${card.title}`}
+      aria-label={`Open task: ${card.title}${yours ? " — waits on you" : ""}`}
       onKeyDown={(e) => e.key === "Enter" && e.target === e.currentTarget && navigate({ taskId: card.id })}
       className={`rise group relative cursor-pointer rounded-lg border bg-ink-850 px-2.5 py-2 transition-colors hover:border-ink-500 hover:bg-ink-800 focus-visible:border-amber focus-visible:outline-none ${
-        card.status === "approval" ? "border-rose/60" : live ? "border-amber/40" : "border-ink-700"
+        yours ? "kb-needs border-rose/60" : live ? "border-amber/40" : "border-ink-700"
       } ${card.archived_at ? "opacity-55 hover:opacity-100" : ""}`}
     >
       {card.archived_at ? <div className="mb-1 font-mono text-[10px] uppercase tracking-wider text-ink-600">archived</div> : null}
@@ -133,6 +143,9 @@ const Card = memo(function Card({
           const p = phase(card, asking);
           return <Chip className={`${p.tone} ${card.status === "paused" ? "" : "font-semibold"}`} title={p.title}>{p.text}</Chip>;
         })() : null}
+        {yours?.chip ? (
+          <Chip className="border-rose/60 font-semibold text-rose" title={yours.title}>{yours.chip}</Chip>
+        ) : null}
         <Chip className={PRIORITY_META[card.priority].tone} title={PRIORITY_META[card.priority].title}>{card.priority}</Chip>
         <Chip className={TYPE_META[card.type].tone}>{TYPE_META[card.type].short}</Chip>
         {card.labels.slice(0, 2).map((l) => (
@@ -151,8 +164,10 @@ const Card = memo(function Card({
         {card.setup_pending && card.status === "backlog" ? (
           <Chip className="border-amber/60 font-semibold text-amber" title="It waits for you to check its mode and models and press Start — open the task">check setup</Chip>
         ) : null}
-        {card.blocked && card.status === "failed" ? (
-          <Chip className="border-rose/60 font-semibold text-rose" title={`${card.blocked.reason} — open the task`}>blocked · needs you</Chip>
+        {stopped && card.status === "failed" ? (
+          <Chip className="border-rose/60 font-semibold text-rose" title={`${stopped.reason} — open the task`}>blocked · needs you</Chip>
+        ) : card.blocked?.advisory && card.status === "review" && card.mode === "autonomous" ? (
+          <Chip className="border-amber/60 text-amber" title={`${card.blocked.reason} — it carried on without it; open the task to switch`}>live steps left</Chip>
         ) : null}
         {card.resolution && ["resolving", "checking", "reviewing"].includes(card.resolution.state) ? (
           <Chip className="border-amber/60 font-semibold text-amber" title={`Claude is combining this task with what landed on ${card.resolution.base} meanwhile`}>resolving conflict</Chip>
@@ -190,6 +205,8 @@ const Card = memo(function Card({
           </Chip>
         ) : null}
         <span className="ml-auto flex items-center gap-1">
+          {card.round > 1 ? <Chip className="border-iris/40 text-iris" title={`Round ${card.round}: its coder continued this card ${card.round - 1} time${card.round > 2 ? "s" : ""} with what it remembered`}>R{card.round}</Chip> : null}
+          {memory && memory.memory !== "gone" ? <MemoryDot facts={memory} /> : null}
           {card.live ? <Chip className="border-rose/50 text-rose" title="Touches a live system: plan approval is on and review runs on the live review model">prod</Chip> : null}
           <ModeChip mode={card.mode} ownBranch={card.own_branch} lookup={isAnswerPipeline(card.pipeline)} mayAsk={card.may_ask} />
         </span>
@@ -202,9 +219,9 @@ const Card = memo(function Card({
           ⏳ {waitLine(waiting)}
         </div>
       ) : null}
-      {IN_PROGRESS.includes(card.status) || card.status === "failed" ? <ChecklistLine list={card.checklist} live={live} /> : null}
-      {card.blocked && card.status === "failed" ? (
-        <div className="mt-1.5 line-clamp-2 text-[11.5px] text-rose">{card.blocked.reason}</div>
+      {IN_PROGRESS.includes(card.status) || card.status === "failed" ? <ChecklistLine list={card.checklist.slice(card.checklist_from)} live={live} /> : null}
+      {stopped && card.status === "failed" ? (
+        <div className="mt-1.5 line-clamp-2 text-[11.5px] text-rose">{stopped.reason}</div>
       ) : card.error && card.status === "failed" ? (
         <div className="mt-1.5 line-clamp-2 font-mono text-[11px] text-rust">{card.error}</div>
       ) : null}
@@ -353,6 +370,9 @@ export function Board({ project }: { project: ProjectWithGit }) {
   const titles = useMemo(() => new Map(cards.map((c) => [c.id, c.title])), [cards]);
   const done = useMemo(() => new Set(cards.filter((c) => c.status === "done").map((c) => c.id)), [cards]);
   const byId = useMemo(() => new Map(cards.map((c) => [c.id, c])), [cards]);
+  // What each finished or waiting card remembers (D374): fetched again when one of them changes.
+  const memoryKey = cards.filter((c) => MEMORY_STATUSES.has(c.status)).map((c) => `${c.id}:${c.status}:${c.updated_at}`).join("|");
+  const memory = useProjectMemory(project.id, memoryKey);
   /** Progress of a parent's children, so a parent card says 2/5 without opening it. */
   const progress = useMemo(() => {
     const m = new Map<string, { done: number; total: number }>();
@@ -565,6 +585,7 @@ export function Board({ project }: { project: ProjectWithGit }) {
                     serial={settings?.serial}
                     asking={projectPending.some((a) => a.task_id === c.id && isQuestion(a))}
                     watching={live.has(c.id)}
+                    memory={MEMORY_STATUSES.has(c.status) ? memory[c.id] : undefined}
                   />
                 ))}
                 {status === "done" && archivedCount ? (

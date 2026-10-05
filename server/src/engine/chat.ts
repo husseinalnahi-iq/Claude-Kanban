@@ -4,7 +4,7 @@ import type { Repo } from "../repo.ts";
 import type { Bus } from "../bus.ts";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, extname, join } from "node:path";
-import type { Approval, Chat, ChatFile, ChatFolder, ChatMessage, ChatUpdate, FolderColor, Mode, ModelEntry, Project, RunStyle, Stage, Task } from "../types.ts";
+import type { Approval, Chat, ChatFile, ChatFolder, ChatMessage, ChatUpdate, FolderColor, Mode, ModelEntry, Project, RunStyle, Settings, Stage, Task } from "../types.ts";
 import { ATTACHMENT_TYPES, FOLDER_COLORS, MAX_ATTACHMENT_BYTES, attachmentKind } from "../types.ts";
 import { ConflictError, forceAsk, NotFoundError, QUESTION_TOOL, type QueryFn, type TaskRunner } from "./runner.ts";
 import type { Scheduler } from "./scheduler.ts";
@@ -91,6 +91,28 @@ export function describeTool(name: string, input: Record<string, unknown>, cwd: 
   }
 }
 
+/**
+ * Where a follow-up goes (D377). A card that did the work remembers its files and choices; continuing it
+ * while its memory is warm costs a fraction of a new card finding them again, so the chat checks first.
+ */
+function followUpLines(how: Settings["followUpRouting"]): string[] {
+  const find = "Before you make a change card, call board_related_cards with the user's request and any project files you looked at for it.";
+  if (how === "new") {
+    return ["Follow-ups go to a new card: that is the user's setting. When the request is about an earlier card's work, pass follows with that card's id so the new card is told what it did. Send it to an existing card only when the user asks."];
+  }
+  if (how === "ask") {
+    return [
+      find,
+      "When a card matches (the same page, feature or files), say in one line which card and route the board recommends and what it saves, and wait for the user's yes before acting. A new card otherwise.",
+    ];
+  }
+  return [
+    find,
+    "When it returns a card the request is about (the same page, feature or files), take the route it recommends: board_continue_task for steer, add_to_round, new_round or fork, or board_create_task with follows for a fresh card. Choose otherwise only when the request is clearly separate work, and a new card for anything unrelated.",
+    'In your reply, say in one line where it went and why, in plain words, for example: Sent to "Main page" as round 2: its memory is still warm, about $0.04 instead of about $0.30 for a new card. What the user says wins: "make a new card" or "send it to the page card" is done as said.',
+  ];
+}
+
 /** Local time and offset, so "tonight at 3" becomes the right ISO time for board_schedule_task. */
 function localNow(now = new Date()): string {
   const off = -now.getTimezoneOffset();
@@ -112,7 +134,7 @@ export function turnContext(now = new Date()): string {
  * The chat's instructions. Stable for a project — the models line changes only when Settings does — so
  * the cached conversation behind it is not re-billed turn after turn.
  */
-export function chatPrompt(project: Project, board?: { models: ModelEntry[]; defaults: Stage[]; pictures?: string | null; tools?: boolean; mode?: RunStyle }): string {
+export function chatPrompt(project: Project, board?: { models: ModelEntry[]; defaults: Stage[]; pictures?: string | null; tools?: boolean; mode?: RunStyle; followUps?: Settings["followUpRouting"] }): string {
   return [
     `You are the side chat of Claude Kanban, talking with the user about the project "${project.name}" (${project.path}).`,
     "Many users are not programmers: answer plainly and briefly, and explain any technical word you have to use.",
@@ -138,6 +160,8 @@ export function chatPrompt(project: Project, board?: { models: ModelEntry[]; def
     `Use the mode the user chose in their message; otherwise leave mode out and the chat's own mode switch applies${board?.mode ? ` (it is set to ${board.mode === "ask" ? "ask, Autonomous + asks me" : board.mode} now)` : ""}, and say which mode the card got and why. Set live: true only when the card will change a live system: it then waits for the user's OK on its plan and its review checks the live system. Reading one is not live.`,
     `When the user names a model or an effort ("sonnet, high effort for the code"), put it on that stage in stages.${board ? ` This board's models: ${board.models.map((m) => `${m.label} (${m.id})`).join(", ")}. Default stages: ${pipelineLine(board.defaults)}.` : ""} Haiku has no effort setting. board_update_task changes a Backlog card's stages, mode, branch or live.`,
     "Never queue or schedule a change card the user did not ask to run.",
+    ...followUpLines(board?.followUps ?? "memory"),
+    "When the user asks you to remember something for later work (a rule, a decision, a correction), save it with board_remember: every later card starts with it.",
     "You can also follow and talk to the cards themselves:",
     "- board_list_tasks and board_task_progress tell you what each card is doing, what it did, what it cost and what it is waiting for. Look before you answer a question about a task; do not guess.",
     "- board_message_task passes the user's words to a card's own Claude session: a running card takes them in at its next step, a card in review or failed picks its session up again with them. Pass on what the user said; do not invent instructions.",
@@ -355,7 +379,7 @@ export class ChatService {
     this.deps.bus.publish({ type: "chat.deleted", id, project_id: chat.project_id });
   }
 
-  // ---------- folders (the Studio's chat list) ----------
+  // ---------- folders (the AI Manager's chat list) ----------
   folders(projectId: string): ChatFolder[] {
     return this.deps.repo.listChatFolders(projectId);
   }
@@ -592,8 +616,8 @@ export class ChatService {
         if (isReadOnlyShell(commandOf(name, input) ?? "", project.path)) return { behavior: "allow", updatedInput: input };
         return { behavior: "deny", message: CHAT_COMMAND_REFUSED };
       }
-      // Your own servers, connectors and skills, when this chat was given them (D335). Never an edit.
-      if (chat.use_tools && (name.startsWith("mcp__") || name === "Skill")) return { behavior: "allow", updatedInput: input };
+      // Your own servers, connectors and skills, unless Settings turned them off (D335, D381). Never an edit.
+      if (settings.chatTools && (name.startsWith("mcp__") || name === "Skill")) return { behavior: "allow", updatedInput: input };
       return { behavior: "deny", message: "That is a card's job: create one with board_create_task (an answer card for a lookup) and tell the user what it will do. Do not tell them what you cannot do." };
     };
     // Claude, or a Claude-compatible provider through the same Claude Code — tools and all (D301).
@@ -604,10 +628,10 @@ export class ChatService {
       this.message({ chat_id: chat.id, role: "error", text: `This chat's model is on a provider the board cannot use now: ${err instanceof Error ? err.message : String(err)} Pick another model below.` });
       return;
     }
-    // With "my connectors and skills" (D335) the chat loads what a task does: your user settings (plugins, hooks,
-    // MCP servers), your skills and your connectors. Otherwise only the project's CLAUDE.md and the
-    // board's own server: a chat should be quick and cheap.
-    const tools = chat.use_tools;
+    // With your connectors and skills (on unless Settings turned them off, D381) the chat loads what a task
+    // does: your user settings (plugins, hooks, MCP servers), your skills and your connectors. Otherwise only
+    // the project's CLAUDE.md and the board's own server.
+    const tools = settings.chatTools;
     const base: Options = {
       model: chat.model,
       effort: chat.effort,
@@ -633,6 +657,7 @@ export class ChatService {
           pictures: (await this.deps.runner.picturesReady()) ? imageMakerLine(settings) : null,
           tools,
           mode: chat.mode,
+          followUps: settings.followUpRouting,
         }),
       },
       maxTurns: 40,

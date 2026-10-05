@@ -97,7 +97,7 @@ test("Always allow on a card lets it through, and the same command never asks ag
     assert.deepEqual(decisions, ["allow", "allow"]);
     assert.equal(s.repo.pendingApprovals(next.id).length, 0);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -115,7 +115,7 @@ test("Always allow is refused for a command with nothing lasting to remember, an
     s.runner.decideApproval(card.id, "allow", null);
     await until(() => s.repo.getTask(task.id)!.status === "review");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -150,7 +150,7 @@ test("an autonomous lookup runs in the project's own folder with nothing on a ca
     assert.match(f.calls[0].prompt, /## Nobody is asked/);
     assert.doesNotMatch(f.calls[0].prompt, /This run is sandboxed/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -175,6 +175,6 @@ test("a project that keeps autonomous in its sandbox sends a chat's lookup to su
     const change = JSON.parse(h.createTask({ title: "Dark mode", spec_md: "x", mode: "autonomous" } as never).content[0].text);
     assert.equal(s.repo.getTask(change.created.id)!.mode, "supervised", "a card that changes something still needs its own copy");
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });

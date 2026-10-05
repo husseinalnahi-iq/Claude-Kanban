@@ -64,7 +64,7 @@ test("a text-only plan stage is one chat call, priced by the API, recorded as SD
     assert.doesNotMatch(all, /sk-or-secret/, "the key never reaches the transcript");
   } finally {
     setFetch(fetch);
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -84,7 +84,7 @@ test("without a price from the API the run is estimated from the table, or a sub
     assert.equal(s.repo.runsForTask(t2.id)[0].cost_source, "subscription");
   } finally {
     setFetch(fetch);
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -105,7 +105,7 @@ test("an HTTP error fails the task (never pauses it); a code stage on a text-onl
     assert.throws(() => s.runner.chat(task.id, "hi"), /cannot continue a session/);
   } finally {
     setFetch(fetch);
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -131,7 +131,7 @@ test("timeouts and stops abort the request; a retry starts over rather than resu
     assert.equal(s.repo.runsForTask(task.id).at(-1)!.result_md, "again");
   } finally {
     setFetch(fetch);
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -160,6 +160,6 @@ test("a text-only review stage gets the diff inlined", async () => {
     assert.match(prompt, /produced by another model|Previous stage result/);
   } finally {
     setFetch(fetch);
-    s.cleanup();
+    await s.cleanup();
   }
 });

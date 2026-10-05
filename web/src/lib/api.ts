@@ -1,9 +1,10 @@
 import type { TaskCommand } from "../../../server/src/engine/commands.ts";
+import type { MemoryInput } from "../../../server/src/engine/memory.ts";
 import type {
   ImageStatus,
   Approval, Attachment, DiffFile, EventRow, FastModeStatus, Message, MergePolicy, Milestone, Mode, Note, RunStyle, Policy, Project, ProjectEnv, Run, RunListItem, SessionTools, Settings, SkillInfo, Stage, Task, TaskCard, UsageLimit,
   Provider, ProviderTestResult, SetupCheckResult, ModelCatalogResult, Schedule, Chat, ChatFile, ChatFolder, ChatMessage, Effort, ClaudeModelsResult, SpecVersion,
-  ProviderUsage, ProviderOut, WsMessage, SuggestedSkill, FolderColor } from "../../../server/src/types.ts";
+  ProviderUsage, ProviderOut, WsMessage, SuggestedSkill, FolderColor, TaskRound } from "../../../server/src/types.ts";
 import type { ProviderPreset } from "../../../server/src/engine/providers/presets.ts";
 import type { LocalModelsStatus } from "../../../server/src/setup/local.ts";
 export type { LocalModelsStatus };
@@ -208,6 +209,12 @@ export const api = {
   search: (q: string, projectId?: string) =>
     req<SearchHit[]>("GET", `/search?q=${encodeURIComponent(q)}${projectId ? `&project=${encodeURIComponent(projectId)}` : ""}`),
   followUp: (taskId: string, b: { title?: string; note?: string; type?: Task["type"] }) => req<Task>("POST", `/tasks/${taskId}/follow-up`, b),
+  // Cards that remember: their memory, their rounds, and continuing them (D374–D376).
+  projectMemory: (projectId: string) => req<Record<string, MemoryInput>>("GET", `/projects/${projectId}/memory`),
+  taskMemory: (taskId: string) => req<MemoryInput>("GET", `/tasks/${taskId}/memory`),
+  rounds: (taskId: string) => req<TaskRound[]>("GET", `/tasks/${taskId}/rounds`),
+  startRound: (taskId: string, b: { request: string; review?: boolean }) => req<Task>("POST", `/tasks/${taskId}/rounds`, b),
+  forkTask: (taskId: string, b: { title?: string; request: string; review?: boolean }) => req<Task>("POST", `/tasks/${taskId}/fork`, b),
 
   stageStats: (projectId: string) => req<StageStat[]>("GET", `/stats/stages?project=${encodeURIComponent(projectId)}`),
   analytics: (projectId: string | undefined, days: number) =>
@@ -266,7 +273,7 @@ export const api = {
   updateFromBase: (taskId: string) => req<{ pulled: number; base: string }>("POST", `/tasks/${taskId}/update-from-base`),
 
   worktrees: (projectId: string) => req<WorktreeRow[]>("GET", `/worktrees?project=${encodeURIComponent(projectId)}`),
-  pruneWorktrees: (project_id: string) => req<{ removed: string[] }>("POST", "/worktrees/prune", { project_id }),
+  pruneWorktrees: (project_id: string) => req<{ removed: string[]; stuck: string[] }>("POST", "/worktrees/prune", { project_id }),
 
   settings: () => req<Settings>("GET", "/settings"),
   providers: () => req<ProviderRow[]>("GET", "/providers"),
@@ -281,6 +288,8 @@ export const api = {
   providerModels: (id: string) => req<ModelCatalogResult>("GET", `/providers/${encodeURIComponent(id)}/models`),
   testProvider: (id: string, model?: string) => req<ProviderTestResult>("POST", `/providers/${id}/test`, { model }),
   patchSettings: (b: Partial<Omit<Settings, "stateDir">>) => req<Settings>("PATCH", "/settings", b),
+  /** Opens the board browser's saved profile at a site for you to sign in to (D389). */
+  signInSite: (url: string) => req<{ host: string; sites: string[] }>("POST", "/browser/sign-in", { url }),
   imageStatus: () => req<ImageStatus>("GET", "/settings/images"),
   setImageSecret: (name: string, value: string) => req<ImageStatus>("PUT", "/settings/images/secret", { name, value }),
   deleteImageSecret: (name: string) => req<ImageStatus>("DELETE", `/settings/images/secret/${encodeURIComponent(name)}`),

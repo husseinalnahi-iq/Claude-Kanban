@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { ANTHROPIC_PROVIDER_ID, accessOf, DEBATE_ROUND_CEILING, EFFORTS, RUN_STYLE_LABEL, RUN_STYLES, type RunStyle, type DebateMode, type HelperModel, type ImageProvider, type ModelEntry, type ModelSurface, type Note, type Provider, type Settings as SettingsShape, type Stage, type TierRef } from "../../../server/src/types.ts";
+import { ANTHROPIC_PROVIDER_ID, accessOf, DEBATE_ROUND_CEILING, EFFORTS, type RunStyle, type DebateMode, type HelperModel, type ImageProvider, type ModelEntry, type ModelSurface, type Note, type Provider, type Settings as SettingsShape, type Stage, type TierRef } from "../../../server/src/types.ts";
 import { api, type ProjectWithGit, type WorktreeRow } from "../lib/api.ts";
 import { ago } from "../lib/format.ts";
 import { useAppData } from "../lib/store.tsx";
 import { navigate } from "../lib/router.ts";
-import { Button, ErrorLine, Field, Help, ModeHelp, RUN_STYLE_TONE, Select, Switch, inputCls, useAction } from "../components/ui.tsx";
+import { Button, ErrorLine, Field, Help, ModeHelp, RunStyleSwitch, Select, Switch, inputCls, useAction } from "../components/ui.tsx";
 import { PipelineEditor } from "../components/PipelineEditor.tsx";
 import { useAsk } from "../components/Ask.tsx";
 import { ProviderEffort, ProviderPicker } from "../components/ProviderPicker.tsx";
@@ -97,6 +97,8 @@ function WorkspaceSettings({ project }: { project: ProjectWithGit }) {
 /** Worktrees on disk, with a prune that refuses anything still holding work. */
 function WorktreeSettings({ project }: { project: ProjectWithGit }) {
   const [rows, setRows] = useState<WorktreeRow[] | null>(null);
+  // Folders Windows would not let go of: git forgot them, but they still sit on disk (D396).
+  const [stuck, setStuck] = useState<string[]>([]);
   const { busy, error, run } = useAction();
   const load = () => void api.worktrees(project.id).then(setRows, () => setRows([]));
   useEffect(load, [project.id]);
@@ -115,9 +117,15 @@ function WorktreeSettings({ project }: { project: ProjectWithGit }) {
         ))}
         {rows && !rows.length ? <div className="text-[12px] text-ink-500">None.</div> : null}
       </div>
+      {stuck.length ? (
+        <div className="mt-3 rounded-md border border-amber/40 px-3 py-2 text-[12px] text-amber">
+          {stuck.length === 1 ? "This folder" : "These folders"} could not be deleted because a program is still using {stuck.length === 1 ? "it" : "them"} (a terminal, an editor or a dev server). Any key files inside were removed. Close that program, then delete {stuck.length === 1 ? "the folder" : "them"} by hand:
+          {stuck.map((p) => <div key={p} className="mt-1 font-mono text-[11.5px] text-ink-300">{p}</div>)}
+        </div>
+      ) : null}
       <div className="mt-3"><ErrorLine error={error} /></div>
       <div className="mt-3 flex justify-end">
-        <Button busy={busy} disabled={!removable} onClick={() => run(async () => { await api.pruneWorktrees(project.id); load(); })}>
+        <Button busy={busy} disabled={!removable} onClick={() => run(async () => { setStuck((await api.pruneWorktrees(project.id)).stuck ?? []); load(); })}>
           Prune {removable || ""} worktree{removable === 1 ? "" : "s"}
         </Button>
       </div>
@@ -518,6 +526,8 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [chatKeepAliveMessage, setChatKeepAliveMessage] = useState("");
   const [chatKeepAliveMaxHours, setChatKeepAliveMaxHours] = useState(8);
   const [nextSteps, setNextSteps] = useState(true);
+  const [chatTools, setChatTools] = useState(true);
+  const [followUps, setFollowUps] = useState<"memory" | "ask" | "new">("memory");
   const [hiddenModels, setHiddenModels] = useState<Record<ModelSurface, string[]>>({ chat: [], stages: [], helpers: [], pictures: [] });
   const [specModel, setSpecModel] = useState("claude-opus-5-5");
   const [specEffort, setSpecEffort] = useState<SettingsShape["specEffort"]>("high");
@@ -535,6 +545,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [blocked, setBlocked] = useState("");
   const [loadPlugins, setLoadPlugins] = useState(true);
   const [autoMemory, setAutoMemory] = useState(false);
+  const [autonomousLive, setAutonomousLive] = useState(true);
   const [autoResume, setAutoResume] = useState(true);
   const [claudeFallback, setClaudeFallback] = useState<TierRef | null>(null);
   const [keepAwake, setKeepAwake] = useState(true);
@@ -543,6 +554,10 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [browserChecks, setBrowserChecks] = useState(true);
   const [browserCheckModel, setBrowserCheckModel] = useState<HelperModel>("stage");
   const [chrome, setChrome] = useState(false);
+  const [taskBrowser, setTaskBrowser] = useState<"board" | "chrome">("board");
+  const [browserSites, setBrowserSites] = useState<string[]>([]);
+  const [signInUrl, setSignInUrl] = useState("");
+  const signIn = useAction();
   const [readOnlyNoCard, setReadOnlyNoCard] = useState(true);
   const [markitdown, setMarkitdown] = useState(true);
   const [liveView, setLiveView] = useState(true);
@@ -593,6 +608,8 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
     take((s) => s.chatKeepAliveMessage ?? "", setChatKeepAliveMessage);
     take((s) => s.chatKeepAliveMaxHours ?? 8, setChatKeepAliveMaxHours);
     take((s) => s.nextStepsSuggestions ?? true, setNextSteps);
+    take((s) => s.chatTools ?? true, setChatTools);
+    take((s) => s.followUpRouting ?? "memory", setFollowUps);
     take((s) => s.hiddenModels ?? { chat: [], stages: [], helpers: [], pictures: [] }, setHiddenModels);
     take((s) => s.specModel, setSpecModel);
     take((s) => s.specEffort, setSpecEffort);
@@ -608,6 +625,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
     take((s) => s.blockedCommands.join(String.fromCharCode(10)), setBlocked);
     take((s) => s.loadUserPlugins, setLoadPlugins);
     take((s) => s.claudeAutoMemory ?? false, setAutoMemory);
+    take((s) => s.autonomousLive ?? true, setAutonomousLive);
     take((s) => s.autoResume, setAutoResume);
     take((s) => s.claudeFallback, setClaudeFallback);
     take((s) => s.keepAwake, setKeepAwake);
@@ -616,6 +634,8 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
     take((s) => s.browserChecks, setBrowserChecks);
     take((s) => s.browserCheckModel ?? "stage", setBrowserCheckModel);
     take((s) => s.chromeInSupervised, setChrome);
+    take((s) => s.taskBrowser ?? "board", setTaskBrowser);
+    take((s) => s.browserSites ?? [], setBrowserSites);
     take((s) => s.autoAllowReadOnly, setReadOnlyNoCard);
     take((s) => s.markitdownInTasks ?? true, setMarkitdown);
     take((s) => s.liveView, setLiveView);
@@ -633,7 +653,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           models, defaultPipeline: pipeline, globalCap, serial, maxForcedParallel: forced, defaultMaxConcurrent: defMax,
           maxTurnsPerStage: maxTurns, maxCostPerStageUsd: maxCost, autoContinueTurns: autoContinue, planApproval, defaultRunStyle: runStyle, confirmSetup, liveReviewModel, followLatestModels: followLatest, autoUpdateEngine: autoEngine,
           maxSubagentDepth: subDepth, maxConcurrentSubagents: subMax, cacheableSystemPrompt: cacheable,
-          triageModel, chatModel, chatEffort, chatProvider, chatKeepAlive, chatKeepAliveMessage: chatKeepAliveMessage.trim() || undefined, chatKeepAliveMaxHours, nextStepsSuggestions: nextSteps, hiddenModels, imageModel, specModel, specEffort, visionModel: vision.model, visionProvider: vision.provider, autoSizing, tiers,
+          triageModel, chatModel, chatEffort, chatProvider, chatKeepAlive, chatKeepAliveMessage: chatKeepAliveMessage.trim() || undefined, chatKeepAliveMaxHours, nextStepsSuggestions: nextSteps, chatTools, followUpRouting: followUps, hiddenModels, imageModel, specModel, specEffort, visionModel: vision.model, visionProvider: vision.provider, autoSizing, tiers,
           providers: providers.map((p) => ({ ...p, models: p.models.filter((m) => m.id.trim()).map((m) => ({ ...m, label: m.label.trim() || m.id })) })),
           delegateTimeoutMin: delegateTimeout,
           debate,
@@ -641,6 +661,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           blockedCommands: blocked.split(/\r?\n/).map((l) => l.trim()).filter(Boolean),
           loadUserPlugins: loadPlugins,
           claudeAutoMemory: autoMemory,
+          autonomousLive,
           autoResume,
           claudeFallback: claudeFallback?.model && claudeFallback.provider !== ANTHROPIC_PROVIDER_ID ? claudeFallback : null,
           keepAwake,
@@ -649,6 +670,8 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           browserChecks,
           browserCheckModel,
           chromeInSupervised: chrome,
+          taskBrowser,
+          browserSites,
           autoAllowReadOnly: readOnlyNoCard,
           markitdownInTasks: markitdown,
           liveView,
@@ -960,16 +983,49 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
 
           <div className="mt-4 border-t border-ink-800 pt-4">
             <div className="flex items-start gap-3">
+              <Switch on={chatTools} onChange={setChatTools} title="Your connectors and skills in every chat" />
+              <div className="min-w-0 flex-1">
+                <div className="text-[13px] text-ink-100">Your connectors and skills in every chat</div>
+                <p className="mt-0.5 text-[11.5px] leading-relaxed text-ink-400">
+                  Chats get what a task gets: your connected systems (Slack, Gmail, Google Drive, your own MCP servers) and your skills, so
+                  &ldquo;what did the team say in Slack?&rdquo; is answered right in the chat instead of by a card. They only read and look things up;
+                  changing a file is still a card&rsquo;s job. Off, a chat is a little lighter on each message and makes a card for those lookups.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 border-t border-ink-800 pt-4">
+            <div className="flex items-start gap-3">
               <Switch on={nextSteps} onChange={setNextSteps} title="Offer ✦ What next? in chats" />
               <div className="min-w-0 flex-1">
                 <div className="text-[13px] text-ink-100">✦ What next? button</div>
                 <p className="mt-0.5 text-[11.5px] leading-relaxed text-ink-400">
-                  A button in every chat, in the panel and the Studio, that asks Claude for the next five things worth doing after this work: bugs to fix,
+                  A button in every chat, in the panel and the AI Manager, that asks Claude for the next five things worth doing after this work: bugs to fix,
                   security to tighten, follow-up edits once it lands, useful additions. One reply at the chat's model, only when you press it; nothing is
                   created until you say so.
                 </p>
               </div>
             </div>
+          </div>
+
+          <div className="mt-4 border-t border-ink-800 pt-4">
+            <Field
+              label="When you ask for more work on something a card already did"
+              hint={
+                followUps === "memory"
+                  ? "The chat sends it to that card when its memory makes it cheaper: a change to work waiting for review joins it, a done card gets a new round, and new work beside it starts with a copy of its memory. It always says where it went and why."
+                  : followUps === "ask"
+                    ? "The chat tells you which card remembers that work and what continuing it would save, and waits for your yes."
+                    : "Always a new card, told what the earlier card did and which files it changed. Its memory is not used."
+              }
+            >
+              <Select wide value={followUps} onChange={(e) => setFollowUps(e.target.value as "memory" | "ask" | "new")}>
+                <option value="memory">Send it where the memory is (recommended)</option>
+                <option value="ask">Ask me each time</option>
+                <option value="new">Always a new card</option>
+              </Select>
+            </Field>
           </div>
         </Section>
 
@@ -1003,18 +1059,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
 
         <Section title="Plan approval & live tasks" hint="Catch a wrong plan before any code is written, and put more care into tasks that touch real data.">
           <Field label="New cards run" hint="The mode a new card starts with, on the New task form, in a new side chat and on the setup card. A project that can't run autonomous uses Supervised.">
-            <div className="flex flex-wrap gap-1.5">
-              {RUN_STYLES.map((m) => (
-                <button
-                  key={m}
-                  type="button"
-                  onClick={() => setRunStyle(m)}
-                  className={`cursor-pointer rounded border px-2 py-1 text-[11.5px] ${runStyle === m ? RUN_STYLE_TONE[m] : "border-ink-700 text-ink-400 hover:text-ink-200"}`}
-                >
-                  {RUN_STYLE_LABEL[m]}
-                </button>
-              ))}
-            </div>
+            <RunStyleSwitch capitalized value={runStyle} onChange={setRunStyle} label="How new cards run" />
           </Field>
           <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
             <input type="checkbox" className="mt-1 accent-amber" checked={confirmSetup} onChange={(e) => setConfirmSetup(e.target.checked)} />
@@ -1041,6 +1086,17 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           <Field label="Review model for live tasks" hint="A task marked “touches a live system” always waits for plan approval, and its review stage runs on this model at high effort, whatever its pipeline says.">
             <ClaudeModelPicker surface="helpers" value={liveReviewModel} onChange={setLiveReviewModel} models={models} />
           </Field>
+          <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
+            <input type="checkbox" className="mt-1 accent-amber" checked={autonomousLive} onChange={(e) => setAutonomousLive(e.target.checked)} />
+            <span>
+              Let autonomous tasks change live systems themselves
+              <span className="block text-[11.5px] text-ink-400">
+                For a task marked <b>live</b>: the project's private key files (the ones kept out of git, such as <code>.env</code>) are
+                copied into the task's folder, and the task does the live steps itself instead of leaving them for a supervised run.
+                Turn this off to have autonomous tasks stop short of the live system.
+              </span>
+            </span>
+          </label>
         </Section>
 
         <Section title="Run ceilings" hint="Applied to every stage so a looping or runaway session stops by itself.">
@@ -1256,13 +1312,88 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
               </span>
             </span>
           </label>
+          <div className="mt-4 text-[12.5px] text-ink-200">
+            Browser for sites that need a sign-in
+            <div className="mt-1.5 space-y-1.5">
+              <label className="flex cursor-pointer items-start gap-2">
+                <input type="radio" name="taskBrowser" className="mt-1 accent-amber" checked={taskBrowser === "board"} onChange={() => setTaskBrowser("board")} />
+                <span>
+                  The board's browser, with the sites you sign in to <span className="text-moss">(recommended)</span>
+                  <span className="block text-[11.5px] text-ink-400">
+                    Sign in once below; every task starts from that sign-in, and autonomous tasks may open those sites. Your own Chrome,
+                    with your email and bank, stays out of reach.
+                  </span>
+                </span>
+              </label>
+              <label className="flex cursor-pointer items-start gap-2">
+                <input type="radio" name="taskBrowser" className="mt-1 accent-amber" checked={taskBrowser === "chrome"} onChange={() => setTaskBrowser("chrome")} />
+                <span>
+                  Your own Chrome, for every task — autonomous ones too
+                  <span className="block text-[11.5px] text-ink-400">
+                    Claude in Chrome, signed in to all your accounts. An autonomous task uses it without asking you, so it can reach
+                    anything you are signed in to. Needs the Claude in Chrome extension.
+                  </span>
+                </span>
+              </label>
+            </div>
+            {taskBrowser === "board" ? (
+              <div className="mt-2.5 rounded-lg border border-ink-700 px-3 py-2">
+                <div className="text-[11.5px] text-ink-400">
+                  Signed in for tasks: {browserSites.length ? null : <span className="text-ink-500">none yet</span>}
+                </div>
+                {browserSites.length ? (
+                  <div className="mt-1 flex flex-wrap gap-1.5">
+                    {browserSites.map((s) => (
+                      <span key={s} className="inline-flex items-center gap-1 rounded border border-moss/50 bg-moss/10 px-1.5 py-px font-mono text-[11px] text-moss">
+                        {s}
+                        <button
+                          type="button"
+                          className="cursor-pointer text-ink-500 hover:text-rust"
+                          title="Stop autonomous tasks opening this site (the sign-in stays in the browser until it expires)"
+                          onClick={() => setBrowserSites(browserSites.filter((x) => x !== s))}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+                <div className="mt-2 flex items-center gap-1.5">
+                  <input
+                    className={`${inputCls} h-7 flex-1 py-0 text-[12.5px]`}
+                    placeholder="erp.example.com"
+                    value={signInUrl}
+                    onChange={(e) => setSignInUrl(e.target.value)}
+                  />
+                  <Button
+                    size="sm"
+                    busy={signIn.busy}
+                    disabled={!signInUrl.trim()}
+                    onClick={() =>
+                      signIn.run(async () => {
+                        const r = await api.signInSite(signInUrl.trim());
+                        setBrowserSites(r.sites);
+                        setSignInUrl("");
+                      })
+                    }
+                  >
+                    Sign in to a site
+                  </Button>
+                </div>
+                <div className="mt-1 text-[11px] text-ink-500">
+                  A window opens at that site: sign in there, then close the window. Tasks started after that are signed in.
+                </div>
+                <ErrorLine error={signIn.error} />
+              </div>
+            ) : null}
+          </div>
           <label className="mt-4 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
-            <input type="checkbox" className="mt-1 accent-amber" checked={chrome} onChange={(e) => setChrome(e.target.checked)} />
+            <input type="checkbox" className="mt-1 accent-amber" checked={chrome || taskBrowser === "chrome"} disabled={taskBrowser === "chrome"} onChange={(e) => setChrome(e.target.checked)} />
             <span>
               Also offer Claude in Chrome to supervised tasks
               <span className="block text-[11.5px] text-ink-400">
-                Your own Chrome, signed in to your accounts — for checks that need your login. Every action in it is an approval card,
-                and autonomous tasks never get it, whatever this says. Needs the Claude in Chrome extension.
+                Your own Chrome, signed in to your accounts — for checks that need your login. In a supervised task every action in it is
+                an approval card. Needs the Claude in Chrome extension.
               </span>
             </span>
           </label>

@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 import { DependsOn } from "./DependsOn.tsx";
-import { accessOf, RUN_STYLE_LABEL, RUN_STYLES, runStyleFields, type RunStyle, type Stage } from "../../../server/src/types.ts";
+import { accessOf, runStyleFields, type RunStyle, type Stage } from "../../../server/src/types.ts";
 import { api, type FolderProbe, type ProjectWithGit } from "../lib/api.ts";
 import type { StageStat } from "../../../server/src/routes/analytics.ts";
 import { useAppData } from "../lib/store.tsx";
 import { navigate } from "../lib/router.ts";
-import { Button, ErrorLine, Field, inputCls, Modal, useAction, ModeHelp, RUN_STYLE_TONE } from "./ui.tsx";
+import { Button, ErrorLine, Field, inputCls, Modal, useAction, ModeHelp, RunStyleSwitch } from "./ui.tsx";
 import { PipelineEditor, pipelineLine } from "./PipelineEditor.tsx";
 import { modelLabel } from "../lib/format.ts";
 import { SafetyOptions } from "./SafetyOptions.tsx";
@@ -118,25 +118,18 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
           </Field>
         ) : null}
         <Field group label={<span className="flex items-center gap-1.5">Run mode <ModeHelp /></span>} hint={style === "ask" ? "Runs in its own worktree on branch kanban/<id>, and waits for your answer when Claude asks you something; Approve merges it." : mode === "autonomous" ? "Runs in its own worktree on branch kanban/<id>; Approve merges it." : ownBranch && !noBranch ? "Runs on its own branch kanban/<id>; every write waits for your approval, and Approve merges it." : "Runs in the main checkout; every write waits for your approval."}>
-          <div className="grid gap-2 sm:grid-cols-3">
-            {RUN_STYLES.map((m) => (
-              <button
-                key={m}
-                type="button"
-                disabled={m !== "supervised" && !!blocked}
-                title={m !== "supervised" && blocked ? blocked : undefined}
-                onClick={() => setStyle(m)}
-                className={`rounded-md border px-3 py-2 text-left text-[12.5px] transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${
-                  style === m ? RUN_STYLE_TONE[m] : "border-ink-700 text-ink-300 hover:border-ink-500"
-                }`}
-              >
-                <div className="font-semibold">{RUN_STYLE_LABEL[m]}</div>
-                <div className="text-[11px] opacity-80">
-                  {m === "supervised" ? "main checkout · approval cards" : blocked ?? (m === "ask" ? "worktree · waits for your answers" : "worktree · no approvals")}
-                </div>
-              </button>
-            ))}
-          </div>
+          <RunStyleSwitch
+            size="lg"
+            capitalized
+            value={style}
+            onChange={setStyle}
+            blocked={blocked}
+            detail={{
+              supervised: "main checkout · approval cards",
+              autonomous: blocked ?? "worktree · no approvals",
+              ask: blocked ?? "worktree · waits for your answers",
+            }}
+          />
           {mode === "supervised" && when.kind !== "repeat" ? (
             <label className="mt-2 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200" title={noBranch ?? undefined}>
               <input type="checkbox" className="mt-1 accent-cyan" checked={ownBranch} disabled={!!noBranch} onChange={(e) => setOwnBranch(e.target.checked)} />

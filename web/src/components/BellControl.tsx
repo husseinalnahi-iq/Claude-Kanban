@@ -23,12 +23,32 @@ const SAMPLE: Record<AlertKind, [string, string]> = {
   allClear: ["All clear", "Nothing running, queued or waiting on you."],
 };
 
-function BellIcon({ muted }: { muted: boolean }) {
+/** The bell is the inbox: what needs you, and what happened. Clicking it opens them (D380). */
+function BellIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
       <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
-      {muted ? <path d="M3 3l18 18" /> : null}
+    </svg>
+  );
+}
+
+/** The speaker is sound, on or off: the sign every app and system uses for it. */
+function SpeakerIcon({ muted }: { muted: boolean }) {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M11 5 6 9H3v6h3l5 4z" />
+      {muted ? (
+        <>
+          <path d="m16 9 5 6" />
+          <path d="m21 9-5 6" />
+        </>
+      ) : (
+        <>
+          <path d="M15.5 8.5a5 5 0 0 1 0 7" />
+          <path d="M18.6 5.4a9.5 9.5 0 0 1 0 13.2" />
+        </>
+      )}
     </svg>
   );
 }
@@ -116,11 +136,11 @@ function HistoryRow({ e, waiting }: { e: InboxEntry; waiting: boolean }) {
 }
 
 /**
- * The bell in the top bar. Click it to mute or unmute; the arrow opens the panel. Its Inbox shows
- * what needs you right now — with Allow and Deny — and the last 50 things the board told you about;
- * its Settings hold the sound theme, volume, and for every kind of event whether it plays a sound,
- * shows a pop-up, or sends a desktop notification. All of it lives on this computer — it describes
- * your desk, not the board.
+ * Two buttons in the top bar, one job each (D380). The bell opens the panel: its Inbox shows what needs
+ * you right now — with Allow and Deny — and the last 50 things the board told you about; its Settings hold
+ * the sound theme, volume, and for every kind of event whether it plays a sound, shows a pop-up, or sends a
+ * desktop notification. The speaker beside it mutes and unmutes. All of it lives on this computer — it
+ * describes your desk, not the board.
  */
 export function BellControl() {
   const prefs = useAlertPrefs();
@@ -174,45 +194,46 @@ export function BellControl() {
   };
 
   return (
-    <div ref={box} className="relative flex items-center">
-      <div className={`flex items-center overflow-hidden rounded-md border ${open ? "border-ink-500" : "border-ink-700"}`}>
-        <button
-          onClick={toggleMute}
-          className={`relative px-2 py-1 transition-colors cursor-pointer ${prefs.muted ? "text-ink-500 hover:text-ink-300" : "text-ink-200 hover:text-amber"}`}
-          title={
-            prefs.muted
-              ? "Sounds are off — click to turn them on"
-              : blocked
-                ? "Sounds are on, but the browser is holding them until you click on the page — click here to allow them"
-                : "Sounds are on — click to mute"
-          }
-          aria-label={prefs.muted ? "Turn sounds on" : "Mute sounds"}
-        >
-          <BellIcon muted={prefs.muted} />
-          {blocked ? <span className="absolute bottom-0.5 left-1 h-1.5 w-1.5 rounded-full bg-amber ring-2 ring-ink-950" /> : null}
-          {!count && dot ? <span className="absolute top-0.5 right-1 h-2 w-2 rounded-full ring-2 ring-ink-950" style={{ background: dot }} /> : null}
-        </button>
-        <button
-          onClick={() => {
-            // A count on the bell is a reason to open it: land on the Inbox.
-            if (!open && count) setTab("inbox");
-            setOpen((v) => !v);
-          }}
-          className="relative flex items-center gap-1 border-l border-ink-700 px-1.5 py-1 text-[10px] text-ink-400 hover:text-ink-100 cursor-pointer"
-          title="Inbox and notification settings"
-          aria-expanded={open}
-        >
-          {count ? (
-            <span
-              className={`rounded-full px-1.5 font-mono text-[10px] font-semibold text-ink-950 ${needs.length ? "pulse-rose" : ""}`}
-              style={{ background: badgeColor ?? "var(--color-amber)" }}
-            >
-              {count > 99 ? "99+" : count}
-            </span>
-          ) : null}
-          ▾
-        </button>
-      </div>
+    <div ref={box} className="relative flex items-center gap-1">
+      <button
+        onClick={toggleMute}
+        className={`relative rounded-md border border-ink-700 px-2 py-1 transition-colors cursor-pointer hover:border-ink-500 ${prefs.muted ? "text-ink-500 hover:text-ink-300" : "text-ink-200 hover:text-amber"}`}
+        title={
+          prefs.muted
+            ? "Sounds are off — click to turn them on"
+            : blocked
+              ? "Sounds are on, but the browser is holding them until you click on the page — click here to allow them"
+              : "Sounds are on — click to mute"
+        }
+        aria-label={prefs.muted ? "Turn sounds on" : "Mute sounds"}
+        aria-pressed={!prefs.muted}
+      >
+        <SpeakerIcon muted={prefs.muted} />
+        {blocked ? <span className="absolute bottom-0.5 left-1 h-1.5 w-1.5 rounded-full bg-amber ring-2 ring-ink-950" /> : null}
+      </button>
+      <button
+        onClick={() => {
+          // A count on the bell is a reason to open it: land on the Inbox.
+          if (!open && count) setTab("inbox");
+          setOpen((v) => !v);
+        }}
+        className={`relative rounded-md border px-2 py-1 transition-colors cursor-pointer hover:border-ink-500 hover:text-ink-100 ${open ? "border-ink-500 text-ink-100" : "border-ink-700 text-ink-200"}`}
+        title={count ? `Notifications: ${needs.length ? `${needs.length} waiting on you` : `${count} new`}` : "Notifications: what needs you, and what happened"}
+        aria-label={count ? `Notifications, ${count} new` : "Notifications"}
+        aria-expanded={open}
+      >
+        <BellIcon />
+        {count ? (
+          <span
+            className={`absolute -top-1.5 -right-1.5 min-w-[16px] rounded-full px-1 text-center font-mono text-[9.5px] leading-[15px] font-semibold text-ink-950 ring-2 ring-ink-950 ${needs.length ? "pulse-rose" : ""}`}
+            style={{ background: badgeColor ?? "var(--color-amber)" }}
+          >
+            {count > 99 ? "99+" : count}
+          </span>
+        ) : dot ? (
+          <span className="absolute top-0.5 right-1 h-2 w-2 rounded-full ring-2 ring-ink-950" style={{ background: dot }} />
+        ) : null}
+      </button>
 
       <AnchoredPanel anchor={box} open={open} onClose={() => setOpen(false)} width={440} className="p-4">
           <div className="mb-3 flex items-center gap-2">

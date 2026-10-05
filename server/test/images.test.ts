@@ -19,7 +19,7 @@ import {
 } from "../src/engine/images.ts";
 import { handle } from "../src/imageMcp.ts";
 import type { Mode, Stage } from "../src/types.ts";
-import { until } from "./helpers.ts";
+import { until, removeTemp } from "./helpers.ts";
 import { setCodexRunner } from "../src/engine/providers/codexLocal.ts";
 
 // Settings → Images asks after Codex; these tests answer for it instead of the Codex on this computer.
@@ -143,7 +143,7 @@ test("readiness says in plain words what would happen, and only a maker on your 
   assert.equal(imageReadiness(cfg({ provider: "off" })).ready, false);
 });
 
-test("an image is saved inside the project, under a name from its prompt, and never over an existing file", () => {
+test("an image is saved inside the project, under a name from its prompt, and never over an existing file", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "kimg-"));
   try {
     assert.equal(slug("A Red Bicycle, studio photo!!"), "a-red-bicycle-studio-photo");
@@ -161,7 +161,7 @@ test("an image is saved inside the project, under a name from its prompt, and ne
     assert.throws(() => imagePath(cwd, join(tmpdir(), "elsewhere.jpg"), "x", "jpeg"), /inside the project/);
     assert.throws(() => imagePath(cwd, ".", "x", "jpeg"), /inside the project/);
   } finally {
-    rmSync(cwd, { recursive: true, force: true });
+    await removeTemp(cwd);
   }
 });
 
@@ -193,7 +193,7 @@ test("the tool writes the file, reports its path relative to the project, and te
     assert.match(none.content[0].text, /needs your key[\s\S]*Carry on without it/, "no maker ready: says so, asks nobody");
     assert.equal(f.calls.length, 2);
   } finally {
-    rmSync(cwd, { recursive: true, force: true });
+    await removeTemp(cwd);
   }
 });
 
@@ -242,7 +242,7 @@ async function stageFor(mode: Mode, settings: Record<string, unknown>, probe?: (
     assert.equal(repo.getTask(task.id)!.error, null);
     return { ...seen[0], repo, task };
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    await removeTemp(dir);
   }
 }
 

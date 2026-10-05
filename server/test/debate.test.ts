@@ -101,7 +101,7 @@ test("plan → critic → revision in the planner's own session, then the task w
     assert.deepEqual(cards[0].stage_states, ["success", "success"]);
     assert.ok(s.repo.eventsAfter(runs[0].id).some((e) => e.type === "debate:decision"));
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -118,7 +118,7 @@ test("a custom plan text is what the code stage receives", async () => {
     await until(() => s.repo.getTask(task.id)!.status === "review");
     assert.match(f.calls[3].prompt, /MY OWN PLAN/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -137,7 +137,7 @@ test("a failed critic or no objections means no gate: the pipeline just continue
       const planRun = s.repo.stageRuns(task.id)[0];
       assert.ok(s.repo.eventsAfter(planRun.id).some((e) => e.type === "debate:skipped"));
     } finally {
-      s.cleanup();
+      await s.cleanup();
     }
   }
 });
@@ -164,7 +164,7 @@ test("stop and reject clear the gate; recover() leaves a gated task waiting", as
     assert.equal(s.repo.getTask(t2.id)!.status, "backlog");
     assert.equal(s.repo.getTask(t2.id)!.plan_gate, null);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -187,10 +187,10 @@ test("a stage can switch the debate off, or name its own critic", async () => {
       await until(() => s2.repo.getTask(own.id)!.status === "approval");
       assert.equal(g.calls[1].options.model, "claude-haiku-4-5-20251001");
     } finally {
-      s2.cleanup();
+      await s2.cleanup();
     }
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -207,7 +207,7 @@ test("a one-time debate tells both models there is no second round", async () =>
     assert.equal(t.plan_gate!.rounds, 1);
     assert.equal(t.plan_gate!.agreed, false);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -235,7 +235,7 @@ test("a fixed number of rounds: each round sees the revised plan and the planner
     const planRun = s.repo.stageRuns(t.id)[0];
     assert.equal(s.repo.eventsAfter(planRun.id).filter((e) => e.type === "debate:round").length, 3);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -258,7 +258,7 @@ test("a debate ends early when the critic has no objections left, and the gate s
       assert.match(t.note ?? "", /until the critic agreed/);
       assert.equal(t.plan_gate!.critique!.objections.length, 2, "the last objections raised, not the empty final answer");
     } finally {
-      s.cleanup();
+      await s.cleanup();
     }
   }
 });
@@ -275,7 +275,7 @@ test("a debate until agreement still stops at the ceiling", async () => {
     assert.equal(t.plan_gate!.agreed, false);
     assert.match(t.note ?? "", /without agreement/);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 
@@ -290,7 +290,7 @@ test("a critic that breaks on a later round keeps the rounds before it", async (
     assert.equal(t.plan_gate!.revised, "PLAN v2 with migration");
     assert.equal(t.plan_gate!.rounds, 1);
   } finally {
-    s.cleanup();
+    await s.cleanup();
   }
 });
 

@@ -143,6 +143,12 @@ namespace ClaudeKanban
         volatile Process server;
         volatile string reason;
         DateTime codeReadAtUtc;
+        // Starting again after a crash: no startup screen to show, and nothing to open.
+        volatile bool quiet;
+        // When the board died on its own lately; past the limit it waits for you instead of looping.
+        readonly List<DateTime> crashes = new List<DateTime>();
+        const int CrashLimit = 3;
+        static readonly TimeSpan CrashWindow = TimeSpan.FromMinutes(15);
 
         public App(Mutex mutex, bool rebuilt)
         {
@@ -190,16 +196,18 @@ namespace ClaudeKanban
             cancelled = false;
             reason = null;
             SetState(State.Starting);
-            if (splash == null || splash.IsDisposed)
-            {
-                splash = new Splash();
-                splash.CloseClicked += () => { if (state == State.Starting || state == State.Failed) Leave(); };
-            }
+            if (splash == null || splash.IsDisposed) NewSplash();
             splash.Reset();
             splash.ShowAndActivate();
             var worker = new Thread(Steps);
             worker.IsBackground = true;
             worker.Start();
+        }
+
+        void NewSplash()
+        {
+            splash = new Splash();
+            splash.CloseClicked += () => { if (state == State.Starting || state == State.Failed) Leave(); };
         }
 
         /// <summary>What "Start Claude Kanban.cmd" does, in the same order, without a window.</summary>
@@ -270,9 +278,7 @@ namespace ClaudeKanban
                 // From here on, a change on disk is something this board has not seen (the same moment
                 // launcher-check.ps1 compares with: when the server started, not when the install did).
                 codeReadAtUtc = DateTime.UtcNow;
-                var p = Launch(Native.Cmd, "/d /s /c \"npm run start -w server\"", ServerOutput);
-                server = p;
-                p.Exited += (s, e) => Ui(() => ServerExited(p));
+                var p = StartServer(false);
                 if (WaitUntilAnswering(p)) Ui(Ready);
             }
             catch (OperationCanceledException)
@@ -284,6 +290,20 @@ namespace ClaudeKanban
                 Log.Line("Unexpected: " + e);
                 if (!cancelled) Fail("Something went wrong while starting", e.Message, false);
             }
+        }
+
+        /// <summary>
+        /// afterCrash tells the server the last one died on its own, so the stages it cut off carry on
+        /// by themselves (D384). Code changed on disk since is picked up too: the server runs its source.
+        /// </summary>
+        Process StartServer(bool afterCrash)
+        {
+            var env = new Dictionary<string, string>();
+            if (afterCrash) env["KANBAN_AFTER_CRASH"] = "1";
+            var p = Launch(Native.Cmd, "/d /s /c \"npm run start -w server\"", ServerOutput, env);
+            server = p;
+            p.Exited += (s, e) => Ui(() => ServerExited(p));
+            return p;
         }
 
         /// <summary>An update changed this program itself: build the new one and hand over to it.</summary>
@@ -353,6 +373,7 @@ namespace ClaudeKanban
             {
                 case State.Starting:
                 case State.Failed:
+                    if (quiet && state == State.Starting) break;
                     splash.ShowAndActivate();
                     break;
                 case State.Running:
@@ -400,13 +421,65 @@ namespace ClaudeKanban
             });
         }
 
+        /// <summary>
+        /// Nobody asked it to stop (Quit, Restart and a hand-over clear `server` first), so it died on its
+        /// own: start it again at once, without the startup screen, unless it keeps dying (D384).
+        /// </summary>
         void ServerExited(Process p)
         {
             if (p != server || state != State.Running) return;
             Log.Line("The board stopped.");
+            DateTime now = DateTime.UtcNow;
+            crashes.Add(now);
+            crashes.RemoveAll(t => now - t > CrashWindow);
+            if (crashes.Count < CrashLimit)
+            {
+                Log.Line("It stopped on its own: starting it again (" + crashes.Count + " of " + CrashLimit + " in " + CrashWindow.TotalMinutes + " minutes before it waits for you).");
+                StartAgainQuietly();
+                return;
+            }
             SetState(State.Stopped);
             tray.ShowBalloonTip(10000, "Claude Kanban stopped",
-                "Click here to start it again. To see why it stopped, right-click its icon and choose Show log.", ToolTipIcon.Warning);
+                "It stopped " + crashes.Count + " times in " + CrashWindow.TotalMinutes + " minutes, so it was not started again. Click here to start it. To see why, right-click its icon and choose Show log.", ToolTipIcon.Warning);
+        }
+
+        void StartAgainQuietly()
+        {
+            cancelled = false;
+            reason = null;
+            quiet = true;
+            SetState(State.Starting);
+            var worker = new Thread(() =>
+            {
+                try
+                {
+                    if (WaitUntilAnswering(StartServer(true))) Ui(ReadyAgain);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Quit while it was starting again.
+                }
+                catch (Exception e)
+                {
+                    Log.Line("Unexpected: " + e);
+                    if (!cancelled) Fail("Something went wrong while starting it again", e.Message, false);
+                }
+                finally
+                {
+                    quiet = false;
+                }
+            });
+            worker.IsBackground = true;
+            worker.Start();
+        }
+
+        void ReadyAgain()
+        {
+            if (state != State.Starting || cancelled) return;
+            SetState(State.Running);
+            Log.Line("Ready again on " + Paths.Url);
+            tray.ShowBalloonTip(8000, "Claude Kanban started again",
+                "It stopped unexpectedly and is running again. Tasks it was running carry on where they left off.", ToolTipIcon.Info);
         }
 
         void Restart()
@@ -520,11 +593,14 @@ namespace ClaudeKanban
         void Fail(string title, string detail, bool nodeMissing)
         {
             Log.Line("Did not start: " + title + (string.IsNullOrEmpty(detail) ? "" : " (" + detail + ")"));
+            // Starting again after a crash: the first startup screen has already faded out.
+            bool fresh = quiet;
             Ui(() =>
             {
                 if (cancelled || state == State.Leaving) return;
                 StopServer();
                 SetState(State.Failed);
+                if (fresh || splash == null || splash.IsDisposed) NewSplash();
                 // The last button is the highlighted one: what the person most likely wants.
                 if (nodeMissing)
                     splash.Fail(title, detail, new Choice("Try again", Start), new Choice("Download Node.js", () => Native.Open(NodeDownload)));
@@ -591,7 +667,7 @@ namespace ClaudeKanban
             return Run(Native.Cmd, "/d /s /c \"npm " + args + "\"", null);
         }
 
-        static Process Launch(string file, string args, Action<string> onLine)
+        static Process Launch(string file, string args, Action<string> onLine, Dictionary<string, string> env = null)
         {
             var psi = new ProcessStartInfo(file, args);
             psi.WorkingDirectory = Paths.Root;
@@ -604,6 +680,7 @@ namespace ClaudeKanban
             psi.StandardErrorEncoding = Encoding.UTF8;
             // The .cmd has the board open the browser itself; here this program does, and only once it answers.
             psi.EnvironmentVariables.Remove("KANBAN_OPEN_BROWSER");
+            if (env != null) foreach (var kv in env) psi.EnvironmentVariables[kv.Key] = kv.Value;
             var p = new Process();
             p.StartInfo = psi;
             p.EnableRaisingEvents = true;

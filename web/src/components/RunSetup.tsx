@@ -1,11 +1,11 @@
 import { useState } from "react";
 import type { Stage, Task } from "../../../server/src/types.ts";
-import { RUN_STYLE_LABEL, RUN_STYLES, runStyleFields, runStyleOf } from "../../../server/src/types.ts";
+import { runStyleFields, runStyleOf } from "../../../server/src/types.ts";
 import { isAnswerPipeline } from "../../../server/src/engine/answer.ts";
 import { api, type ProjectWithGit } from "../lib/api.ts";
 import { useAppData } from "../lib/store.tsx";
 import { modelLabel } from "../lib/format.ts";
-import { Button, ErrorLine, RUN_STYLE_TONE, useAction } from "./ui.tsx";
+import { Button, ErrorLine, RunStyleSwitch, useAction } from "./ui.tsx";
 import { PipelineEditor, pipelineLine } from "./PipelineEditor.tsx";
 import { RunSuggestions } from "./Suggestions.tsx";
 import { autonomousBlocked, branchBlocked, lookupAutoBlocked } from "./forms.tsx";
@@ -23,23 +23,17 @@ export function RunSetup({ card, project }: { card: Task; project: ProjectWithGi
   return (
     <div className="space-y-1.5">
       <div className="flex flex-wrap items-center gap-1.5">
-        {RUN_STYLES.map((m) => (
-          <button
-            key={m}
-            disabled={busy || runStyleOf(card) === m || (m !== "supervised" && !!noAuto)}
-            title={
-              m === "ask"
-                ? noAuto ?? "Like autonomous, but stops to ask you when your answer changes the result, and waits for it"
-                : m === "autonomous"
-                ? noAuto ?? (answer ? "Runs in the project's folder and asks nothing; it reads and reports, and changes nothing" : "Works on its own branch without asking; lands when you approve")
-                : answer ? "Runs in the project's folder; a command that is not read-only waits for your Allow" : "Works in the project's folder and asks you before each change"
-            }
-            onClick={() => run(() => api.patchTask(card.id, runStyleFields(m)))}
-            className={`${small} ${runStyleOf(card) === m ? RUN_STYLE_TONE[m] : "border-ink-700 text-ink-400 hover:text-ink-200"}`}
-          >
-            {RUN_STYLE_LABEL[m].toLowerCase()}
-          </button>
-        ))}
+        <RunStyleSwitch
+          value={runStyleOf(card)}
+          onChange={(m) => run(() => api.patchTask(card.id, runStyleFields(m)))}
+          disabled={busy}
+          blocked={noAuto}
+          titles={{
+            ask: "Like autonomous, but stops to ask you when your answer changes the result, and waits for it",
+            autonomous: answer ? "Runs in the project's folder and asks nothing; it reads and reports, and changes nothing" : "Works on its own branch without asking; lands when you approve",
+            supervised: answer ? "Runs in the project's folder; a command that is not read-only waits for your Allow" : "Works in the project's folder and asks you before each change",
+          }}
+        />
         {card.mode === "supervised" && !answer ? (
           <label className="flex cursor-pointer items-center gap-1 text-[11px] text-ink-300" title={noBranch ?? "Its own copy of the project; lands only when you approve"}>
             <input

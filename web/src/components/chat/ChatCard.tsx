@@ -1,5 +1,5 @@
 import { createContext, useContext, useState } from "react";
-import type { Approval, ChatMessage, TaskCard } from "../../../../server/src/types.ts";
+import { stoppedBy, type Approval, type ChatMessage, type TaskCard } from "../../../../server/src/types.ts";
 import { isAnswerPipeline } from "../../../../server/src/engine/answer.ts";
 import { api, type ProjectWithGit } from "../../lib/api.ts";
 import { useAppData } from "../../lib/store.tsx";
@@ -24,6 +24,7 @@ type CardAction = NonNullable<ChatMessage["meta"]["cards"]>[number]["action"];
 const ACTION_LABEL: Record<CardAction, string> = {
   created: "created", updated: "edited", queued: "queued", scheduled: "scheduled",
   messaged: "told", answered: "answered", stopped: "stopped", retried: "run again",
+  continued: "new round", forked: "branched",
 };
 
 /**
@@ -111,12 +112,15 @@ export function ChatCard({ id, title, actions, messageId }: { id: string; title:
   const asking = waiting.some(isQuestion);
   const blockers = card && ctx ? waitingOn(card, ctx.cards) : [];
   // Retrying a sandbox block in the same mode would only hit the same wall: that is decided in the task.
-  const needsSwitch = card?.status === "failed" && card.blocked?.needs === "supervised" && card.mode === "autonomous";
+  const needsSwitch = card?.status === "failed" && stoppedBy(card)?.needs === "supervised" && card.mode === "autonomous";
   return (
     <div data-chat-card={id} data-latest={latest ? "1" : undefined} className="rounded-lg border border-amber/40 bg-amber/5 px-2.5 py-1.5">
       <div className="flex items-center gap-2">
         <span className="font-mono text-[10px] uppercase tracking-wide text-amber/80">{actions.map((a) => ACTION_LABEL[a] ?? a).join(" · ")}</span>
-        <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-100">{card?.title ?? title}</span>
+        <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-100">
+          {card?.title ?? title}
+          {card && card.round > 1 ? <span className="ml-1.5 font-mono text-[11px] text-iris" title="Its coder continued this card with what it remembered">· round {card.round}</span> : null}
+        </span>
         {card ? <StatusPill card={card} asking={asking} waits={blockers.length > 0} /> : null}
         <OpenButton id={id} />
       </div>
@@ -128,7 +132,7 @@ export function ChatCard({ id, title, actions, messageId }: { id: string; title:
           {card.status === "backlog" && ctx ? <SetupCard card={card} project={ctx.project} compact /> : null}
           {IN_PROGRESS.has(card.status) || card.status === "queued" ? (
             <>
-              <ChecklistLine list={card.checklist} live={card.status !== "paused"} />
+              <ChecklistLine list={card.checklist.slice(card.checklist_from)} live={card.status !== "paused"} />
               {card.status === "approval" && card.plan_gate ? (
                 <div className="flex items-center gap-2 text-[12px] text-iris">
                   <span className="flex-1">Its plan is ready for your OK.</span>
@@ -145,7 +149,7 @@ export function ChatCard({ id, title, actions, messageId }: { id: string; title:
           ) : null}
           {card.status === "failed" ? (
             <div className="flex items-start gap-2">
-              <span className="line-clamp-2 min-w-0 flex-1 font-mono text-[11px] text-rust">{card.blocked?.reason ?? card.error ?? "It stopped."}</span>
+              <span className="line-clamp-2 min-w-0 flex-1 font-mono text-[11px] text-rust">{stoppedBy(card)?.reason ?? card.error ?? "It stopped."}</span>
               {needsSwitch ? null : (
                 <Button size="sm" busy={busy} title="Carry on from the stage that failed" onClick={() => run(() => api.retry(card.id))}>Retry</Button>
               )}
@@ -229,7 +233,7 @@ export function ChatUpdateRow({ m }: { m: ChatMessage }) {
       ) : (
         <Markdown text={u.text} className="text-[13px]" />
       )}
-      {u.kind === "failed" && card?.status === "failed" && !(card.blocked?.needs === "supervised" && card.mode === "autonomous") ? (
+      {u.kind === "failed" && card?.status === "failed" && !(stoppedBy(card)?.needs === "supervised" && card.mode === "autonomous") ? (
         <div className="mt-1.5 flex justify-end">
           <Button size="sm" busy={busy} onClick={() => run(() => api.retry(u.id))}>Retry</Button>
         </div>

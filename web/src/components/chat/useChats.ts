@@ -26,7 +26,7 @@ export function useChats(projectId: string): Chat[] | null {
   return chats;
 }
 
-/** A project's chat folders (the Studio's left pane), live: the server sends the whole list on every change. */
+/** A project's chat folders (the AI Manager's left pane), live: the server sends the whole list on every change. */
 export function useChatFolders(projectId: string): ChatFolder[] {
   const [folders, setFolders] = useState<ChatFolder[]>([]);
   useEffect(() => {

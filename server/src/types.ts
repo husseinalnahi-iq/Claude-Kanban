@@ -338,9 +338,14 @@ export interface PlanGate {
 /**
  * A stage that could not do the task from where it ran — the sandbox refused what it needed, or it
  * needs a decision or information from you. The pipeline stops there instead of carrying a "success"
- * nobody earned into review (docs/DECISIONS.md D184).
+ * nobody earned into review (docs/DECISIONS.md D184). The one exception is `advisory` (D382).
  */
 export interface Blocked {
+  /**
+   * Set when an autonomous run said part of the task needs a supervised run and carried on with the
+   * rest: shown on the card as a suggestion, it does not stop the pipeline (D382). Absent = it stopped.
+   */
+  advisory?: boolean;
   stage_index: number;
   /** What stopped it, in one or two sentences. */
   reason: string;
@@ -353,6 +358,21 @@ export interface Blocked {
   /** The mode the blocked run had, so a rerun knows whether anything about its access changed. */
   mode: Mode;
   created_at: string;
+}
+
+/** The block that stopped the task, if one did: a suggestion the run carried on past is not one (D382). */
+export const stoppedBy = (t: { blocked: Blocked | null }): Blocked | null => (t.blocked && !t.blocked.advisory ? t.blocked : null);
+
+/**
+ * Where a supervised rerun starts after a suggestion (D382). The stage that made it finished, so a plan
+ * is not made again: the access is needed by the stage that changes things — the first code or custom
+ * stage from there on, or else the last one before it (a review that saw live steps left undone).
+ */
+export function supervisedFrom(pipeline: { stage: StageName }[], from: number): number {
+  const writes = (i: number) => pipeline[i]?.stage === "code" || pipeline[i]?.stage === "custom";
+  for (let i = from; i < pipeline.length; i++) if (writes(i)) return i;
+  for (let i = Math.min(from, pipeline.length - 1); i >= 0; i--) if (writes(i)) return i;
+  return Math.max(0, Math.min(from, pipeline.length - 1));
 }
 
 /**
@@ -382,9 +402,27 @@ export interface TaskQuestion {
   options: string[];
   /** What the run is doing meanwhile. */
   default: string | null;
+  /** The option the run recommends, exactly as in `options` (D386). Older questions have none. */
+  recommended?: string | null;
   answer: string | null;
   created_at: string;
   answered_at: string | null;
+}
+
+const optionKey = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
+const optionLetter = (s: string) => /^\(?([a-z0-9])[).:]\s/i.exec(s.trim())?.[1]?.toLowerCase() ?? null;
+
+/**
+ * The option a card question recommends: the one the run named, or else the one its default is — a
+ * default that starts with the option, or with the same "B)" letter. Null when none matches (D386).
+ */
+export function recommendedOption(q: Pick<TaskQuestion, "options" | "default" | "recommended">): string | null {
+  const named = q.recommended ? q.options.find((o) => optionKey(o) === optionKey(q.recommended!)) : undefined;
+  if (named) return named;
+  if (!q.default) return null;
+  const d = optionKey(q.default);
+  const letter = optionLetter(q.default);
+  return q.options.find((o) => d.startsWith(optionKey(o)) || optionKey(o).startsWith(d) || (letter !== null && optionLetter(o) === letter)) ?? null;
 }
 
 /**
@@ -628,6 +666,16 @@ export interface Task {
   pause_reason: "limit" | "cost" | "provider" | null;
   /** Extra dollars granted to this task by pressing Continue, on top of the global per-task ceiling. */
   budget_extra_usd: number;
+  /** Which round of work the card is on: 1 for its first, N+1 for each follow-up its coder continued (D375). */
+  round: number;
+  /** What the card had spent when this round started: the cost ceiling counts each round on its own. */
+  round_cost_base: number;
+  /** Where this round's to-do items start in `checklist`: earlier rounds' are done and only clutter it. */
+  checklist_from: number;
+  /** Every file the card's landed rounds changed, so a later round and the chat know where it has worked. */
+  files: string[];
+  /** The base's commit right after the card last landed: what "changed since your last round" is measured from. */
+  landed_sha: string | null;
   /**
    * A scheduled start for a Backlog card: an ISO time, or "reset" for when the Claude 5-hour usage
    * window next resets. Cleared once it fires (or the card is started by hand).
@@ -721,7 +769,7 @@ export interface Chat {
   /** Where the model runs: "anthropic" (Claude) or a Claude-compatible provider's id (D301). */
   provider: string;
   cost_usd: number;
-  /** The folder it is filed in on the Studio's chat list, or null for none. A deleted folder leaves its chats here. */
+  /** The folder it is filed in on the AI Manager's chat list, or null for none. A deleted folder leaves its chats here. */
   folder_id: string | null;
   /**
    * When Claude last answered in this chat: the start of its cache window. Claude keeps a conversation
@@ -769,7 +817,7 @@ export interface ChatFile {
 export const FOLDER_COLORS = ["amber", "cyan", "moss", "iris", "rose", "rust", "lime", "slate"] as const;
 export type FolderColor = (typeof FOLDER_COLORS)[number];
 
-/** A folder on the Studio's chat list: a name you gave a group of chats, in a colour. Nothing runs on it. */
+/** A folder on the AI Manager's chat list: a name you gave a group of chats, in a colour. Nothing runs on it. */
 export interface ChatFolder {
   id: string;
   project_id: string;
@@ -807,7 +855,7 @@ export interface ChatMessage {
   role: "user" | "assistant" | "tool" | "error" | "update";
   text: string;
   meta: {
-    cards?: { id: string; title: string; action: "created" | "updated" | "queued" | "scheduled" | "messaged" | "answered" | "stopped" | "retried" }[];
+    cards?: { id: string; title: string; action: "created" | "updated" | "queued" | "scheduled" | "messaged" | "answered" | "stopped" | "retried" | "continued" | "forked" }[];
     cost_usd?: number;
     update?: ChatUpdate;
     /** A user message the board sent by itself to keep the conversation cached (D332), shown as a quiet line. */
@@ -858,6 +906,29 @@ export interface Run {
    */
   limit_before: number | null;
   limit_after: number | null;
+  /**
+   * What the run spent before its first edit, in weighted tokens (`engine/explore.ts`): what a fresh card
+   * would spend finding the same files again. Set once, when a code or custom stage first finishes (D374).
+   */
+  explore_weight: number | null;
+  /** The card's round this run belonged to (D375). */
+  round: number;
+}
+
+/** A follow-up round on a card: what was asked, and how it went. Round 1 is the card itself and has no row. */
+export interface TaskRound {
+  id: string;
+  task_id: string;
+  round: number;
+  request: string;
+  /** A review stage runs after the coder this round. */
+  review: boolean;
+  /** How many to-do items the card had when the round started: the round's own list starts there. */
+  checklist_from: number;
+  /** The round could not continue its session and started fresh with a handoff. */
+  fell_back: boolean;
+  started_at: string;
+  landed_at: string | null;
 }
 
 /** One line of durable project memory: a decision or convention worth carrying into later tasks. */
@@ -1056,6 +1127,11 @@ export interface Settings {
    * can see and edit, and a second memory could contradict it (D306).
    */
   claudeAutoMemory: boolean;
+  /**
+   * An autonomous task marked live does its live steps itself: its worktree gets the project's gitignored
+   * credential files and its prompts stop leaving those steps for a supervised run. On by default (D385).
+   */
+  autonomousLive: boolean;
   /** Classify new tasks (type, priority, labels) automatically. */
   autoTriage: boolean;
   /** Cheap model used for intake: classification and spec refinement. */
@@ -1121,8 +1197,19 @@ export interface Settings {
   chatKeepAliveMessage: string;
   /** Stop keeping a chat warm this many hours after your last own message in it: an hourly message for ever would be a bill. */
   chatKeepAliveMaxHours: number;
+  /**
+   * Every chat gets your connectors and skills: Slack, Gmail, Drive, your MCP servers, your skills (D381).
+   * Off, a chat has only the project and the board, and makes a card for a lookup in your systems.
+   */
+  chatTools: boolean;
   /** Offer the ✦ What next? button in every chat: five suggested next steps, on request, at the chat's model (D338). */
   nextStepsSuggestions: boolean;
+  /**
+   * Where the chat sends a follow-up about a card's own work (D377): "memory" to the card whose coder
+   * remembers it when that costs less (a round, a message, a fork), "ask" proposes that and waits for a yes,
+   * "new" always a new card (told what the earlier one did).
+   */
+  followUpRouting: "memory" | "ask" | "new";
   /** The Spec section's ✦ Rewrite: Opus by default — it reads the code first, and a good spec saves a whole run. */
   specModel: string;
   specEffort: Effort;
@@ -1131,8 +1218,16 @@ export interface Settings {
    * stages to look at anything visible they changed. Local pages only unless you approve otherwise.
    */
   browserChecks: boolean;
-  /** Also offer Claude in Chrome — your own signed-in Chrome — to supervised runs. Never autonomous ones. */
+  /** Also offer Claude in Chrome — your own signed-in Chrome — to supervised runs (see taskBrowser for every run). */
   chromeInSupervised: boolean;
+  /**
+   * The browser runs use for sites that need a sign-in (D389). "board": the board's own browser, started
+   * from a saved profile you sign in to once; autonomous runs may also open the sites in browserSites.
+   * "chrome": every run, autonomous included, also gets Claude in Chrome — your own signed-in Chrome.
+   */
+  taskBrowser: "board" | "chrome";
+  /** Sites signed in to in the board's browser profile, by host; autonomous runs may open them (D389). */
+  browserSites: string[];
   /**
    * Supervised runs run shell commands that can only read (grep, ls, git log, sed -n …) without an
    * approval card. Anything that could write, run a program or touch credentials still asks (D202).

@@ -12,7 +12,7 @@ import { useChats } from "./useChats.ts";
  * Talk to Claude about the project: ask how something works, plan a feature, have it make and run
  * task cards — a lookup, a fix — with the models you name, follow them live, and get their results
  * back here. It reads the code itself and leaves changing anything to a card. Slides in from the
- * right; the board stays usable. The Studio tab shows the same chats full-screen.
+ * right; the board stays usable. The AI Manager tab shows the same chats full-screen.
  */
 export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClose: () => void }) {
   const chats = useChats(project.id);
@@ -82,10 +82,10 @@ export function ChatPanel({ project, onClose }: { project: ProjectWithGit; onClo
         {chat ? <span className="font-mono text-[10.5px] text-ink-500" title="What this chat has cost">{cost(chat.cost_usd)}</span> : null}
         <button
           className="cursor-pointer rounded-md border border-ink-700 px-2 py-0.5 text-[12px] text-ink-300 hover:border-amber/60 hover:text-amber"
-          onClick={() => navigate({ view: "studio", projectId: project.id, taskId: null })}
-          title="Open this chat full-screen in the Studio: your chats on the left, the work they started on the right"
+          onClick={() => navigate({ view: "ai-manager", projectId: project.id, taskId: null })}
+          title="Open this chat full-screen in the AI Manager: your chats on the left, the work they started on the right"
         >
-          ⤢ Studio
+          ⤢ AI Manager
         </button>
         <button className="cursor-pointer rounded-md border border-ink-700 px-2 py-0.5 text-[12px] text-ink-300 hover:border-amber/60 hover:text-amber" onClick={() => { setChatId(null); setListOpen(false); }}>
           + New

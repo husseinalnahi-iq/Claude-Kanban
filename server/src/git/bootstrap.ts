@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, join, relative, resolve } from "node:path";
 import { glob } from "node:fs/promises";
@@ -36,6 +36,33 @@ function isIgnored(projectPath: string, relPath: string): Promise<boolean> {
       res(!err);
     });
   });
+}
+
+/**
+ * Where projects keep their keys out of git, copied into a live autonomous task's worktree (D385).
+ * seedWorktree copies only files git ignores, so a tracked `.env.example` stays where it is.
+ */
+export const LIVE_KEY_PATTERNS = [".env", ".env.*", ".*secret*/**", "*secret*.json", "*credential*.json"];
+
+/**
+ * Deletes the key files a worktree may hold, before anything else is tried on it: a folder that later
+ * cannot be removed must not keep copies of your keys (D396). Returns how many were removed.
+ */
+export async function removeKeyCopies(worktreePath: string): Promise<number> {
+  let removed = 0;
+  for (const pattern of LIVE_KEY_PATTERNS) {
+    try {
+      for await (const m of glob(pattern, { cwd: worktreePath })) {
+        const p = resolve(worktreePath, String(m));
+        if (relative(worktreePath, p).startsWith("..")) continue;
+        rmSync(p, { recursive: true, force: true });
+        removed++;
+      }
+    } catch {
+      // a pattern that cannot be read: the folder removal below still runs
+    }
+  }
+  return removed;
 }
 
 /**

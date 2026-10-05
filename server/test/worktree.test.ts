@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { removeTemp } from "./helpers.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { addWorktree, commitAll, diffTask, mergeTask, removeWorktree, listWorktrees, isGitRepo, currentBranch } from "../src/git/worktree.ts";
 
 function git(cwd: string, ...args: string[]) {
@@ -113,7 +114,7 @@ test("isGitRepo is false for a plain folder", async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("a worktree folder something else is still using does not stop its merged branch from going", async () => {
+test("a worktree folder something else is still using does not stop its merged branch from going, and is reported (D396)", async () => {
   const repo = makeRepo();
   const { spawn } = await import("node:child_process");
   const wt = await addWorktree(repo, "t_held");
@@ -124,12 +125,55 @@ test("a worktree folder something else is still using does not stop its merged b
   const holder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 20000)"], { cwd: wt.path, stdio: "ignore" });
   await new Promise((r) => setTimeout(r, 300));
   try {
-    await removeWorktree(repo, "t_held", { deleteBranch: "safe" });
+    // The folder that stays is said out loud now, not passed over: the card gets a note (D396).
+    await assert.rejects(removeWorktree(repo, "t_held", { deleteBranch: "safe" }), /could not be deleted/);
     assert.equal(git(repo, "branch", "--format=%(refname:short)"), "main", "the merged branch is gone");
     assert.equal((await listWorktrees(repo)).length, 1, "git no longer lists the worktree");
   } finally {
     holder.kill();
     await new Promise((r) => setTimeout(r, 200));
-    rmSync(repo, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await removeTemp(repo);
+  }
+});
+
+/** A worktree holding the key files a live task was given, as D385 seeds them (git ignores them). */
+async function worktreeWithKeys(repo: string, taskId: string) {
+  writeFileSync(join(repo, ".gitignore"), ".env\n.codex-secrets/\n.kanban/\n");
+  git(repo, "add", "-A");
+  git(repo, "commit", "-q", "-m", "ignore keys");
+  const wt = await addWorktree(repo, taskId);
+  writeFileSync(join(wt.path, ".env"), "KEY=1\n");
+  mkdirSync(join(wt.path, ".codex-secrets"));
+  writeFileSync(join(wt.path, ".codex-secrets", "erp.json"), '{"key":"k"}');
+  return wt;
+}
+
+test("removing a worktree takes the copied key files with it (D396)", async () => {
+  const repo = makeRepo();
+  try {
+    const wt = await worktreeWithKeys(repo, "t_keys1");
+    await removeWorktree(repo, "t_keys1", { deleteBranch: "force" });
+    assert.equal(existsSync(wt.path), false, "the folder is gone, keys and all");
+  } finally {
+    await removeTemp(repo);
+  }
+});
+
+test("a worktree folder that cannot be deleted is reported, never left silently, and its keys go first (D396)", async (t) => {
+  if (process.platform !== "win32") return t.skip("an open file blocks a delete only on Windows");
+  const repo = makeRepo();
+  let holder: ReturnType<typeof spawn> | null = null;
+  try {
+    const wt = await worktreeWithKeys(repo, "t_keys2");
+    // A program working inside the folder (a dev server, a terminal): Windows will not delete its folder.
+    holder = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { cwd: wt.path, stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 300));
+    await assert.rejects(removeWorktree(repo, "t_keys2", { deleteBranch: "force" }), /could not be deleted.*key files were removed/);
+    assert.equal(existsSync(join(wt.path, ".env")), false, "the key file is gone even though the folder stayed");
+    assert.equal(existsSync(join(wt.path, ".codex-secrets")), false);
+  } finally {
+    holder?.kill();
+    await new Promise((r) => setTimeout(r, 300));
+    await removeTemp(repo);
   }
 });

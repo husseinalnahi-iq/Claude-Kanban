@@ -1,3 +1,4 @@
+import { memoryFacts } from "./memory.ts";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { Repo } from "../repo.ts";
@@ -27,6 +28,12 @@ const brief = (t: Task) => ({
   // Only when there is one, so a quiet board stays a short list.
   ...(t.questions.some((q) => !q.answer) ? { open_questions: t.questions.filter((q) => !q.answer).length } : {}),
 });
+
+/** Cards a follow-up can go to: working, waiting for review, failed, or done. */
+const FOLLOW_UP_STATUSES = new Set<Task["status"]>(["running", "planning", "review", "failed", "done"]);
+/** Words that say nothing about which card a request is about. */
+const STOP_WORDS = new Set(["make", "change", "please", "with", "that", "this", "from", "into", "have", "should", "would", "could", "about", "there", "their", "them", "then", "than", "what", "when", "where", "which", "also", "just", "like", "more", "some", "same", "add", "the", "and", "for"]);
+const normFile = (f: string) => f.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
 
 /** The questions on an AskUserQuestion card and their option labels, tolerant of anything malformed. */
 export function askedQuestions(input: unknown): { question: string; options: string[] }[] {
@@ -146,8 +153,10 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
 
     createTask(args: {
       title: string; spec_md: string; type?: string; priority?: string; mode?: RunStyle; depends_on?: string[];
-      stages?: StageArg[]; live?: boolean; own_branch?: boolean;
+      stages?: StageArg[]; live?: boolean; own_branch?: boolean; follows?: string;
     }) {
+      const follows = args.follows ? mine(args.follows) : undefined;
+      if (args.follows && !follows) return fail(`No card ${args.follows} in this project.`);
       const project = repo.getProject(projectId)!;
       const deps = (args.depends_on ?? []).filter((id) => mine(id));
       const built = args.stages?.length ? buildPipeline(args.stages) : null;
@@ -167,7 +176,9 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
       const t = repo.createTask({
         project_id: projectId,
         title: args.title.trim(),
-        spec_md: args.spec_md,
+        // A fresh card that follows another is told what that one did (D56): it cannot remember it.
+        spec_md: follows ? `${args.spec_md}\n\n${runner.handoff(follows.id)}` : args.spec_md,
+        ...(follows ? { related_to: [follows.id] } : {}),
         type: (args.type as Task["type"]) ?? (answer ? "chore" : "feature"),
         priority: (args.priority as Task["priority"]) ?? "p2",
         mode,
@@ -324,6 +335,95 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
     },
 
     /**
+     * The cards a request is most likely about, with what the board knows of each one's memory (D375): the
+     * chat decides where a follow-up goes from this, not from a guess. Scored by the files the chat looked
+     * at against the files each card changed, the request's words in its title, summary, spec and files,
+     * and whether this chat made it.
+     */
+    async relatedCards(args: { request: string; files?: string[] }) {
+      const words = [...new Set(args.request.toLowerCase().match(/[\p{L}\p{N}_.-]{4,}/gu) ?? [])].filter((w) => !STOP_WORDS.has(w)).slice(0, 20);
+      const asked = (args.files ?? []).map(normFile);
+      const candidates = repo.listTasks({ project_id: projectId }).filter((t) => !t.archived_at && FOLLOW_UP_STATUSES.has(t.status));
+      const scored: { t: Task; files: string[]; score: number }[] = [];
+      for (const t of candidates) {
+        let files = t.files;
+        // Work not landed yet has no file list of its own: its diff is where it worked.
+        if (!files.length && (t.status === "review" || t.status === "failed") && t.branch) {
+          files = await runner.diff(t.id).then((d) => d.map((f) => f.file), () => []);
+        }
+        const mineFiles = files.map(normFile);
+        let score = 0;
+        for (const f of asked) if (mineFiles.some((m) => m === f || m.endsWith(`/${f}`) || f.endsWith(`/${m}`))) score += 5;
+        const title = t.title.toLowerCase();
+        const body = `${t.summary ?? ""} ${t.spec_md}`.toLowerCase();
+        for (const w of words) {
+          if (title.includes(w)) score += 3;
+          else if (body.includes(w)) score += 1;
+          if (mineFiles.some((m) => m.includes(w))) score += 2;
+        }
+        if (score > 0 && chatId && t.chat_id === chatId) score += 2;
+        if (score > 0) scored.push({ t, files, score });
+      }
+      scored.sort((a, b) => b.score - a.score || b.t.updated_at.localeCompare(a.t.updated_at));
+      const top = scored.slice(0, 3).map(({ t, files }) => {
+        const m = memoryFacts(runner.memoryInput(t.id));
+        return {
+          ...brief(t),
+          round: t.round,
+          files: files.slice(0, 15),
+          memory: m.memory,
+          ...(m.warmUntil ? { warm_until: m.warmUntil } : {}),
+          memory_full_pct: m.contextPct,
+          model: m.model,
+          cost_to_continue: m.continueUsd !== null ? `about $${m.continueUsd.toFixed(2)}` : `about ${Math.round(m.continueWeight / 1000)}k token-equivalents`,
+          cost_of_new_card: m.freshUsd !== null ? `about $${m.freshUsd.toFixed(2)}` : `about ${Math.round(m.freshWeight / 1000)}k token-equivalents`,
+          routes: m.can,
+          recommended: m.recommendation,
+          why: m.why,
+        };
+      });
+      return text({
+        cards: top,
+        note: top.length
+          ? "Routes: steer / add_to_round / new_round / fork go through board_continue_task; fresh is board_create_task with follows set. Take the recommended route unless the request is clearly not the same work."
+          : "No card on this board matches: make a new card.",
+      });
+    },
+
+    /**
+     * Sends a follow-up where the memory is (D375, D376): steer or add_to_round as a message to the card's
+     * coder, new_round on a done card, fork into a new card that starts with a copy of its memory.
+     */
+    async continueTask(args: { task_id: string; how: "steer" | "add_to_round" | "new_round" | "fork"; request: string; title?: string; review?: boolean }) {
+      const t = mine(args.task_id);
+      if (!t) return fail(`No card ${args.task_id} in this project.`);
+      const ask = args.request.trim();
+      if (!ask) return fail("The request is empty.");
+      const facts = memoryFacts(runner.memoryInput(t.id));
+      if (!facts.can.includes(args.how)) {
+        return fail(`"${t.title}" cannot take ${args.how.replace("_", " ")} now: ${facts.why} Routes open: ${facts.can.join(", ") || "none"}.`);
+      }
+      try {
+        if (args.how === "steer" || args.how === "add_to_round") {
+          runner.chat(t.id, ask);
+          onCard({ id: t.id, title: t.title, action: "messaged" });
+          return text({ sent: true, card: brief(t), note: args.how === "steer" ? "It is running and takes this at its next step." : "Its coder is on it now; the change joins the work waiting for the user's review. Say so, and that they approve it all together." });
+        }
+        if (args.how === "new_round") {
+          const r = await runner.startRound(t.id, ask, { review: args.review });
+          publish(r);
+          onCard({ id: r.id, title: r.title, action: "continued" });
+          return text({ round: r.round, card: brief(r), note: `Round ${r.round} is queued on "${r.title}": its coder continues with what it remembers (${facts.memory === "warm" ? "its memory is warm, so it is cheap" : "its memory had cooled; it re-reads it once"}). Say so in one line, and that it lands on its own Approve.` });
+        }
+        const f = await runner.forkTask(t.id, { title: args.title ?? "", request: ask, chatId, review: args.review });
+        onCard({ id: f.id, title: f.title, action: "forked" });
+        return text({ created: brief(f), note: `A new card "${f.title}" started with a copy of "${t.title}"'s coder memory, in its own folder. Say so in one line.` });
+      } catch (err) {
+        return fail(`Could not continue "${t.title}": ${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+
+    /**
      * Says something to a card's own Claude session: a running stage gets it at its next step, a
      * finished or failed one continues its session with it. A card that never ran has no session.
      */
@@ -423,6 +523,16 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
     memory() {
       return text({ memory: repo.notes(projectId).map((n) => ({ kind: n.kind, text: n.text })) });
     },
+
+    /**
+     * A lesson the user asked to keep: every later card in this project starts with it (D379). Written as
+     * the user's own note, so it keeps its place in prompts like the lessons the board learned (D307).
+     */
+    remember(args: { text: string }) {
+      const note = repo.addNote({ project_id: projectId, text: args.text, source: "user", kind: "lesson" });
+      if (!note) return fail("That is too short to be worth remembering: say it in a full sentence.");
+      return text({ remembered: note.text, note: "Saved to the project's memory: every later card starts with it. The user can read, change or delete it on the Memory page." });
+    },
   };
 }
 
@@ -443,7 +553,7 @@ export function createChatBoardServer(deps: ChatBoardDeps, projectId: string, ch
     version: "1.0.0",
     alwaysLoad: true,
     instructions:
-      "This project's Claude Kanban board. List and read cards and how their runs are going, create cards for work to be done, edit Backlog cards, queue or schedule them, and talk to a card's own Claude session (message it, answer its question, stop it, retry it).",
+      "This project's Claude Kanban board. List and read cards and how their runs are going, create cards for work to be done, send follow-ups to the card that did the work (by what it remembers), edit Backlog cards, queue or schedule them, and talk to a card's own Claude session (message it, answer its question, stop it, retry it).",
     tools: [
       tool("board_list_tasks", "List the cards on this project's board with a count per status. Done cards are only counted unless you ask for status \"done\".",
         { status: z.enum(TASK_STATUSES as [string, ...string[]]).optional() }, async (a) => h.listTasks(a)),
@@ -463,8 +573,23 @@ export function createChatBoardServer(deps: ChatBoardDeps, projectId: string, ch
           live: z.boolean().optional().describe("The card changes a live system (an ERP, a production database, a payment API): it then waits for the user's OK on its plan."),
           own_branch: z.boolean().optional().describe("Supervised only: work on its own branch, landing when the user approves."),
           depends_on: z.array(z.string()).max(10).optional().describe("Ids of cards that must be done first. It can be started at once: it waits for them, then starts by itself with their results."),
+          follows: z.string().optional().describe("The id of an earlier card this one follows on from, when board_related_cards recommends a fresh card: it is told what that card did and which files it changed."),
         },
         async (a) => h.createTask(a)),
+      tool("board_related_cards",
+        "Before making a change card, find the cards this request is about and what each one remembers: whether its coder's memory is warm, how full it is, what continuing costs against a new card, the routes open and the board's recommendation. Pass the user's request and any project files you looked at for it.",
+        { request: z.string().min(1).max(4000), files: z.array(z.string()).max(40).optional() },
+        async (a) => h.relatedCards(a)),
+      tool("board_continue_task",
+        "Send a follow-up to the card that did the work, by a route board_related_cards offered: steer (it is running), add_to_round (it waits in review: the change joins its unapproved work), new_round (it is done: its coder continues with what it remembers, landing on its own approval), fork (a new card that starts with a copy of its memory, for new work beside it). request is what to do, in the user's terms. review: true for new work rather than a small change.",
+        {
+          task_id: z.string(),
+          how: z.enum(["steer", "add_to_round", "new_round", "fork"]),
+          request: z.string().min(1).max(8000),
+          title: z.string().max(200).optional().describe("fork only: the new card's title."),
+          review: z.boolean().optional(),
+        },
+        async (a) => h.continueTask(a)),
       tool("board_update_task",
         "Change a card that is in Backlog or failed: title, spec, priority, labels, its stages (model and effort per stage), mode, own branch or live. Not while it runs.",
         {
@@ -481,7 +606,7 @@ export function createChatBoardServer(deps: ChatBoardDeps, projectId: string, ch
         { task_id: z.string(), lines: z.number().int().min(1).max(60).optional().describe("How many recent steps to include (default 20).") },
         async (a) => h.taskProgress(a)),
       tool("board_message_task",
-        "Say something to a card's own Claude session. A running card gets it at its next step (steering); a card in review or failed continues its session with it. Only when the user asked you to tell the task something.",
+        "Say something to a card's own Claude session that is not a piece of work: a question about what it did, or a word the user asked you to pass on. A running card gets it at its next step; a card in review or failed continues its session with it. For work, use board_continue_task.",
         { task_id: z.string(), text: z.string().min(1).max(8000) }, async (a) => h.messageTask(a)),
       tool("board_answer_question",
         "Answer a question a card asked the user (open_questions or waiting_on_question in board_task_progress, or one posted in this chat). Only with an answer the user gave you. " +
@@ -494,6 +619,9 @@ export function createChatBoardServer(deps: ChatBoardDeps, projectId: string, ch
       tool("board_stop_task", "Stop a card that is queued or running. Only when the user asked.", { task_id: z.string() }, async (a) => h.stopTask(a)),
       tool("board_retry_task", "Run a failed card again from the stage that failed. Only when the user asked.", { task_id: z.string() }, async (a) => h.retryTask(a)),
       tool("board_memory", "Read what the board remembers about this project: decisions and conventions from earlier tasks.", {}, async () => h.memory()),
+      tool("board_remember",
+        "Save one lesson to the project's memory, so every later card starts with it. Only when the user asks you to remember something (\"remember: buttons use the brand blue\", \"from now on…\"). One plain sentence, in the user's terms.",
+        { text: z.string().min(8).max(400) }, async (a) => h.remember(a)),
     ],
   });
 }

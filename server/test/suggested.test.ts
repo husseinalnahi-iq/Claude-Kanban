@@ -123,7 +123,7 @@ test("a skill installs only its own folder, from the pinned commit, with the boa
     assert.ok(!existsSync(dest));
     assert.equal((await m.card("systematic-debugging")).status, "not-installed");
   } finally {
-    m.cleanup();
+    await m.cleanup();
   }
 });
 
@@ -138,7 +138,7 @@ test("the board never removes or overwrites a skill folder it did not put there"
     assert.throws(() => m.s.install("test-driven-development"), /already installed/);
     assert.equal(readFileSync(join(mine, "SKILL.md"), "utf8").includes("my own edits"), true);
   } finally {
-    m.cleanup();
+    await m.cleanup();
   }
 });
 
@@ -151,7 +151,7 @@ test("a skill that came inside another plugin shows as installed elsewhere", asy
     writeFileSync(join(m.claude, "plugins", "installed_plugins.json"), JSON.stringify({ plugins: { "superpowers@sp": [{ installPath: at }] } }));
     assert.equal((await m.card("verification-before-completion")).status, "installed-elsewhere");
   } finally {
-    m.cleanup();
+    await m.cleanup();
   }
 });
 
@@ -172,7 +172,7 @@ test("a plugin installs from its marketplace for the user, and Remove uninstalls
     assert.equal(m.calls.at(-1), "claude-bin plugin uninstall ponytail@ponytail --scope user");
     assert.equal((await m.card("ponytail")).status, "not-installed");
   } finally {
-    m.cleanup();
+    await m.cleanup();
   }
 });
 
@@ -188,7 +188,7 @@ test("a plugin with no skills is switched on and off from its card, in the user'
     assert.equal((await m.s.setEnabled("context7-plugin", true)).enabled, true);
     await assert.rejects(m.s.setEnabled("ponytail", false), /Skills list/);
   } finally {
-    m.cleanup();
+    await m.cleanup();
   }
 });
 
@@ -205,7 +205,7 @@ test("the starter pack installs what is missing, one after another, and skips wh
     for (const id of queued) assert.equal((await m.card(id)).status, "installed", id);
     assert.deepEqual(m.s.installStarter(), [], "a second click has nothing left to do");
   } finally {
-    m.cleanup();
+    await m.cleanup();
   }
 });
 
@@ -219,7 +219,7 @@ test("a failed install shows the end of its output on the card and leaves nothin
     assert.match(c.error ?? "", /exit code 1/);
     assert.ok(!existsSync(join(m.claude, "skills", "react-best-practices")));
   } finally {
-    m.cleanup();
+    await m.cleanup();
   }
 });
 
@@ -234,7 +234,7 @@ test("playwright-cli installs its command first, and Remove leaves that command 
     await m.settled();
     assert.ok(!m.calls.some((c) => c.startsWith("npm uninstall")));
   } finally {
-    m.cleanup();
+    await m.cleanup();
   }
 });
 
@@ -246,8 +246,8 @@ test("a card names the programs it needs that this computer lacks", async () => 
     assert.deepEqual((await both.card("document-skills")).missing, []);
     assert.deepEqual((await none.card("ponytail")).missing, []);
   } finally {
-    none.cleanup();
-    both.cleanup();
+    await none.cleanup();
+    await both.cleanup();
   }
 });
 
@@ -273,7 +273,7 @@ test("the Suggested list says what kind of project is open, and its actions answ
   } finally {
     await app.close();
     rmSync(proj, { recursive: true, force: true });
-    m.cleanup();
+    await m.cleanup();
   }
 });
 
@@ -300,6 +300,6 @@ test("the Setup row counts the starter pack, says what is installing, and offers
     assert.equal(d.ok, true);
     assert.equal(d.detail, "5 of 5 installed");
   } finally {
-    m.cleanup();
+    await m.cleanup();
   }
 });
