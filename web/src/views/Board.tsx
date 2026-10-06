@@ -21,6 +21,7 @@ import { openTaskOn } from "./TaskDrawer.tsx";
 import { COLUMN_SIZES, setViewPrefs, useViewPrefs } from "../lib/view.ts";
 import { ChecklistLine } from "../components/Checklist.tsx";
 import { phase, stoppedProvider, waitingOn, waitLine, waitsOnYou } from "../lib/phase.ts";
+import { holdLine, mayConflict } from "../../../server/src/engine/footprint.ts";
 
 
 /**
@@ -86,8 +87,11 @@ const Card = memo(function Card({
   asking,
   watching,
   memory,
+  conflictsWith,
 }: {
   card: TaskCard;
+  /** Another working card in its own worktree that changes the same files: both can run, landing the second may conflict (D400). */
+  conflictsWith?: { title: string; files: string[] };
   parentTitle?: string;
   /** What it still waits for: the tasks it depends on that are not done. */
   waiting?: { id: string; title: string; status: TaskStatus }[];
@@ -175,6 +179,8 @@ const Card = memo(function Card({
           <Chip className="border-rose/60 font-semibold text-rose" title={`${card.resolution.error ?? "The conflict could not be resolved safely"} — open the task`}>conflict · needs you</Chip>
         ) : card.conflict_risk && card.status !== "done" ? (
           <Chip className="border-amber/60 text-amber" title={`Would conflict with ${card.conflict_risk.base} in ${card.conflict_risk.files.join(", ")} — open the task to have Claude fix it now`}>will conflict</Chip>
+        ) : conflictsWith ? (
+          <Chip className="border-slate/50 text-slate" title={`“${conflictsWith.title}” changes the same files (${conflictsWith.files.slice(0, 3).join(", ")}). Both can run in their own copies; the second one approved may need its conflicts resolved.`}>may conflict</Chip>
         ) : null}
         {watching ? (
           <button
@@ -217,6 +223,11 @@ const Card = memo(function Card({
       {waiting?.length && (card.status === "queued" || card.status === "backlog") ? (
         <div className={`mt-1.5 line-clamp-2 text-[11.5px] ${waiting.some((w) => w.status === "failed") ? "text-rust" : card.status === "queued" ? "text-slate" : "text-ink-400"}`}>
           ⏳ {waitLine(waiting)}
+        </div>
+      ) : card.hold && card.status === "queued" ? (
+        /* Two tasks that would change the same files or live system take turns (D400). */
+        <div className="mt-1.5 line-clamp-2 text-[11.5px] text-slate" title={card.hold.files.length ? card.hold.files.join("\n") : undefined}>
+          ⏳ {holdLine(card.hold)}
         </div>
       ) : null}
       {IN_PROGRESS.includes(card.status) || card.status === "failed" ? <ChecklistLine list={card.checklist.slice(card.checklist_from)} live={live} /> : null}
@@ -370,6 +381,22 @@ export function Board({ project }: { project: ProjectWithGit }) {
   const titles = useMemo(() => new Map(cards.map((c) => [c.id, c.title])), [cards]);
   const done = useMemo(() => new Set(cards.filter((c) => c.status === "done").map((c) => c.id)), [cards]);
   const byId = useMemo(() => new Map(cards.map((c) => [c.id, c])), [cards]);
+  // Working cards in their own worktrees that will change the same files (D400): one line per card, worked out once per update.
+  const conflicts = useMemo(() => {
+    const working = cards.filter((c) => ["queued", "planning", "running", "approval", "paused", "review"].includes(c.status));
+    const out = new Map<string, { title: string; files: string[] }>();
+    for (const c of working) {
+      for (const o of working) {
+        if (o.id === c.id) continue;
+        const files = mayConflict(c, o);
+        if (files.length) {
+          out.set(c.id, { title: o.title, files });
+          break;
+        }
+      }
+    }
+    return out;
+  }, [cards]);
   // What each finished or waiting card remembers (D374): fetched again when one of them changes.
   const memoryKey = cards.filter((c) => MEMORY_STATUSES.has(c.status)).map((c) => `${c.id}:${c.status}:${c.updated_at}`).join("|");
   const memory = useProjectMemory(project.id, memoryKey);
@@ -586,6 +613,7 @@ export function Board({ project }: { project: ProjectWithGit }) {
                     asking={projectPending.some((a) => a.task_id === c.id && isQuestion(a))}
                     watching={live.has(c.id)}
                     memory={MEMORY_STATUSES.has(c.status) ? memory[c.id] : undefined}
+                    conflictsWith={conflicts.get(c.id)}
                   />
                 ))}
                 {status === "done" && archivedCount ? (

@@ -63,6 +63,20 @@ export class ProviderRegistry {
     });
   }
 
+  /**
+   * An autonomous task in the project folder (D398): another agent's CLI asks no one and passes no gate,
+   * and only a worktree kept it off your own files, so it may not run a code or custom stage there.
+   */
+  assertFolderPipeline(pipeline: Stage[]): void {
+    pipeline.forEach((stage, i) => {
+      if (stage.stage !== "code" && stage.stage !== "custom") return;
+      const res = this.resolve(stage.provider);
+      if (res.adapter.kind === "cli") {
+        throw new ProviderError(`Stage #${i + 1} (${stage.stage}): ${res.label} works without approvals, so it may only change files in a task's own copy (a worktree), and this task works in the project folder. Use a Claude stage, or turn on Settings → "Autonomous tasks work in their own copy".`);
+      }
+    });
+  }
+
   /** Who critiques this plan stage, or null when no debate is wanted. */
   debateFor(stage: Stage, settings: Settings): { provider: string; model: string; effort: Effort } | null {
     if (stage.stage !== "plan" || stage.debate === false) return null;

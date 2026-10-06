@@ -30,7 +30,7 @@ export function RunSetup({ card, project }: { card: Task; project: ProjectWithGi
           blocked={noAuto}
           titles={{
             ask: "Like autonomous, but stops to ask you when your answer changes the result, and waits for it",
-            autonomous: answer ? "Runs in the project's folder and asks nothing; it reads and reports, and changes nothing" : "Works on its own branch without asking; lands when you approve",
+            autonomous: answer ? "Runs in the project's folder and asks nothing; it reads and reports, and changes nothing" : "Works without asking — on its own branch, or in the project folder when Settings say so — and lands when you approve",
             supervised: answer ? "Runs in the project's folder; a command that is not read-only waits for your Allow" : "Works in the project's folder and asks you before each change",
           }}
         />

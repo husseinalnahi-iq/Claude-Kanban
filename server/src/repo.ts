@@ -8,7 +8,7 @@ import type {
   Provider, RunRole, CostSource, TierRef, Schedule, Chat, ChatFile, ChatFolder, ChatMessage, Effort, SpecVersion, ProviderOut, UsageTotals,
   TaskRound,
 } from "./types.ts";
-import { ANTHROPIC_PROVIDER_ID, DEFAULT_MERGE, EMPTY_ENV, HELPER_MODELS, RUN_STYLES, type HelperModel, type RunStyle } from "./types.ts";
+import { ANTHROPIC_PROVIDER_ID, DEFAULT_MERGE, EMPTY_ENV, HELPER_MODELS, RUN_STYLES, type Footprint, type HelperModel, type RunStyle } from "./types.ts";
 import { DEFAULT_CHECKLIST } from "./engine/onboarding.ts";
 import { isImageProvider } from "./engine/images.ts";
 import { runWeight } from "./engine/explore.ts";
@@ -137,6 +137,9 @@ const toTask = (r: Row): Task => ({
   plan_approval: r.plan_approval === null || r.plan_approval === undefined ? null : Number(r.plan_approval) === 1,
   live: Number(r.live ?? 0) === 1,
   own_branch: Number(r.own_branch ?? 0) === 1,
+  in_folder: Number(r.in_folder ?? 0) === 1,
+  footprint: { files: [], systems: [], touched: [], ...json<Partial<Footprint>>(r.footprint_json, {}) },
+  hold: json<Task["hold"]>(r.hold_json, null),
   may_ask: Number(r.may_ask ?? 0) === 1,
   setup_pending: Number(r.setup_pending ?? 0) === 1,
   chat_id: (r.chat_id as string) ?? null,
@@ -378,6 +381,8 @@ function setClause(patch: Record<string, unknown>, columns: Record<string, (v: u
       : k === "checkout" ? "checkout_json"
       : k === "resolution" ? "resolution_json"
       : k === "conflict_risk" ? "conflict_risk_json"
+      : k === "footprint" ? "footprint_json"
+      : k === "hold" ? "hold_json"
       : k === "days" ? "days_json"
       : k;
     sets.push(`${col} = ?`);
@@ -416,6 +421,9 @@ const TASK_COLUMNS: Record<string, (v: unknown) => SQLInputValue> = {
   plan_approval: (v) => (v === null || v === undefined ? null : v ? 1 : 0),
   live: (v) => (v ? 1 : 0),
   own_branch: (v) => (v ? 1 : 0),
+  in_folder: (v) => (v ? 1 : 0),
+  footprint: js,
+  hold: js,
   may_ask: (v) => (v ? 1 : 0),
   setup_pending: (v) => (v ? 1 : 0),
   chat_id: str,
@@ -572,6 +580,7 @@ export class Repo {
       loadUserPlugins: (m.get("loadUserPlugins") ?? "true") !== "false",
       claudeAutoMemory: m.get("claudeAutoMemory") === "true",
       autonomousLive: (m.get("autonomousLive") ?? "true") !== "false",
+      autonomousWorktree: (m.get("autonomousWorktree") ?? "true") !== "false",
       browserChecks: (m.get("browserChecks") ?? "true") !== "false",
       chromeInSupervised: m.get("chromeInSupervised") === "true",
       taskBrowser: m.get("taskBrowser") === "chrome" ? "chrome" : "board",

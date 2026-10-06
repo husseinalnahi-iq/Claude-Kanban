@@ -23,7 +23,7 @@ export const SAFE_MCP_PREFIXES = ["mcp__board__", "mcp__plugin_context7_context7
 
 const SHELL_TOOLS = new Set(["Bash", "PowerShell"]);
 
-const PATH_KEYS: Record<string, string> = {
+export const PATH_KEYS: Record<string, string> = {
   Edit: "file_path",
   MultiEdit: "file_path",
   Write: "file_path",
@@ -35,6 +35,13 @@ const ALLOWED_GIT = new Set([
   "status", "diff", "log", "show", "add", "commit", "ls-files", "grep", "blame", "rev-parse", "describe",
   "shortlog", "cat-file", "check-ignore", "mv", "rm", "apply", "help", "version", "--version",
 ]);
+/**
+ * In the project folder (D398) git only looks: staging or committing would mix the task's work into
+ * the owner's own index and history, and the board commits the task's files itself on Approve.
+ */
+const FOLDER_GIT = new Set([...ALLOWED_GIT].filter((sub) => !["add", "commit", "mv", "rm", "apply"].includes(sub)));
+/** A word naming the folder's .git or the board's .kanban (other tasks' copies live there). `.gitignore` is not one. */
+const BOARD_FOLDERS = /(^|[\s"'=/\\])\.(git|kanban)(?=[/\\\s"';|&)]|$)/i;
 /** Global git options that point git at a different repo or work tree. */
 const RETARGET = /^(-C|--git-dir|--work-tree|--namespace)(=|$)/;
 
@@ -710,7 +717,8 @@ function outsidePath(c: Pick<ShellCommand, "words" | "redirect" | "heredocs">, c
 }
 
 /** Every `git` in the words, not just the first: `git status & git push` is two of them. */
-function gitViolation(words: string[]): string | null {
+function gitViolation(words: string[], folder = false): string | null {
+  const allowed = folder ? FOLDER_GIT : ALLOWED_GIT;
   for (let at = 0; at < words.length; at++) {
     // `g\it` is `git` to bash; on Windows so is `Git.EXE`.
     if (programOf(words[at]) !== "git" && programOf(words[at].replace(/\\/g, "")) !== "git") continue;
@@ -721,20 +729,28 @@ function gitViolation(words: string[]): string | null {
       i++;
     }
     const sub = words[i];
-    if (sub && !ALLOWED_GIT.has(sub)) return `\`git ${sub}\` is managed by the board (allowed: ${[...ALLOWED_GIT].slice(0, 12).join(", ")}…)`;
+    if (sub && !allowed.has(sub)) {
+      return folder
+        ? `\`git ${sub}\` would change your own repository; in the project folder git only looks (status, diff, log…), and the board commits this task's files when it is approved`
+        : `\`git ${sub}\` is managed by the board (allowed: ${[...ALLOWED_GIT].slice(0, 12).join(", ")}…)`;
+    }
   }
   return null;
 }
 
 const MAX_NESTING = 3;
 
-/** Returns why a shell command is not allowed in an autonomous worktree, or null when it is fine. */
-export function shellViolation(cmd: string, cwd: string, shell: ShellFlavour = "bash"): string | null {
-  return violationIn(cmd, cwd, shell, 0);
+/**
+ * Returns why a shell command is not allowed in an autonomous worktree, or null when it is fine.
+ * `folder`: the task works in the project folder itself (D398) — git only looks, and .git and .kanban are off limits.
+ */
+export function shellViolation(cmd: string, cwd: string, shell: ShellFlavour = "bash", folder = false): string | null {
+  return violationIn(cmd, cwd, shell, 0, folder);
 }
 
-function violationIn(cmd: string, cwd: string, shell: ShellFlavour, depth: number): string | null {
+function violationIn(cmd: string, cwd: string, shell: ShellFlavour, depth: number, folder = false): string | null {
   if (depth > MAX_NESTING) return "it wraps one command inside another too many times for the board to check";
+  if (folder && BOARD_FOLDERS.test(cmd)) return "it reaches into .git or .kanban, which hold your repository's history and other tasks' copies";
   if (TRAVERSAL.test(cmd)) return "it walks out of the worktree with `..`";
   if (HOME_REF.test(cmd)) return "it references your home directory";
   const windows = isWindowsPath(cwd);
@@ -761,12 +777,12 @@ function violationIn(cmd: string, cwd: string, shell: ShellFlavour, depth: numbe
     if (away) return away;
     const out = outsidePath(c, cwd, false);
     if (out) return `it touches ${out}, outside the worktree`;
-    const git = gitViolation(c.words);
+    const git = gitViolation(c.words, folder);
     if (git) return git;
     const inner = innerScripts(c);
     if (inner.opaque) return `it runs ${inner.opaque}, which the board cannot read`;
     for (const s of inner.scripts) {
-      const why = violationIn(s.text, cwd, s.flavour, depth + 1);
+      const why = violationIn(s.text, cwd, s.flavour, depth + 1, folder);
       if (why) return why;
     }
   }
@@ -1241,7 +1257,31 @@ export function isReadOnlyShell(cmd: string, cwd: string): boolean {
 }
 
 /** Permission gate for autonomous runs (no human watching). See docs/DECISIONS.md D6/D19. */
-export function autonomousGate(toolName: string, input: Record<string, unknown>, cwd: string, readRoots: string[] = [], opts: { markitdown?: boolean } = {}): GateResult {
+export function autonomousGate(toolName: string, input: Record<string, unknown>, cwd: string, readRoots: string[] = [], opts: { markitdown?: boolean; folder?: boolean } = {}): GateResult {
+  if (!opts.folder) return worktreeGate(toolName, input, cwd, readRoots, opts);
+  // In the project folder (D398): the same walls, worded for the folder, plus its .git and the board's
+  // .kanban (other tasks' copies) are off limits, and git only looks.
+  const decision = worktreeGate(toolName, input, cwd, readRoots, opts);
+  if (decision.behavior === "deny") return { behavior: "deny", message: decision.message.replace(/the task worktree|the worktree/g, "the project folder") };
+  const windows = isWindowsPath(cwd);
+  const denied = [".git", ".kanban"].map((d) => pathsFor(cwd).join(cwd, d));
+  for (const key of [...(READ_PATH_KEYS[toolName] ?? []), PATH_KEYS[toolName]]) {
+    const raw = key ? input[key] : undefined;
+    if (typeof raw !== "string" || !raw.trim()) continue;
+    const p = normalizeShellPath(key === "pattern" ? raw.replace(/[*?[{].*$/, "") || raw : raw, windows);
+    const abs = pathsFor(cwd).isAbsolute(p) ? p : pathsFor(cwd).join(cwd, p);
+    if (denied.some((d) => inside(d, abs))) {
+      return { behavior: "deny", message: `Autonomous runs in the project folder stay out of .git and .kanban (your repository's history and other tasks' copies); refused ${raw}.` };
+    }
+  }
+  if (SHELL_TOOLS.has(toolName)) {
+    const why = shellViolation(String(input.command ?? ""), cwd, toolName === "PowerShell" ? "powershell" : "bash", true);
+    if (why) return { behavior: "deny", message: `Refused because ${why}. Autonomous runs stay inside ${cwd}.`.replace(/the worktree/g, "the project folder") };
+  }
+  return decision;
+}
+
+function worktreeGate(toolName: string, input: Record<string, unknown>, cwd: string, readRoots: string[], opts: { markitdown?: boolean }): GateResult {
   if (opts.markitdown && toolName === MARKITDOWN_TOOL) {
     const read = markitdownRead(input, cwd, readRoots);
     return read.ok ? { behavior: "allow", updatedInput: input } : { behavior: "deny", message: read.message };

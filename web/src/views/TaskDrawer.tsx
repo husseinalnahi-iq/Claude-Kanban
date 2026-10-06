@@ -30,7 +30,7 @@ import { CostPanel } from "../components/CostPanel.tsx";
 import { PlanGate } from "../components/PlanGate.tsx";
 import { SafetyOptions } from "../components/SafetyOptions.tsx";
 import { OutOfUsage } from "../components/OutOfUsage.tsx";
-import { autonomousBlocked, branchBlocked, lookupAutoBlocked, NewTaskForm } from "../components/forms.tsx";
+import { autonomousBlocked, autonomousInFolder, branchBlocked, lookupAutoBlocked, NewTaskForm } from "../components/forms.tsx";
 import { AlwaysAllow } from "../components/AlwaysAllow.tsx";
 import { isAnswerPipeline } from "../../../server/src/engine/answer.ts";
 import { useAsk } from "../components/Ask.tsx";
@@ -281,6 +281,10 @@ function SpecTab({ d }: { d: TaskDetail }) {
                 <div className="text-amber">{t.branch}</div>
                 <div className="truncate text-ink-500" title={t.worktree_path ?? ""}>{t.worktree_path}</div>
               </>
+            ) : t.in_folder ? (
+              "the project folder itself"
+            ) : t.mode === "autonomous" && !t.own_branch && !isAnswerPipeline(t.pipeline) && project && autonomousInFolder(project, settings) ? (
+              blocked ? <span className="text-rust">{blocked}</span> : "the project folder itself (no worktree)"
             ) : t.mode === "autonomous" || t.own_branch ? (
               blocked ? <span className="text-rust">{blocked}</span> : "worktree created on first run"
             ) : (
@@ -731,13 +735,17 @@ function Actions({ d }: { d: TaskDetail }) {
   const { busy, error, setError, run } = useAction();
   const dialog = useAsk();
   const [stageIdx, setStageIdx] = useState<number | "">("");
-  const hasWork = !!(t.branch || t.worktree_path);
+  // A task in the project folder has work to discard once it has written something (D398).
+  const hasWork = !!(t.branch || t.worktree_path || (t.in_folder && t.footprint.touched.length));
+  const inFolder = t.in_folder && !t.branch;
+  const { projects } = useAppData();
+  const isGit = projects.find((p) => p.id === t.project_id)?.isGit ?? true;
   const live = d.busy;
   const retry = () => run(() => api.retry(t.id, stageIdx === "" ? undefined : stageIdx));
   const reject = async () => {
     const note = await dialog.ask({
       title: "Send it back",
-      message: "Why? The reason stays on the card and the next run is told it before anything else. The worktree is kept.",
+      message: `Why? The reason stays on the card and the next run is told it before anything else. ${inFolder ? "Its changes stay in the project folder." : "The worktree is kept."}`,
       input: { placeholder: "What's wrong or missing" },
       confirmLabel: "Reject",
       danger: true,
@@ -753,7 +761,10 @@ function Actions({ d }: { d: TaskDetail }) {
     });
   };
   const discard = async () => {
-    if (await dialog.confirm({ title: `Discard ${t.branch ?? "this work"}?`, message: "Removes the worktree and deletes the branch with its changes. The card and its note stay.", confirmLabel: "Discard", danger: true })) {
+    const message = inFolder
+      ? "Puts back every file this task changed in the project folder, as it found them, and deletes the files it created. The card and its note stay."
+      : "Removes the worktree and deletes the branch with its changes. The card and its note stay.";
+    if (await dialog.confirm({ title: `Discard ${t.branch ?? "this work"}?`, message, confirmLabel: "Discard", danger: true })) {
       await run(() => api.discard(t.id));
     }
   };
@@ -812,8 +823,13 @@ function Actions({ d }: { d: TaskDetail }) {
         ) : null}
         {t.status === "review" && !live ? (
           <>
-            <Button variant="go" busy={busy} onClick={() => run(() => api.approve(t.id))} title={t.mode === "autonomous" ? `Merge ${t.branch} --no-ff into the project's current branch` : "Mark done"}>
-              ✓ Approve{t.mode === "autonomous" && t.branch ? " & merge" : ""}
+            <Button
+              variant="go"
+              busy={busy}
+              onClick={() => run(() => api.approve(t.id))}
+              title={inFolder ? (isGit ? "Commit exactly the files this task changed, on your current branch" : "Mark done") : t.branch ? `Merge ${t.branch} --no-ff into the project's current branch` : "Mark done"}
+            >
+              ✓ Approve{inFolder && isGit ? " & commit" : t.branch ? " & merge" : ""}
             </Button>
             <Button busy={busy} onClick={() => void reject()}>Reject</Button>
           </>

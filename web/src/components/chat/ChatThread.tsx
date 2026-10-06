@@ -423,7 +423,7 @@ export function ChatThread({
                   label="How cards from this chat run"
                   titles={{
                     ask: "Cards this chat makes work like autonomous, but when one needs your answer it stops and asks you — here in the chat, on the card and in a pop-up — and waits. Click an answer, or just tell Claude.",
-                    autonomous: "Cards this chat makes work on their own branch without asking, and the work lands when you approve it. Say “supervised” in a message to make one card the other way. A lookup card runs in the project's own folder and asks nothing (it changes nothing), unless the project keeps autonomous in a sandbox.",
+                    autonomous: "Cards this chat makes work without asking — on their own branch, or in the project folder when Settings say so — and the work lands when you approve it. Say “supervised” in a message to make one card the other way. A lookup card runs in the project's own folder and asks nothing (it changes nothing), unless the project keeps autonomous in a sandbox.",
                     supervised: "Cards this chat makes work in the project's own folder and ask you before each change; “Always allow” on a card stops the asking for that command. Say “autonomous” in a message to make one card the other way.",
                   }}
                 />

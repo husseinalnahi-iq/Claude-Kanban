@@ -136,7 +136,7 @@ export function ResultPanel({ d }: { d: TaskDetail }) {
       </div>
       {work?.result_md?.trim() ? <div className="max-h-[420px] overflow-auto px-3 py-2"><Markdown text={work.result_md} /></div> : null}
       {v?.reason ? <div className="border-t border-ink-800 px-3 py-1.5 text-[12px] text-ink-400">Review: {v.reason}</div> : null}
-      {d.task.mode === "supervised" && d.task.checkout?.touched?.length ? (
+      {(d.task.mode === "supervised" || d.task.in_folder) && d.task.checkout?.touched?.length ? (
         <details className="border-t border-ink-800 px-3 py-1.5 text-[12px] text-ink-400">
           <summary className="cursor-pointer hover:text-ink-200">
             {d.task.checkout.touched.length} file{d.task.checkout.touched.length === 1 ? "" : "s"} changed while this ran — uncommitted, in your checkout
@@ -144,7 +144,9 @@ export function ResultPanel({ d }: { d: TaskDetail }) {
           <ul className="mt-1 space-y-0.5 font-mono text-[11px] text-ink-300">
             {d.task.checkout.touched.map((f) => <li key={f}>{f}</li>)}
           </ul>
-          <div className="mt-1 text-[11px] text-ink-500">Commit these, and only these, for this task. Files that were already uncommitted before it started are left out.</div>
+          <div className="mt-1 text-[11px] text-ink-500">
+            {d.task.mode === "autonomous" ? "Approve commits these, and only these." : "Commit these, and only these, for this task."} Files that were already uncommitted before it started are left out.
+          </div>
         </details>
       ) : null}
     </div>
@@ -203,10 +205,10 @@ export function QuestionsPanel({ d }: { d: TaskDetail }) {
   );
 }
 
-/** A supervised run shares your checkout: say what was already uncommitted when it started (D204). */
+/** A run in the project folder shares your checkout: say what was already uncommitted when it started (D204, D398). */
 export function CheckoutNote({ d }: { d: TaskDetail }) {
   const c = d.task.checkout;
-  if (d.task.mode !== "supervised" || !c?.dirtyAtStart.length) return null;
+  if ((d.task.mode !== "supervised" && !d.task.in_folder) || !c?.dirtyAtStart.length) return null;
   return (
     <details className="rounded-lg border border-slate/40 bg-slate/5 px-3 py-2 text-[12px] text-slate">
       <summary className="cursor-pointer">

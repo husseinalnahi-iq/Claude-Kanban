@@ -10,6 +10,7 @@ import { QUESTION_TOOL, type TaskRunner } from "./runner.ts";
 import type { Scheduler } from "./scheduler.ts";
 import { answerStage, isAnswerPipeline, stageLabel } from "./answer.ts";
 import { findClaudeModel, resolveClaudeModel } from "./claudeModels.ts";
+import { filesOf, holdLine } from "./footprint.ts";
 
 type Card = NonNullable<ChatMessage["meta"]["cards"]>[number];
 
@@ -17,6 +18,17 @@ const text = (value: unknown) => ({
   content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }],
 });
 const fail = (message: string) => ({ ...text(message), isError: true });
+const FILES_ARG = z.array(z.string()).max(60).optional().describe("Project files (or folders, ending in /) this card will change, as paths from the project's top. The board keeps cards changing the same files from running at the same time in one folder.");
+const SYSTEMS_ARG = z.array(z.string()).max(10).optional().describe("Live systems this card will write to, by name (for example \"the ERP\", \"the payments database\"). Two cards writing to the same one take turns.");
+/** One sentence on what a card overlaps with, for the chat to pass on; empty when nothing does (D400). */
+function overlapNote(found: { title: string; waits: boolean; files: string[]; systems: string[]; unknown: boolean }[]): string {
+  const waits = found.filter((f) => f.waits);
+  const later = found.filter((f) => !f.waits);
+  const parts: string[] = [];
+  if (waits.length) parts.push(`When started, it will wait for ${waits.map((f) => holdLine({ ...f }).replace(/^Waits for /, "")).join("; ")}. Tell the user it will take its turn.`);
+  if (later.length) parts.push(`It changes the same files as ${later.map((f) => `“${f.title}” (${f.files.slice(0, 2).join(", ")})`).join(", ")}: both can run, but the second to be approved may need its conflicts resolved.`);
+  return parts.join(" ");
+}
 /** "answer · claude-sonnet-5-5 · medium": how a card will run, in one line the model reads cheaply. */
 export const pipelineLine = (p: Stage[]) => p.map((s) => `${stageLabel(s)} · ${s.model} · ${s.effort}`).join(" → ");
 const brief = (t: Task) => ({
@@ -25,6 +37,10 @@ const brief = (t: Task) => ({
   ...(t.live ? { live: true } : {}),
   ...(t.own_branch ? { own_branch: true } : {}),
   ...(t.mode === "autonomous" && t.may_ask ? { asks_user: true } : {}),
+  // What it changes and is waiting for, so a new card can be kept off the same files (D400).
+  ...(filesOf(t.footprint).length ? { files: filesOf(t.footprint).slice(0, 12) } : {}),
+  ...(t.footprint.systems.length ? { live_systems: t.footprint.systems } : {}),
+  ...(t.hold && t.status === "queued" ? { waits_for: holdLine(t.hold) } : {}),
   // Only when there is one, so a quiet board stays a short list.
   ...(t.questions.some((q) => !q.answer) ? { open_questions: t.questions.filter((q) => !q.answer).length } : {}),
 });
@@ -153,7 +169,7 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
 
     createTask(args: {
       title: string; spec_md: string; type?: string; priority?: string; mode?: RunStyle; depends_on?: string[];
-      stages?: StageArg[]; live?: boolean; own_branch?: boolean; follows?: string;
+      stages?: StageArg[]; live?: boolean; own_branch?: boolean; follows?: string; files?: string[]; live_systems?: string[];
     }) {
       const follows = args.follows ? mine(args.follows) : undefined;
       if (args.follows && !follows) return fail(`No card ${args.follows} in this project.`);
@@ -192,7 +208,12 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
         // A card with a plan waits for the user to see its mode and models on its setup card (D365).
         setup_pending: repo.getSettings().confirmSetup && pipeline.some((s) => s.stage === "plan"),
       });
-      publish(t);
+      // What the chat expects it to change: the queue keeps it off cards changing the same things (D400).
+      const made = args.files?.length || args.live_systems?.length
+        ? repo.updateTask(t.id, { footprint: { files: (args.files ?? []).slice(0, 60), systems: (args.live_systems ?? []).slice(0, 10), touched: [] } })
+        : t;
+      publish(made);
+      const overlaps = runner.overlapsWith(projectId, made, made.id);
       // The same intake a card made on the board gets — type and labels — but what was settled here with
       // the user is not offered back as a second opinion (D286).
       if (repo.getSettings().autoTriage) {
@@ -202,7 +223,7 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
       const downgraded = wanted === "autonomous" && mode === "supervised";
       const asks = t.mode === "autonomous" && t.may_ask;
       return text({
-        created: brief(t),
+        created: brief(made),
         note: [
           answer
             ? `An answer card: one stage that reads and reports, and it lands in Done with its answer. ${mode === "autonomous" ? "It runs autonomous: in the project's own folder, and nothing is asked." : "It runs supervised: a command that is not read-only waits for the user's Allow."} Start it now if the user asked for the result.`
@@ -210,15 +231,30 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
               ? "It is in Backlog with its setup card. Tell the user, in a short list, the mode it will run in and each step's model and effort, and say they can change any of them on the card and press Start there. Do not start it yourself: board_queue_task waits for that Start."
               : "It is in Backlog. Tell the user how it will run (mode, and why) and offer to start it now or schedule it.",
           asks ? "It is Autonomous + asks me: when it needs the user's answer it stops, and its question appears in this chat, where the user can click an answer or tell you; pass what they say on with board_answer_question." : "",
+          overlapNote(overlaps),
           downgraded ? (answer ? "This project keeps autonomous inside a sandbox, which a lookup cannot work from, so it is supervised. Full access is a switch in the project's settings." : "This project does not allow autonomous runs, so it is supervised.") : "",
           "Its result is posted into this chat when it finishes.",
         ].filter(Boolean).join(" "),
       });
     },
 
+    overlaps(args: { files?: string[]; live_systems?: string[]; live?: boolean; mode?: RunStyle }) {
+      const project = repo.getProject(projectId)!;
+      const style = args.mode ?? (chatId ? repo.getChat(chatId)?.mode : undefined) ?? repo.getSettings().defaultRunStyle;
+      const mode = allowedMode(project, runStyleFields(style).mode);
+      const card = {
+        mode,
+        in_folder: mode === "autonomous" && (!repo.getSettings().autonomousWorktree || project.policy.worktrees === "forbidden"),
+        live: Boolean(args.live || args.live_systems?.length),
+        footprint: { files: args.files ?? [], systems: args.live_systems ?? [], touched: [] },
+      };
+      const found = runner.overlapsWith(projectId, card);
+      return text({ overlaps: found, note: overlapNote(found) || "Nothing working now changes the same files or live systems: it can run alongside." });
+    },
+
     updateTask(args: {
       task_id: string; title?: string; spec_md?: string; priority?: string; labels?: string[];
-      stages?: StageArg[]; mode?: RunStyle; own_branch?: boolean; live?: boolean;
+      stages?: StageArg[]; mode?: RunStyle; own_branch?: boolean; live?: boolean; files?: string[]; live_systems?: string[];
     }) {
       const t = mine(args.task_id);
       if (!t) return fail(`No card ${args.task_id} in this project.`);
@@ -249,6 +285,9 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
         may_ask: asked ? allowed === "autonomous" && asked.may_ask : undefined,
         own_branch: ownBranch,
         live: answer ? (t.live ? false : undefined) : args.live,
+        footprint: args.files || args.live_systems
+          ? { ...t.footprint, ...(args.files ? { files: args.files.slice(0, 60) } : {}), ...(args.live_systems ? { systems: args.live_systems.slice(0, 10) } : {}) }
+          : undefined,
       });
       // What the user just settled here replaces what triage offered for the same thing.
       if (updated.suggestion && (pipeline || args.live !== undefined)) updated = runner.dismissSuggestion(t.id, { pipeline: Boolean(pipeline), live: args.live !== undefined });
@@ -574,8 +613,14 @@ export function createChatBoardServer(deps: ChatBoardDeps, projectId: string, ch
           own_branch: z.boolean().optional().describe("Supervised only: work on its own branch, landing when the user approves."),
           depends_on: z.array(z.string()).max(10).optional().describe("Ids of cards that must be done first. It can be started at once: it waits for them, then starts by itself with their results."),
           follows: z.string().optional().describe("The id of an earlier card this one follows on from, when board_related_cards recommends a fresh card: it is told what that card did and which files it changed."),
+          files: FILES_ARG,
+          live_systems: SYSTEMS_ARG,
         },
         async (a) => h.createTask(a)),
+      tool("board_overlaps",
+        "Before making or starting a change card, check which working cards it would wait for (the same files in the project folder, or the same live system) or might conflict with when both land. Pass the files and live systems it will change.",
+        { files: FILES_ARG, live_systems: SYSTEMS_ARG, live: z.boolean().optional(), mode: z.enum(RUN_STYLES as [RunStyle, ...RunStyle[]]).optional() },
+        async (a) => h.overlaps(a)),
       tool("board_related_cards",
         "Before making a change card, find the cards this request is about and what each one remembers: whether its coder's memory is warm, how full it is, what continuing costs against a new card, the routes open and the board's recommendation. Pass the user's request and any project files you looked at for it.",
         { request: z.string().min(1).max(4000), files: z.array(z.string()).max(40).optional() },
@@ -595,6 +640,7 @@ export function createChatBoardServer(deps: ChatBoardDeps, projectId: string, ch
         {
           task_id: z.string(), title: z.string().optional(), spec_md: z.string().optional(), priority: z.enum(PRIORITIES as [string, ...string[]]).optional(), labels: z.array(z.string()).max(8).optional(),
           stages: stagesArg, mode: z.enum(RUN_STYLES as [RunStyle, ...RunStyle[]]).optional(), own_branch: z.boolean().optional(), live: z.boolean().optional(),
+          files: FILES_ARG, live_systems: SYSTEMS_ARG,
         },
         async (a) => h.updateTask(a)),
       tool("board_queue_task", "Start a Backlog card now (it joins the queue). Only when the user asked for it to run.", { task_id: z.string() }, async (a) => h.queueTask(a)),

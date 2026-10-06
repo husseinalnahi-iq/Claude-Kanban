@@ -19,7 +19,7 @@ lands safely, and an honest record of what everything cost.
 
 | If this sounds familiar… | …Claude Kanban does this |
 |---|---|
-| “I can only watch one Claude session at a time.” | Queue as many tasks as you like; independent ones run **in parallel**. Autonomous tasks each get their own copy of the project (a git worktree), so they never edit the same files. |
+| “I can only watch one Claude session at a time.” | Queue as many tasks as you like; independent ones run **in parallel**. Autonomous tasks each get their own copy of the project (a git worktree), so they never edit the same files — or, with that setting off, they work in the project folder and tasks that would change the same files take turns. |
 | “Claude did something I didn't want.” | **Supervised** tasks turn every file change and command into an **Allow / Deny** card. **Autonomous** tasks work in their own copy and change nothing until you approve the result. Dangerous commands are blocked outright. |
 | “The best model for everything is slow and uses up my limit.” | Each task is a **pipeline**: a strong model plans, an efficient one codes, a cheap one reviews. You choose per stage — or use **free local models** (LM Studio, Ollama) and others (OpenRouter, GLM, Kimi…). |
 | “I hit my usage limit halfway through and lost the work.” | The task **pauses** and **carries on by itself** when your limit resets, in the same session — or carries on with another provider you picked. The same goes for a GLM, Kimi or Qwen plan that runs out. |
@@ -593,7 +593,7 @@ restarting it.
 | **Projects** | A registered folder plus a policy: whether worktrees and autonomous runs are allowed, and how many tasks may run at once. |
 | **Tasks** | Title, markdown spec, mode, pipeline, attached skills, optional parent, milestone and dependencies. |
 | **Pipeline** | Each stage is one `query()` with its own model and effort. The prompt carries the spec, the parent, sibling summaries, earlier stage results, project memory, messages and attached files. Plan stages cannot edit files. The plan is handed to Code and Review **in full**: Code works through its numbered steps and ends with a checklist of each one (done, or skipped and why), and Review sends the task back if a step — a safety check above all — was dropped without a reason. |
-| **Autonomous** | Runs in its own git worktree on `kanban/<taskId>`. Edits are accepted inside it; writes outside it and history-rewriting git commands are refused. **Approve** lands the branch — see *Landing safely*. **Autonomous + asks me** is the same with `may_ask` on: its `AskUserQuestion` becomes a question card that waits (Settings → `askModeWaitMin`) instead of being turned into a `board_ask` note. |
+| **Autonomous** | Runs in its own git worktree on `kanban/<taskId>` — or in the project folder when Settings → *Autonomous tasks work in their own copy* is off or the folder has no git (see *Autonomous in the project folder*). Edits are accepted inside it; writes outside it and history-rewriting git commands are refused. **Approve** lands the branch — see *Landing safely*. **Autonomous + asks me** is the same with `may_ask` on: its `AskUserQuestion` becomes a question card that waits (Settings → `askModeWaitMin`) instead of being turned into a `board_ask` note. |
 | **Supervised** | Runs in the project folder, and every tool call that needs permission becomes an approval card: Allow or Deny, with a note. Tick **Work on its own branch** and it runs in its own worktree on `kanban/<taskId>` instead, like an autonomous task — still approving every write, and landing only when you press **Approve**. Commands that only read (`grep`, `wc`, `ls`, `git status`, `git diff`…), Claude's own to-do list, and connector tools whose name only reads (`get_values`, `list_events`, `slack_search_…`) run without a card and are listed in the run log — switch that off in Settings → *Guardrails*. When the spec says a step needs your go-ahead (a live write, a deploy), Claude asks for it on a card rather than stopping. |
 | **Queue** | Per-project FIFO with a per-project cap and a global cap. Drag between Backlog and Queued. |
 | **Board MCP** | Every run gets `board_get_task`, `board_list_siblings`, `board_post_message`, `board_create_subtasks`, `board_set_summary`, `board_remember`, `board_memory`, `board_flag_memory`, `board_search_past_work`, `board_report_blocked`. |
@@ -937,6 +937,44 @@ date. Every milestone is a column that shows how many of its cards are done; car
 sit under *Unscheduled*. Drag a card to another milestone, move a milestone left or right with its
 arrows, and add a task straight into one with **+ task**. Deleting a milestone keeps its cards — they
 go back to *Unscheduled*.
+
+---
+
+## Autonomous in the project folder, and tasks that take turns
+
+**Settings → Plan approval & live tasks → Autonomous tasks work in their own copy of the project** is on by
+default: each autonomous task (and Autonomous + asks me) gets its own git worktree, and Approve merges it.
+Turn it off and autonomous tasks work in the project folder itself:
+
+- **Approve** commits exactly the files the task changed, as one commit on your current branch. Files you
+  had already changed or staged before it started are left as they were. In a folder without git, Approve
+  marks it done.
+- **Changes** shows each file against a copy the board kept just before the task's first write to it, and
+  **Discard** puts those files back and deletes the ones the task created.
+- The sandbox is the project folder, without its `.git` and the board's `.kanban` (other tasks' copies);
+  git only looks (`status`, `diff`, `log`…), and the project's key files are never printed. A task marked
+  **live** reaches the live system with the keys where they already are.
+- Another agent's CLI (Codex and others) may not run a code stage there: only a worktree kept it off your
+  files, so such a stage asks for the setting back on.
+
+A folder that is **not a git repository** always works this way, so autonomous runs in any folder. A task
+keeps the place it started in: changing the setting never moves half-done work.
+
+**Tasks that take turns.** Every card carries what it expects to change: the files and live systems the
+chat passes when it makes the card (it reads the board first, so cards from different chats know about
+each other), the `## Files to change` and `## Live systems` lists its plan writes, and the files its runs
+really write. The queue starts a card only when it does not clash with one that is running:
+
+| Both cards… | They run together when… |
+|---|---|
+| work in the project folder (autonomous in the folder, or supervised without its own branch) | their files do not overlap. A card the board cannot tell about counts as touching everything, so it takes its turn. A finished autonomous card that is not approved yet still holds its files: the next card on them waits until you approve or discard it. |
+| are live and write to a live system | they name different systems. Lookups only read, so they never wait. |
+| have their own worktrees | always; when they change the same files the card shows **may conflict**, before either reaches Review. |
+
+A card that waits says why on its ⏳ line ("Waits for “Fee on invoices”: both change src/pay.ts") and
+starts by itself when the other finishes. If a running task in the folder reaches for a file another one
+is changing, that write is refused with the other task's name — it does the rest first — and the refusal
+does not count toward the five that stop a run.
 
 ---
 

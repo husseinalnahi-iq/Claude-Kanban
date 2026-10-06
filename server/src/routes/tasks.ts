@@ -10,6 +10,8 @@ import { aheadBehind, currentBranch } from "../git/worktree.ts";
 import { removeAttachmentDir } from "./attachments.ts";
 import { stageSchema } from "./projects.ts";
 import { PRIORITIES, TASK_TYPES, type Stage } from "../types.ts";
+import { join } from "node:path";
+import { dropKept } from "../engine/folderCopies.ts";
 
 const createSchema = z.object({
   project_id: z.string(),
@@ -217,6 +219,8 @@ export async function taskRoutes(app: FastifyInstance, { repo, bus, runner }: Ap
     runner.forget(id);
     stalenessCache.delete(id);
     removeAttachmentDir(repo.getSettings().stateDir, id);
+    // The copies a task in the project folder kept for Discard go with it (D398); its changes stay.
+    dropKept(join(repo.getSettings().stateDir, "folder-copies", id));
     bus.publish({ type: "task.deleted", taskId: id });
     return { ok: true };
   });

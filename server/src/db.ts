@@ -172,6 +172,9 @@ const LATER_COLUMNS: { table: string; column: string; ddl: string; backfill?: st
   { table: "tasks", column: "checklist_from", ddl: "checklist_from INTEGER NOT NULL DEFAULT 0" },
   { table: "tasks", column: "files_json", ddl: "files_json TEXT NOT NULL DEFAULT '[]'" },
   { table: "tasks", column: "landed_sha", ddl: "landed_sha TEXT" },
+  { table: "tasks", column: "in_folder", ddl: "in_folder INTEGER NOT NULL DEFAULT 0" },
+  { table: "tasks", column: "footprint_json", ddl: "footprint_json TEXT" },
+  { table: "tasks", column: "hold_json", ddl: "hold_json TEXT" },
 ];
 
 /**
@@ -255,6 +258,7 @@ export function openDb(file: string): DatabaseSync {
   seed.run("loadUserPlugins", "true");
   seed.run("claudeAutoMemory", "false");
   seed.run("autonomousLive", "true");
+  seed.run("autonomousWorktree", "true");
   seed.run("browserChecks", "true");
   seed.run("chromeInSupervised", "false");
   seed.run("taskBrowser", "board");

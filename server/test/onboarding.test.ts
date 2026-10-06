@@ -105,7 +105,7 @@ test("bootstrap and /init are tagged tasks; bootstrap refuses a folder with code
     const task = res.json();
     assert.equal(task.title, "Bootstrap the project");
     assert.equal(task.onboarding, "bootstrap");
-    assert.equal(task.mode, "supervised", "no repository yet, so no worktree to review a diff in");
+    assert.equal(task.mode, "autonomous", "no repository yet: it works in the folder itself (D399)");
     assert.match(task.spec_md, /count words/);
     assert.equal(task.pipeline[0].provider, undefined, "the bootstrap writes files, so it always runs on Claude");
     assert.deepEqual(repo.getProject(p.id)!.env.onboarding, { goal: "count words", stack: "", verify: "" });

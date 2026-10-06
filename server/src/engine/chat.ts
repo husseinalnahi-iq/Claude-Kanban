@@ -76,6 +76,7 @@ export function describeTool(name: string, input: Record<string, unknown>, cwd: 
       return `ran ${q(cmd)}${why.complete && cmd ? `: ${why.summary.charAt(0).toLowerCase()}${why.summary.slice(1).replace(/\.$/, "")}` : ""}`;
     }
     case "mcp__board__board_list_tasks": return "looked at the board";
+    case "mcp__board__board_overlaps": return "checked which cards it would overlap with";
     case "mcp__board__board_get_task": return "read a card";
     case "mcp__board__board_create_task": return `created the card ${q(input.title)}`;
     case "mcp__board__board_update_task": return "edited a card";
@@ -97,19 +98,23 @@ export function describeTool(name: string, input: Record<string, unknown>, cwd: 
  */
 function followUpLines(how: Settings["followUpRouting"]): string[] {
   const find = "Before you make a change card, call board_related_cards with the user's request and any project files you looked at for it.";
+  // Cards made from different chats still know about each other through the board (D400).
+  const sameFiles = "When you make a change card, pass files (the project files it will change, from what you read) and live_systems (the live systems it writes to). The board answers with any working card it would wait for or might conflict with: tell the user in one line.";
   if (how === "new") {
-    return ["Follow-ups go to a new card: that is the user's setting. When the request is about an earlier card's work, pass follows with that card's id so the new card is told what it did. Send it to an existing card only when the user asks."];
+    return ["Follow-ups go to a new card: that is the user's setting. When the request is about an earlier card's work, pass follows with that card's id so the new card is told what it did. Send it to an existing card only when the user asks.", sameFiles];
   }
   if (how === "ask") {
     return [
       find,
       "When a card matches (the same page, feature or files), say in one line which card and route the board recommends and what it saves, and wait for the user's yes before acting. A new card otherwise.",
+      sameFiles,
     ];
   }
   return [
     find,
     "When it returns a card the request is about (the same page, feature or files), take the route it recommends: board_continue_task for steer, add_to_round, new_round or fork, or board_create_task with follows for a fresh card. Choose otherwise only when the request is clearly separate work, and a new card for anything unrelated.",
     'In your reply, say in one line where it went and why, in plain words, for example: Sent to "Main page" as round 2: its memory is still warm, about $0.04 instead of about $0.30 for a new card. What the user says wins: "make a new card" or "send it to the page card" is done as said.',
+    sameFiles,
   ];
 }
 
@@ -153,7 +158,7 @@ export function chatPrompt(project: Project, board?: { models: ModelEntry[]; def
     "For a change, make sure you understand it first; ask one short question if it is unclear. The spec says the problem and what done looks like, from what the user asked, nothing more. Extras you think would help (a pause button, a README) go in your reply as suggestions they can say yes to; they never go into the spec on their own, because every line in it is paid for.",
     "When you create a change card, say in a few words how it will run and why. A card with a plan stage opens its setup card here, where the user checks the mode and each step's model and effort and presses Start; list those for them, and never start it yourself (D365). Another change card: ask whether to start it; the user can also press Start on the card. The modes:",
     "- supervised: works in the project's own folder and asks the user before each change. A change that reaches a live system or runs commands outside the project is supervised: an autonomous change is sandboxed and cannot reach it.",
-    "- autonomous: works on its own branch without asking, and lands only when the user approves it. Good for changes to the project's own files, when the project allows it.",
+    "- autonomous: works without asking — on its own branch, or in the project folder when Settings say so or the folder has no git — and lands only when the user approves it. Good for changes to the project's own files, when the project allows it.",
     "- ask (Autonomous + asks me): autonomous, but when it needs the user's answer to go on, it stops and waits for it; its question appears in this chat. For work where the user wants a say in the choices along the way.",
     "- an answer card follows the same switch. Autonomous: it runs in the project's own folder, reaches what the project reaches (a live system, its scripts and keys) and asks nothing; it still changes nothing. Supervised: each command that is not read-only waits for the user's Allow. The card's reply tells you which it got.",
     // The switch under the chat is the default; a mode named in the message wins over it (D344).

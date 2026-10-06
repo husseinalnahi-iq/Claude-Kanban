@@ -74,9 +74,8 @@ type Deps = Pick<AppDeps, "repo" | "bus" | "runner">;
 export async function queueInitTask({ repo, bus, runner }: Deps, project: Project): Promise<Task> {
   const exists = instructionFiles(project.path).some((f) => (f.scope === "project" || f.scope === "project (.claude)") && f.exists);
   const settings = repo.getSettings();
-  // Autonomous (a reviewed diff) where the project allows it and it is a git repository; otherwise
-  // supervised, where writing CLAUDE.md is an approval card.
-  const mode = (await isGitRepo(project.path)) ? allowedMode(project, "autonomous") : "supervised";
+  // Autonomous where the project allows it: in a worktree, or in the folder when it has no git (D399).
+  const mode = allowedMode(project, "autonomous");
   const task = repo.createTask({
     project_id: project.id,
     title: exists ? "Improve CLAUDE.md with /init" : "Create CLAUDE.md with /init",
@@ -105,8 +104,8 @@ export async function queueBootstrapTask({ repo, bus, runner }: Deps, project: P
   const settings = repo.getSettings();
   const updated = repo.updateProject(project.id, { env: { ...project.env, onboarding: answers } });
   bus.publish({ type: "project.updated", project: updated });
-  // Without a repository there is no worktree to review a diff in: supervised, where each write is a card.
-  const mode = (await isGitRepo(project.path)) ? allowedMode(project, "autonomous") : "supervised";
+  // Autonomous where the project allows it; an empty folder has no git, so it works in the folder (D399).
+  const mode = allowedMode(project, "autonomous");
   const task = repo.createTask({
     project_id: project.id,
     title: "Bootstrap the project",

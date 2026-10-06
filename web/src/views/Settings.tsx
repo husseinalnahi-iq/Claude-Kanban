@@ -546,6 +546,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [loadPlugins, setLoadPlugins] = useState(true);
   const [autoMemory, setAutoMemory] = useState(false);
   const [autonomousLive, setAutonomousLive] = useState(true);
+  const [autonomousWorktree, setAutonomousWorktree] = useState(true);
   const [autoResume, setAutoResume] = useState(true);
   const [claudeFallback, setClaudeFallback] = useState<TierRef | null>(null);
   const [keepAwake, setKeepAwake] = useState(true);
@@ -626,6 +627,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
     take((s) => s.loadUserPlugins, setLoadPlugins);
     take((s) => s.claudeAutoMemory ?? false, setAutoMemory);
     take((s) => s.autonomousLive ?? true, setAutonomousLive);
+    take((s) => s.autonomousWorktree ?? true, setAutonomousWorktree);
     take((s) => s.autoResume, setAutoResume);
     take((s) => s.claudeFallback, setClaudeFallback);
     take((s) => s.keepAwake, setKeepAwake);
@@ -662,6 +664,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           loadUserPlugins: loadPlugins,
           claudeAutoMemory: autoMemory,
           autonomousLive,
+          autonomousWorktree,
           autoResume,
           claudeFallback: claudeFallback?.model && claudeFallback.provider !== ANTHROPIC_PROVIDER_ID ? claudeFallback : null,
           keepAwake,
@@ -1094,6 +1097,17 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
                 For a task marked <b>live</b>: the project's private key files (the ones kept out of git, such as <code>.env</code>) are
                 copied into the task's folder, and the task does the live steps itself instead of leaving them for a supervised run.
                 Turn this off to have autonomous tasks stop short of the live system.
+              </span>
+            </span>
+          </label>
+          <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
+            <input type="checkbox" className="mt-1 accent-amber" checked={autonomousWorktree} onChange={(e) => setAutonomousWorktree(e.target.checked)} />
+            <span>
+              Autonomous tasks work in their own copy of the project
+              <span className="block text-[11.5px] text-ink-400">
+                On: each autonomous task gets its own copy (a git worktree) and its work is merged when you approve it. Off: autonomous
+                tasks work in the project folder itself; Approve commits only the files the task changed, and Discard puts them back.
+                Tasks that would change the same files, or the same live system, take turns. A folder without git always works this way.
               </span>
             </span>
           </label>

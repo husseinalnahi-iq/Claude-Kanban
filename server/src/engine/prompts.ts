@@ -52,6 +52,8 @@ export interface PromptCtx {
   live?: boolean;
   /** An autonomous live task that may reach the live system itself (Settings: autonomousLive, D385). */
   liveAllowed?: boolean;
+  /** An autonomous task working in the project folder itself, not a worktree (D398). */
+  inFolder?: boolean;
   /** Settings → Images is on: the run has `generate_image` (D262). */
   imageTool?: boolean;
   /** Who makes the pictures and how long one takes, in a few words (D297). */
@@ -171,9 +173,12 @@ const VERDICTS =
  */
 function sandboxNote(ctx: PromptCtx): string | null {
   if (ctx.mode !== "autonomous" || (ctx.capabilities ?? "sdk") !== "sdk") return null;
+  const where = ctx.inFolder ? "the project folder" : "its own folder";
   if (ctx.liveAllowed) {
     return (
-      "This run works inside its own folder, and it may change the live system this task is about: the project's key files that git leaves out (such as .env) were copied into your folder, so the project's own scripts can reach it. " +
+      (ctx.inFolder
+        ? "This run works directly in the project folder, and it may change the live system this task is about: the project's key files that git leaves out (such as .env) are in this folder, so the project's own scripts can reach it. "
+        : "This run works inside its own folder, and it may change the live system this task is about: the project's key files that git leaves out (such as .env) were copied into your folder, so the project's own scripts can reach it. ") +
       (ctx.stage === "plan"
         ? "Plan the live steps as steps of this task, not as work for a later supervised run."
         : "Do the live steps yourself, following the live-system rules below; do not leave them for a supervised run.") +
@@ -181,7 +186,7 @@ function sandboxNote(ctx: PromptCtx): string | null {
     );
   }
   return (
-    "This run is sandboxed: it can only reach files inside its own folder, and no live system that needs credentials from outside it. " +
+    `This run is sandboxed: it can only reach files inside ${where}, and no live system that needs credentials from outside it. ` +
     "If part of the task needs more than that — a live database, ERP or other production system, credentials, files in the main checkout, a website that needs signing in — " +
     "call `board_report_blocked` with needs \"supervised\" once, saying exactly what access you need and for which steps. It puts a suggestion on the card and does not stop the run. " +
     "Do not look for a way round the sandbox. " +
@@ -224,7 +229,8 @@ function stageInstructions(ctx: PromptCtx): string {
   switch (ctx.stage) {
     case "plan": {
       const facts =
-        "Put what you established under `## Facts established` — names, paths, values and the evidence for each — so the next stage builds on them instead of searching again; put what you could not confirm under `## Still to check`.";
+        "Put what you established under `## Facts established` — names, paths, values and the evidence for each — so the next stage builds on them instead of searching again; put what you could not confirm under `## Still to check`. " +
+        "List the project files you expect to change under `## Files to change`, one path per line (a folder ending in / when it is many files), and any live system it writes to under `## Live systems`: the board uses them to keep other tasks off the same files and systems.";
       if (caps === "text") {
         return [
           "Produce an implementation plan for the task below. You cannot read files or run commands: plan from the spec, the file list and the context given here, and say explicitly what you would need to check in the code before implementing.",
@@ -427,6 +433,14 @@ export function buildStagePrompt(ctx: PromptCtx): string {
       `\n## Your checkout already has other changes\nThese files had uncommitted changes before this run started. They are not this task's — another session or the person is working on them:\n` +
         shown.map((f) => `- ${f}`).join("\n") + (more > 0 ? `\n- …and ${more} more` : "") + "\n" +
         "Do not edit, revert, stage or commit them. If the task needs one of them, change only the lines the task needs and say so in your summary.",
+    );
+  }
+  // An autonomous task in the project folder shares it with the person and other tasks (D398).
+  if (ctx.inFolder && !ctx.branch) {
+    out.push(
+      "\n## Working directory\nYou work directly in the project folder, not a copy: the person, and possibly other tasks, work here too. " +
+        "Change only the files this task needs, and stay out of .git and .kanban. Do not stage, commit, stash, reset, switch branches or push — when the task is approved, the board commits exactly the files you changed. " +
+        "If another task is changing a file you need, the board says so: do the rest of your task first.",
     );
   }
   // Any task in its own worktree: every autonomous one, and a supervised one on its own branch (D234).

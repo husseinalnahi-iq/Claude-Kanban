@@ -41,6 +41,14 @@ export function branchFor(taskId: string): string {
   return `kanban/${taskId}`;
 }
 
+/**
+ * The quick, synchronous guess the queue needs: is there a repository at the top of this folder? A
+ * folder inside another repository has no .git of its own, and isGitRepo says no to it too.
+ */
+export function isGitFolder(path: string): boolean {
+  return existsSync(join(path, ".git"));
+}
+
 export async function isGitRepo(path: string): Promise<boolean> {
   if (!existsSync(path)) return false;
   try {
@@ -154,6 +162,50 @@ export async function changedSince(cwd: string, from: string, files: string[]): 
 export async function lsFiles(path: string, max = 400): Promise<{ files: string[]; total: number }> {
   const all = (await git(path, ["ls-files"])).split(/\r?\n/).filter(Boolean);
   return { files: all.slice(0, max), total: all.length };
+}
+
+/**
+ * A patch between two files, labelled as `file` (D398): what a task in the project folder changed,
+ * against the copy kept before its first write. `null` on either side is a file that did not exist.
+ * Needs git on the computer, not a repository.
+ */
+export async function patchBetween(cwd: string, before: string | null, after: string | null, file: string): Promise<string> {
+  const args = ["diff", "--no-index", "--no-color", "--", before ?? "/dev/null", after ?? "/dev/null"];
+  let out: string;
+  try {
+    out = await git(cwd, args);
+  } catch (err) {
+    // --no-index exits 1 when the files differ: that is the answer, not a failure.
+    if (!(err instanceof GitError) || err.code !== 1) throw err;
+    out = err.stdout;
+  }
+  return out
+    .split("\n")
+    .map((line) => {
+      if (line.startsWith("diff --git ")) return `diff --git a/${file} b/${file}`;
+      if (line.startsWith("--- ") && !line.startsWith("--- /dev/null")) return `--- a/${file}`;
+      if (line.startsWith("+++ ") && !line.startsWith("+++ /dev/null")) return `+++ b/${file}`;
+      return line;
+    })
+    .join("\n");
+}
+
+/**
+ * One commit on the checkout's own branch holding exactly these files, and nothing else you had staged
+ * (D398): how a task that worked in the project folder lands on Approve. Returns the new commit, or null
+ * when the files match HEAD already. Refuses mid-merge, mid-rebase or on a detached HEAD.
+ */
+export async function commitOnly(projectPath: string, files: string[], message: string): Promise<string | null> {
+  if (!files.length) return null;
+  const gitDir = await gitPath(projectPath, "--git-dir");
+  for (const [marker, what] of [["MERGE_HEAD", "a merge"], ["rebase-merge", "a rebase"], ["rebase-apply", "a rebase"], ["CHERRY_PICK_HEAD", "a cherry-pick"]] as const) {
+    if (existsSync(join(gitDir, marker))) throw new GitError(`Your checkout is in the middle of ${what}. Finish or abort it, then approve again.`, null, "", "");
+  }
+  if ((await currentBranch(projectPath)) === "HEAD") throw new GitError("Your checkout is not on a branch (detached HEAD). Check out a branch, then approve again.", null, "", "");
+  await git(projectPath, ["add", "-A", "--", ...files]);
+  if (!(await git(projectPath, ["diff", "--cached", "--name-only", "--", ...files])).trim()) return null;
+  await git(projectPath, ["commit", "-q", "--no-verify", "--only", "-m", message, "--", ...files]);
+  return headSha(projectPath);
 }
 
 /** Uncommitted changes in a checkout (staged and unstaged), in the same shape as diffTask. */

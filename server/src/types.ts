@@ -29,10 +29,27 @@ export const isAnswerPipeline = (p: StageKind[]): boolean => p.length > 0 && p.e
 export const isHandsOff = (t: { mode: Mode; pipeline: StageKind[] }): boolean => t.mode === "autonomous" && isAnswerPipeline(t.pipeline);
 /**
  * Whether a task works in its own git worktree: an autonomous task that changes something, and a
- * supervised one with own_branch (D234). A lookup changes nothing, so it never needs one.
+ * supervised one with own_branch (D234). A lookup changes nothing, so it never needs one. An autonomous
+ * task stamped `in_folder` works in the project folder instead (Settings → autonomousWorktree off, or a
+ * folder without git, D398, D399).
  */
-export const usesWorktree = (t: { mode: Mode; own_branch?: boolean; pipeline?: StageKind[] }): boolean =>
-  (t.mode === "autonomous" && !isAnswerPipeline(t.pipeline ?? [])) || Boolean(t.own_branch);
+export const usesWorktree = (t: { mode: Mode; own_branch?: boolean; in_folder?: boolean; pipeline?: StageKind[] }): boolean =>
+  (t.mode === "autonomous" && !isAnswerPipeline(t.pipeline ?? []) && !t.in_folder) || Boolean(t.own_branch);
+/** An autonomous task that changes something but works in the project folder, not a worktree (D398). */
+export const worksInFolder = (t: { mode: Mode; own_branch?: boolean; in_folder?: boolean; pipeline?: StageKind[] }): boolean =>
+  t.mode === "autonomous" && !isAnswerPipeline(t.pipeline ?? []) && Boolean(t.in_folder) && !t.own_branch;
+/**
+ * A task that changes files in the project folder itself, where another such task would be changing
+ * them too: supervised without its own branch, and autonomous in the folder (D400). Lookups change nothing.
+ */
+export const sharesProjectFolder = (t: { mode: Mode; own_branch?: boolean; in_folder?: boolean; pipeline?: StageKind[] }): boolean =>
+  !isAnswerPipeline(t.pipeline ?? []) && ((t.mode === "supervised" && !t.own_branch) || worksInFolder(t));
+/**
+ * Where an autonomous task that has not run yet will work: in the folder when the setting says so or
+ * the project has no git (D398, D399). The same rule the runner stamps on the task when it is queued.
+ */
+export const plannedInFolder = (t: { mode: Mode; own_branch?: boolean; in_folder?: boolean; worktree_path?: string | null; pipeline?: StageKind[] }, autonomousWorktree: boolean, isGit: boolean): boolean =>
+  t.mode === "autonomous" && !isAnswerPipeline(t.pipeline ?? []) && !t.own_branch && !t.worktree_path && (Boolean(t.in_folder) || !autonomousWorktree || !isGit);
 
 /**
  * How a task runs, as the forms and cards name it: the two modes, plus "ask" — "Autonomous + asks me",
@@ -592,6 +609,30 @@ export interface Resolution {
   finished_at: string | null;
 }
 
+/**
+ * What a task is expected to change, and has changed: the queue runs two tasks side by side only when
+ * these don't overlap (D400). `files` are paths relative to the project (a folder ending in `/` or a
+ * glob covers what is under it); `systems` name the live systems it writes to; `touched` is what its
+ * runs really wrote. Empty `files` and `touched` mean the board cannot tell, which counts as everything.
+ */
+export interface Footprint {
+  files: string[];
+  systems: string[];
+  touched: string[];
+}
+
+/** Why a queued task waits for another one that is running (D400). Cleared when it starts. */
+export interface TaskHold {
+  with: string;
+  title: string;
+  files: string[];
+  systems: string[];
+  /** True when the other task's footprint is unknown, so it may touch anything in the folder. */
+  unknown: boolean;
+  /** The other task has finished and waits for Approve or Discard: its changes are still loose in the folder. */
+  landing?: boolean;
+}
+
 /** This task's branch would conflict with its base if landed now (D359). */
 export interface ConflictRisk {
   base: string;
@@ -634,8 +675,14 @@ export interface Task {
   plan_approval: boolean | null;
   /** Touches a live system (production data, a live business app…): plan approval is forced on and review runs on Settings → liveReviewModel (D233). */
   live: boolean;
-  /** A supervised task that still works in its own worktree and branch, landing only on Approve (D234). Autonomous always does. */
+  /** A supervised task that still works in its own worktree and branch, landing only on Approve (D234). Autonomous does unless `in_folder`. */
   own_branch: boolean;
+  /** An autonomous task that works in the project folder, stamped when it is queued and kept after (D398). */
+  in_folder: boolean;
+  /** What it is expected to change and has changed, for running tasks side by side (D400). */
+  footprint: Footprint;
+  /** Set while it waits in the queue for an overlapping task (D400). */
+  hold: TaskHold | null;
   /**
    * "Autonomous + asks me": an autonomous task that may stop on a question card and wait for your
    * answer, instead of only leaving a note with its default (D361). Ignored when the task is supervised.
@@ -1132,6 +1179,12 @@ export interface Settings {
    * credential files and its prompts stop leaving those steps for a supervised run. On by default (D385).
    */
   autonomousLive: boolean;
+  /**
+   * Autonomous tasks work in their own copy of the project (a git worktree). Off: they work in the
+   * project folder itself, and the queue keeps tasks that would change the same files apart (D398, D400).
+   * On by default. A project without git always works in its folder (D399).
+   */
+  autonomousWorktree: boolean;
   /** Classify new tasks (type, priority, labels) automatically. */
   autoTriage: boolean;
   /** Cheap model used for intake: classification and spec refinement. */

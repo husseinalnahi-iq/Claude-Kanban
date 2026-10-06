@@ -2,6 +2,7 @@ import { query, type Options, type SDKMessage, type SDKUserMessage } from "@anth
 import type { Effort, Priority, Stage, StageName, TaskType } from "../types.ts";
 import { EFFORTS, PRIORITIES, TASK_TYPES } from "../types.ts";
 import { LEAN } from "./lean.ts";
+import { overlaps } from "./footprint.ts";
 
 export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => AsyncIterable<SDKMessage>;
 
@@ -49,7 +50,13 @@ export interface TriageResult {
   /** null when the model gave nothing usable; the caller then keeps the project default. */
   sizing: Sizing | null;
   /** Set when the task needs a live system outside the repository: a sandboxed run cannot do it. */
-  live_access: { reason: string; /** False when it only reads the live system: a lookup is not raised to the strong tier or proposed as live (D287). */ changes: boolean } | null;
+  live_access: {
+    reason: string;
+    /** False when it only reads the live system: a lookup is not raised to the strong tier or proposed as live (D287). */
+    changes: boolean;
+    /** The live systems it touches, by short name, so two tasks writing to the same one take turns (D400). */
+    systems: string[];
+  } | null;
   /** How sure the model is about type/labels, 0–1. Low confidence applies nothing. */
   confidence: number;
   cost_usd: number;
@@ -64,7 +71,7 @@ function schemaFor(labelVocabulary: string[]) {
   return {
   type: "object",
   additionalProperties: false,
-  required: ["title", "type", "priority", "labels", "spec_md", "questions", "split_reason", "subtasks", "confidence", "pipeline", "pipeline_reason", "live_access", "live_changes", "live_access_reason"],
+  required: ["title", "type", "priority", "labels", "spec_md", "questions", "split_reason", "subtasks", "confidence", "pipeline", "pipeline_reason", "live_access", "live_changes", "live_access_reason", "live_systems"],
   properties: {
     title: { type: "string", description: "A short imperative title, max 70 characters." },
     live_access: {
@@ -81,6 +88,11 @@ function schemaFor(labelVocabulary: string[]) {
         "false when it only reads it (look up a record, count, report, check a value). When unsure, true. false when live_access is false.",
     },
     live_access_reason: { type: "string", description: "One sentence naming the live system, or empty when live_access is false." },
+    live_systems: {
+      type: "array",
+      items: { type: "string" },
+      description: "Only when live_access is true: each live system by a short name a person would use (\"the ERP\", \"the payments API\", \"the production database\"). Empty when live_access is false.",
+    },
     type: { type: "string", enum: TASK_TYPES },
     confidence: {
       type: "number",
@@ -318,7 +330,13 @@ export async function triageTask(input: TriageInput, queryFn: QueryFn = query as
     subtasks,
     split,
     sizing,
-    live_access: liveAccess ? { reason: typeof s.live_access_reason === "string" ? s.live_access_reason.trim().slice(0, 300) : "", changes: liveChanges } : null,
+    live_access: liveAccess
+      ? {
+          reason: typeof s.live_access_reason === "string" ? s.live_access_reason.trim().slice(0, 300) : "",
+          changes: liveChanges,
+          systems: Array.isArray(s.live_systems) ? (s.live_systems as unknown[]).map((x) => String(x).trim()).filter(Boolean).slice(0, 5) : [],
+        }
+      : null,
     cost_usd: cost,
     model: input.model,
   };
@@ -327,25 +345,6 @@ export async function triageTask(input: TriageInput, queryFn: QueryFn = query as
 /** The higher of two efforts. */
 function atLeast(effort: Effort, floor: Effort): Effort {
   return EFFORTS.indexOf(effort) >= EFFORTS.indexOf(floor) ? effort : floor;
-}
-
-/** Normalises a path/glob enough to spot "these two will fight over the same file". */
-function fileKey(pattern: string): string {
-  return pattern.trim().replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
-}
-
-function overlaps(a: string[], b: string[]): boolean {
-  for (const x of a.map(fileKey)) {
-    for (const y of b.map(fileKey)) {
-      if (x === y) return true;
-      // A directory glob covering the other's path counts as a conflict.
-      const xDir = x.replace(/\/?\*+.*$/, "");
-      const yDir = y.replace(/\/?\*+.*$/, "");
-      if (xDir && (y.startsWith(`${xDir}/`) || y === xDir)) return true;
-      if (yDir && (x.startsWith(`${yDir}/`) || x === yDir)) return true;
-    }
-  }
-  return false;
 }
 
 /**

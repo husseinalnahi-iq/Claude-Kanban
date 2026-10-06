@@ -77,7 +77,9 @@ export function ModeHelp({ align = "left" }: { align?: "left" | "right" }) {
       <b className="text-amber">Autonomous</b> — Claude works in a private copy of the repo (a git
       worktree on its own branch). It edits freely there without asking, and nothing reaches your code
       until you press <b>Approve</b>, which merges the branch. Best for well-specified work you want to
-      review as a finished diff.
+      review as a finished diff. With Settings → <i>Autonomous tasks work in their own copy</i> off, or in a
+      folder without git, it works in the project folder itself: Approve commits only the files it changed,
+      Discard puts them back, and tasks that would change the same files take turns.
       <br />
       <br />
       <b className="text-cyan">Supervised</b> — Claude works directly in your project folder, and every
@@ -230,11 +232,11 @@ export function MemoryDot({ facts }: { facts: MemoryFacts }) {
 
 export function ModeChip({ mode, ownBranch, lookup, mayAsk }: { mode: "autonomous" | "supervised"; ownBranch?: boolean; lookup?: boolean; mayAsk?: boolean }) {
   return mode === "autonomous" && mayAsk ? (
-    <Chip className="border-iris/40 text-iris bg-iris/5" title="Autonomous + asks me: runs in its own git worktree, and stops to ask you when your answer changes the result">auto · asks</Chip>
+    <Chip className="border-iris/40 text-iris bg-iris/5" title="Autonomous + asks me: works without asking, and stops to ask you when your answer changes the result">auto · asks</Chip>
   ) : mode === "autonomous" && lookup ? (
     <Chip className="border-amber/40 text-amber bg-amber/5" title="Autonomous lookup: runs in the project's own folder and asks nothing. It reads and reports; it changes nothing">auto</Chip>
   ) : mode === "autonomous" ? (
-    <Chip className="border-amber/40 text-amber bg-amber/5" title="Autonomous: runs in its own git worktree, merged on Approve">auto</Chip>
+    <Chip className="border-amber/40 text-amber bg-amber/5" title="Autonomous: works without asking — in its own git worktree, merged on Approve, or in the project folder when Settings say so or there is no git">auto</Chip>
   ) : ownBranch ? (
     <Chip className="border-cyan/40 text-cyan bg-cyan/5" title="Supervised on its own branch: every write is an approval card, and the work lands only when you approve">supervised · branch</Chip>
   ) : (

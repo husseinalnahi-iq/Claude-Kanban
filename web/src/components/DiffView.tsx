@@ -198,7 +198,7 @@ export function DiffView({ taskId, refreshKey, canComment = true }: { taskId: st
 
   if (error) return <Empty>{error}</Empty>;
   if (!files) return <div className="text-[12px] text-ink-500">Loading diff…</div>;
-  if (!files.length) return <Empty>No committed changes on this task's branch yet. Diffs exist for autonomous tasks after a stage finishes.</Empty>;
+  if (!files.length) return <Empty>No changes yet. They show here once a stage of an autonomous task has changed something.</Empty>;
   return (
     <div className="space-y-2">
       {canComment ? (

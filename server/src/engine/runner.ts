@@ -5,12 +5,12 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, 
 import { homedir, tmpdir } from "node:os";
 import { basename, extname, isAbsolute, join, resolve, sep } from "node:path";
 import * as gitOps from "../git/worktree.ts";
-import { FolderLeftError } from "../git/worktree.ts";
+import { FolderLeftError, isGitFolder } from "../git/worktree.ts";
 import { DEFAULT_VISION_MODEL, nowIso } from "../db.ts";
 import type { NewTask, Repo } from "../repo.ts";
 import type { Bus } from "../bus.ts";
 import type {
-  Approval, ApprovalDecision, Blocked, ConflictRisk, Mode, Project, Resolution, ResolutionCheck, Provider, ProviderOut, ProviderUsage, Run, SessionTools, Settings, Stage, StageName, Task, TaskStatus, TierRef, UsageLimit, UsageTotals,
+  Approval, ApprovalDecision, Blocked, ConflictRisk, DiffFile, Mode, TaskHold, Project, Resolution, ResolutionCheck, Provider, ProviderOut, ProviderUsage, Run, SessionTools, Settings, Stage, StageName, Task, TaskStatus, TierRef, UsageLimit, UsageTotals,
 } from "../types.ts";
 
 type RateLimitInfo = {
@@ -23,8 +23,10 @@ type RateLimitInfo = {
 };
 import { RunQueue } from "./queue.ts";
 import { buildRoundFallbackPrompt, buildRoundPrompt, buildStagePrompt, type PromptCtx } from "./prompts.ts";
-import { autonomousGate, blockedCommand, escalationHint, handsOffGate, isReadOnlyMcp, isReadOnlyShell, isSafeMcp, isTrusted, killsByName, markitdownRead, READ_ONLY_TOOLS, readViolation, serverRule, trustRules } from "./gate.ts";
+import { PATH_KEYS, autonomousGate, blockedCommand, escalationHint, handsOffGate, isReadOnlyMcp, isReadOnlyShell, isSafeMcp, isTrusted, killsByName, markitdownRead, READ_ONLY_TOOLS, readViolation, serverRule, trustRules } from "./gate.ts";
 import { credentialRisk } from "./credentials.ts";
+import { clash, mayConflict, planFootprint, type FootprintOf } from "./footprint.ts";
+import { dropKept, keepOriginal, keptCopy, keptFiles, relInside, restoreKept } from "./folderCopies.ts";
 import { allowedMode, createBoardServer } from "./boardMcp.ts";
 import { RESOLVE_ATTEMPTS, buildResolvePrompt, buildReviewPrompt, parseReviewVerdict, problemsFrom, type OtherSide } from "./conflictResolve.ts";
 import { CONFIDENCE_TO_APPLY, serialiseFileConflicts, triageTask, type Sizing, type TriageResult, type TriageSubtask } from "./triage.ts";
@@ -50,7 +52,7 @@ import { QuotaReader, type LiveQuota } from "./providers/usage.ts";
 import type { Resolved, StageInvocation } from "./providers/types.ts";
 import { saveAttachment } from "../routes/attachments.ts";
 import { pickBrowser, realProbe } from "../setup/probe.ts";
-import { ANTHROPIC_PROVIDER_ID, ARTIFACT_EXTS, DEBATE_ROUND_CEILING, EFFORTS, MARKITDOWN_TOOL, accessOf, isHandsOff, recommendedOption, supervisedFrom, usesWorktree, MAX_ATTACHMENT_BYTES, attachmentKind, supportsFastMode, type ClaudeModelsResult, type FastModeStatus } from "../types.ts";
+import { ANTHROPIC_PROVIDER_ID, ARTIFACT_EXTS, DEBATE_ROUND_CEILING, EFFORTS, MARKITDOWN_TOOL, accessOf, isHandsOff, recommendedOption, sharesProjectFolder, supervisedFrom, usesWorktree, worksInFolder, MAX_ATTACHMENT_BYTES, attachmentKind, supportsFastMode, type ClaudeModelsResult, type FastModeStatus } from "../types.ts";
 import { claudeUpgrades, fromSdk, type SdkModelInfo } from "./claudeModels.ts";
 import { BROWSER_AGENT, helperAgents, usesHelper } from "./helpers.ts";
 import { applyChecklistTool } from "./checklist.ts";
@@ -529,7 +531,7 @@ export class TaskRunner {
       globalCap: () => (this.queueSettings().serial ? 1 : this.queueSettings().globalCap),
       projectCap: (pid) => this.repo.getProject(pid)?.policy.maxConcurrent || this.queueSettings().defaultMaxConcurrent,
       forcedCap: () => this.queueSettings().maxForcedParallel,
-      canStart: (item) => this.mayStartNow(item.taskId),
+      canStart: (item) => this.mayStartNow(item.taskId, Boolean(item.force)),
       onPump: (phase) => (this.pumpView = phase === "begin" ? { settings: this.repo.getSettings() } : null),
       // Tracked: a pipeline still tidies up (commit, port, live view) after its card reaches Review.
       start: (item) => tracked(this.repo.getProject(item.projectId)?.path, this.runPipeline(item.taskId)),
@@ -538,7 +540,7 @@ export class TaskRunner {
     // A queued task that waits on others is held by the queue's veto; something has to look again when
     // one of them is done or deleted, or the waiting task's own links change (D289).
     this.bus.subscribe((m) => {
-      if ((m.type === "task.updated" && (m.task.status === "done" || m.task.status === "queued")) || m.type === "task.deleted") this.nudgeQueue();
+      if ((m.type === "task.updated" && (m.task.status === "done" || m.task.status === "queued" || m.task.status === "backlog")) || m.type === "task.deleted") this.nudgeQueue();
     });
   }
 
@@ -709,11 +711,15 @@ export class TaskRunner {
           `Project "${project.name}" forbids autonomous runs (policy.autonomous = "forbidden"). Switch this task to supervised mode — it will run in the main checkout with every write as an approval card.`,
         );
       }
-      if (project.policy.worktrees === "forbidden") {
+      // A project that forbids worktrees runs autonomous work in its folder instead (D398): queueTask
+      // stamps it. One that still has a worktree from before keeps it until it lands.
+      if (project.policy.worktrees === "forbidden" && usesWorktree(task) && !task.worktree_path) {
         throw new PolicyError(
-          `Project "${project.name}" forbids worktrees (policy.worktrees = "forbidden"), and autonomous runs need one. Switch this task to supervised mode.`,
+          `Project "${project.name}" forbids worktrees (policy.worktrees = "forbidden"). Queue the task again: it will work in the project folder.`,
         );
       }
+      // Another agent's CLI asks no one and passes no gate: only a worktree keeps it off your files (D398).
+      if (worksInFolder(task)) this.providers.assertFolderPipeline(task.pipeline);
     }
     // A supervised task on its own branch needs a worktree too, and a repository to make one in (D234).
     if (task.mode === "supervised" && task.own_branch && project.policy.worktrees === "forbidden") {
@@ -760,14 +766,15 @@ export class TaskRunner {
     }
     // A task whose dependencies are not done yet is queued all the same: the queue holds it until they
     // are, then it starts by itself (D289). Refusing it left a chain to be started by hand, link by link.
-    this.assertRunnable(task, project);
+    const placed = this.stampWorkspace(task, project);
+    this.assertRunnable(placed, project);
     this.startOpts.set(taskId, opts);
     // The block is over once the task is sent again; the next prompt still says what stopped it.
     if (task.blocked) this.priorBlocks.set(taskId, task.blocked);
     // Queuing clears the card's note, so a Reject's reason is carried to the prompt here — before,
     // it was wiped before any run could read it (D196). A bare "work discarded" is not a reason.
     if (task.status === "backlog" && task.note?.trim() && task.note !== "work discarded") this.sentBack.set(taskId, task.note.trim());
-    const updated = this.setTask(taskId, { status: "queued", error: null, note: null, blocked: null });
+    const updated = this.setTask(taskId, { status: "queued", error: null, note: null, blocked: null, hold: null });
     this.queue.enqueue({ taskId, projectId: project.id, force });
     return updated;
   }
@@ -780,6 +787,18 @@ export class TaskRunner {
     return this.queueTask(taskId, { fromStage: stageIndex, resume: prior?.session_id ?? undefined }, force);
   }
 
+  /**
+   * Where an autonomous task works, decided the first time it is queued and kept after, so changing the
+   * setting never moves half-done work: the project folder when Settings → autonomousWorktree is off or the
+   * project forbids worktrees (D398). A folder without git is found when the run starts (ensureCwd, D399).
+   * A task that has a worktree keeps it.
+   */
+  private stampWorkspace(task: Task, project: Project): Task {
+    if (task.in_folder || task.worktree_path || task.mode !== "autonomous" || task.own_branch || isAnswerPipeline(task.pipeline)) return task;
+    if (this.repo.getSettings().autonomousWorktree && project.policy.worktrees !== "forbidden") return task;
+    return this.setTask(task.id, { in_folder: true });
+  }
+
   /** Settings → autonomousLive: an autonomous task marked live does its live steps itself (D385). */
   private liveAllowed(task: Task): boolean {
     return task.mode === "autonomous" && task.live && this.repo.getSettings().autonomousLive;
@@ -787,7 +806,8 @@ export class TaskRunner {
 
   /** Every stage, not only a new worktree: the setting may have been turned on after the folder was made. */
   private async seedLiveKeys(task: Task, project: Project, cwd: string): Promise<void> {
-    if (!this.liveAllowed(task)) return;
+    // In the project folder the keys are already where the scripts look for them (D398).
+    if (!this.liveAllowed(task) || cwd === project.path) return;
     const report = await seedWorktree(project.path, cwd, LIVE_KEY_PATTERNS);
     if (report.copied.length) this.log(task.id, `Copied the project's key files for live work: ${report.copied.slice(0, 20).join(", ")}\n`);
   }
@@ -802,10 +822,16 @@ export class TaskRunner {
       return task.worktree_path;
     }
     if (!(await this.git.isGitRepo(project.path))) {
+      // No repository, or no git at all: an autonomous task works in the folder itself (D399). A supervised
+      // task on its own branch asked for a branch, so it still needs one.
+      if (task.mode === "autonomous" && !task.own_branch) {
+        this.setTask(task.id, { in_folder: true });
+        return project.path;
+      }
       // isGitRepo cannot tell "no git" from "not a repository"; the fix for each is different.
       const installed = (await realProbe.run("git", ["--version"])).code === 0;
       throw new PolicyError(
-        installed ? `Autonomous mode needs a git repository; ${project.path} is not one.` : "Autonomous mode needs git, and git is not installed on this computer. Open Setup to install it.",
+        installed ? `Working on its own branch needs a git repository; ${project.path} is not one.` : "Working on its own branch needs git, and git is not installed on this computer. Open Setup to install it.",
       );
     }
     // A checkout of a big repository takes a minute — measured 61 s for 40k files, and 47 s outside
@@ -898,7 +924,9 @@ export class TaskRunner {
       this.assertRunnable(task, project);
       if (this.reraisePlanGate(task, opts.fromStage)) return;
       const cwd = await this.ensureCwd(task, project);
-      if (task.mode === "supervised") await this.snapshotCheckout(taskId, cwd);
+      // ensureCwd may have placed it in the project folder (D399): read that back before anything asks.
+      task = this.repo.getTask(taskId) ?? task;
+      if (sharesProjectFolder(task)) await this.snapshotCheckout(taskId, cwd);
       // Reserved before the first prompt is written, so the prompt can name it.
       await this.portFor(taskId);
       let switches = 0;
@@ -1064,6 +1092,14 @@ export class TaskRunner {
         }
         // A plan can be argued over before any code is written (docs/DECISIONS.md D131).
         if (stage.stage === "plan") {
+          // What the plan says it will change replaces the guess made when the card was created (D400).
+          const said = planFootprint(this.repo.getRun(run.id)?.result_md ?? "");
+          const now = this.repo.getTask(taskId);
+          if (now && (said.files.length || said.systems.length)) {
+            this.setTask(taskId, {
+              footprint: { ...now.footprint, files: said.files.length ? said.files : now.footprint.files, systems: [...new Set([...now.footprint.systems, ...said.systems])] },
+            });
+          }
           const critic = this.providers.debateFor(stage, this.repo.getSettings());
           if (critic && (await this.debate({ task, project, planRun: run, stageIndex: i, cwd, ctl, critic }))) return;
           if (ctl.stopped) {
@@ -1354,6 +1390,7 @@ export class TaskRunner {
       previousStage: stageIndex > 0 ? task.pipeline[stageIndex - 1]?.stage ?? null : null,
       live: task.live,
       liveAllowed: this.liveAllowed(task),
+      inFolder: worksInFolder(task),
       // Narrowed to "a picture maker is ready" in stagePromptFor, which can ask Codex (D303).
       imageTool: settings.imageProvider !== "off" && stage.stage !== "plan" && stage.stage !== "review",
       imageMaker: imageMakerLine(settings),
@@ -1363,7 +1400,7 @@ export class TaskRunner {
       messages,
       rejectNote: this.sentBack.get(task.id) ?? null,
       priorBlock: this.priorBlocks.get(task.id) ?? null,
-      foreignChanges: task.mode === "supervised" ? task.checkout?.dirtyAtStart ?? [] : [],
+      foreignChanges: sharesProjectFolder(task) ? task.checkout?.dirtyAtStart ?? [] : [],
       verificationFailure: this.verifyFailures.get(task.id) ?? null,
       handover: this.handovers.get(task.id) ?? null,
       verifyCommand: project.env.verifyCommand,
@@ -1438,7 +1475,9 @@ export class TaskRunner {
     try {
       const now = await this.git.statusFiles(before.cwd);
       const touched = now.filter((f) => before.own.has(f) || !before.stamps.has(f) || before.stamps.get(f) !== fileStamp(join(before.cwd, f)));
-      this.setTask(taskId, { checkout: { ...task.checkout, touched: touched.slice(0, 200) } });
+      // What it changed with commands too, so the queue keeps the next task off these files (D400).
+      const all = [...new Set([...task.footprint.touched, ...touched])].slice(0, 500);
+      this.setTask(taskId, { checkout: { ...task.checkout, touched: touched.slice(0, 200) }, footprint: { ...task.footprint, touched: all } });
     } catch (err) {
       this.log(taskId, `[board] could not read the checkout's status: ${String(err)}\n`);
     }
@@ -1452,6 +1491,78 @@ export class TaskRunner {
     } catch (err) {
       this.log(this.repo.latestRun(task.id)?.id ?? "commit", `[commit failed] ${String(err)}\n`);
     }
+  }
+
+  /** Where the board keeps the files a task in the project folder changed, as they were before (D398). */
+  private copiesDir(taskId: string): string {
+    return join(this.repo.getSettings().stateDir, "folder-copies", taskId);
+  }
+
+  /** A file a running task is about to write: kept as it was when the task works in the folder, and added to what it touched (D398, D400). */
+  private noteWrite(task: Task, root: string, file: string): void {
+    const rel = relInside(root, file);
+    if (!rel) return;
+    if (worksInFolder(task)) {
+      try {
+        keepOriginal(this.copiesDir(task.id), root, rel);
+      } catch (err) {
+        this.log(task.id, `[board] could not keep a copy of ${rel} before it changed: ${String(err)}\n`);
+      }
+    }
+    const fresh = this.repo.getTask(task.id);
+    if (!fresh || fresh.footprint.touched.includes(rel)) return;
+    this.setTask(task.id, { footprint: { ...fresh.footprint, touched: [...fresh.footprint.touched, rel].slice(0, 500) } });
+  }
+
+  /** Another task running in the same folder that has already changed this file, if any (D400). */
+  private writtenByOther(task: Task, rel: string): Task | null {
+    for (const id of this.active.keys()) {
+      if (id === task.id) continue;
+      const other = this.repo.getTask(id);
+      if (!other || other.project_id !== task.project_id || !sharesProjectFolder(other)) continue;
+      if (other.footprint.touched.includes(rel) || (other.checkout?.touched ?? []).includes(rel)) return other;
+    }
+    // And one that finished without landing yet: its Approve would commit this file with our change in it.
+    return this.unlandedInFolder(task).find((t) => t.footprint.touched.includes(rel)) ?? null;
+  }
+
+  /** This task's own changes in the project folder: what it wrote, never what was changed before it started (D398). */
+  private folderFiles(task: Task): string[] {
+    const before = new Set(task.checkout?.dirtyAtStart ?? []);
+    const kept = Object.keys(keptFiles(this.copiesDir(task.id)));
+    return [...new Set([...kept, ...task.footprint.touched, ...(task.checkout?.touched ?? [])])].filter((f) => kept.includes(f) || !before.has(f));
+  }
+
+  /** The Changes tab of a task in the project folder: each file against the copy kept before its first write (D398). */
+  private async folderDiff(task: Task, project: Project): Promise<DiffFile[]> {
+    const dir = this.copiesDir(task.id);
+    const kept = keptFiles(dir);
+    const out: DiffFile[] = [];
+    for (const [rel, how] of Object.entries(kept)) {
+      const abs = join(project.path, ...rel.split("/"));
+      const exists = existsSync(abs);
+      if (how === "big") {
+        out.push({ file: rel, status: "M", patch: "" });
+        continue;
+      }
+      const before = how === "copied" ? keptCopy(dir, rel) : null;
+      if (!before && !exists) continue; // made and deleted again
+      let patch = "";
+      try {
+        patch = await this.git.patchBetween(project.path, before, exists ? abs : null, rel);
+      } catch {
+        // No git on this computer: the file is still listed, without its lines.
+      }
+      if (before && exists && !patch.trim()) continue; // written back as it was
+      out.push({ file: rel, status: !before ? "A" : exists ? "M" : "D", patch });
+    }
+    // Files a command changed (a formatter, a generator): only a repository can say how.
+    const rest = (task.checkout?.touched ?? []).filter((f) => !kept[f] && !(task.checkout?.dirtyAtStart ?? []).includes(f));
+    if (rest.length && (await this.git.isGitRepo(project.path))) {
+      const changed = new Map((await this.git.diffWorkingTree(project.path).catch(() => [] as DiffFile[])).map((d) => [d.file, d]));
+      for (const f of rest) out.push(changed.get(f) ?? { file: f, status: "A", patch: "" });
+    }
+    return out;
   }
 
   // ---------------------------------------------------------------- one query() call
@@ -1501,6 +1612,8 @@ export class TaskRunner {
     const autonomous = task.mode === "autonomous";
     // A lookup under autonomous: the project's own folder, its own gate, and nothing on a card (D352).
     const handsOff = isHandsOff(task);
+    // An autonomous task in the project folder itself (D398): the gate guards the folder, not a copy of it.
+    const inFolder = worksInFolder(task);
     // The board's own browser, one per session; see browser.ts for why not the Playwright plugin's.
     const browserDir = join(tmpdir(), "claude-kanban-browser", run.id);
     // Outside its worktree an autonomous run may read only these: this task's attachments, its own
@@ -1553,8 +1666,9 @@ export class TaskRunner {
       if (note) this.log(run.id, `\n[board] ${note}\n  ${command}\n`);
       return note;
     };
-    // The keys a live task was given stay out of the transcript, which the board keeps (D385).
-    const liveKeys = this.liveAllowed(task);
+    // The keys a live task was given stay out of the transcript, which the board keeps (D385). In the
+    // project folder the keys are always there, live task or not (D398).
+    const liveKeys = this.liveAllowed(task) || inFolder;
     const printsKeys = (toolName: string, input: Record<string, unknown>): string | null => {
       const risk = liveKeys ? credentialRisk(toolName, input) : null;
       return risk?.level === "prints"
@@ -1625,7 +1739,7 @@ export class TaskRunner {
       }
       const keys = printsKeys(toolName, input);
       if (keys) return { behavior: "deny", message: keys };
-      const decision = autonomousGate(toolName, input, a.cwd, readRoots, { markitdown: settings.markitdownInTasks });
+      const decision = autonomousGate(toolName, input, a.cwd, readRoots, { markitdown: settings.markitdownInTasks, folder: inFolder });
       // A question nobody can answer is not the sandbox saying no: it gets its own message, uncounted.
       if (decision.behavior === "deny" && toolName !== "AskUserQuestion") return refuse(decision.message);
       return decision;
@@ -1660,8 +1774,24 @@ export class TaskRunner {
             const browser = browserDecision(name, input, true, a.cwd, browserDir, browserReach);
             if (browser?.behavior === "allow") return {};
             if (browser?.behavior === "deny") return deny(refuse(browser.message).message);
-            const decision = autonomousGate(name, input, a.cwd, readRoots, { markitdown: settings.markitdownInTasks });
-            return decision.behavior === "deny" ? deny(refuse(decision.message).message) : {};
+            const decision = autonomousGate(name, input, a.cwd, readRoots, { markitdown: settings.markitdownInTasks, folder: inFolder });
+            if (decision.behavior === "deny") return deny(refuse(decision.message).message);
+            const written = PATH_KEYS[name] ? input[PATH_KEYS[name]] : undefined;
+            if (typeof written === "string") {
+              const rel = relInside(a.cwd, written);
+              // Two tasks in one folder: the second to reach a file waits its turn on it (D400). Not a
+              // sandbox refusal, so it never counts toward the stop after five.
+              const other = rel && inFolder ? this.writtenByOther(task, rel) : null;
+              if (other) {
+                this.log(run.id, `
+[board] ${rel} is being changed by "${other.title}"; this write waits.
+`);
+                const when = this.pipelines.has(other.id) ? "is changing" : "changed, and is waiting to be approved,";
+                return deny(`"${other.title}" ${when} ${rel} in the same folder. Do the parts of your task that don't need this file first; if nothing else is left, finish and say in your summary that ${rel} still needs this change.`);
+              }
+              this.noteWrite(task, a.cwd, written);
+            }
+            return {};
           },
         ],
       },
@@ -3089,7 +3219,9 @@ export class TaskRunner {
     const said = runId ? this.repo.lastAssistantText(runId, 1800) : "";
     const where = usesWorktree(task)
       ? "Its changes so far are in this worktree, committed as “[failed]” (see `git log -1 --stat` and `git status`)."
-      : "Its changes so far are already in the folder (see `git status` and `git diff`).";
+      : isGitFolder(this.repo.getProject(task.project_id)?.path ?? "")
+        ? "Its changes so far are already in the folder (see `git status` and `git diff`)."
+        : "Its changes so far are already in the folder.";
     return (
       `This stage was started on ${from}, which stopped partway: ${why}. ${where} ` +
       "Keep what is right, finish the stage rather than starting over, and check its claims against the code." +
@@ -3359,7 +3491,7 @@ export class TaskRunner {
    * other way: work for a provider that is out until a known time waits for it. Either way, a
    * fallback in Settings means there is somewhere to go, so it starts and moves over (D225).
    */
-  private mayStartNow(taskId: string): boolean {
+  private mayStartNow(taskId: string, force = false): boolean {
     const task = this.repo.getTask(taskId);
     if (!task) return true;
     // Waits for what it depends on to be done (merged), not just reviewed: D52, D289.
@@ -3374,7 +3506,63 @@ export class TaskRunner {
       const out = this.activeOut(stage.provider);
       if (out && out.kind !== "credit" && out.resets_at && !this.fallbackFor(stage.provider)) return false;
     }
-    return true;
+    // Last, so the card's reason is the real one: two tasks that would change the same files in one
+    // folder, or write the same live system, take turns (D400). Run now still runs it now.
+    const hold = force ? null : this.holdFor(task);
+    if (JSON.stringify(hold) !== JSON.stringify(task.hold)) this.setTask(task.id, { hold });
+    return !hold;
+  }
+
+  /**
+   * The working cards of a project that a card with this footprint would wait for (same files in one
+   * folder, the same live system) or might conflict with when both land (same files, each in its own
+   * copy). What the chat and a run see before they make a card (D400).
+   */
+  overlapsWith(projectId: string, card: FootprintOf, exceptId?: string): { id: string; title: string; status: TaskStatus; waits: boolean; files: string[]; systems: string[]; unknown: boolean }[] {
+    const working: TaskStatus[] = ["queued", "planning", "running", "approval", "paused", "review"];
+    const out: ReturnType<TaskRunner["overlapsWith"]> = [];
+    // A card not queued yet has no place stamped: judge it where the queue will put it.
+    const project = this.repo.getProject(projectId);
+    const settings = this.repo.getSettings();
+    const unplaced = card.mode === "autonomous" && !card.own_branch && !card.in_folder;
+    if (unplaced && project && (!settings.autonomousWorktree || project.policy.worktrees === "forbidden")) card = { ...card, in_folder: true };
+    for (const t of this.repo.listTasks({ project_id: projectId })) {
+      if (t.id === exceptId || !working.includes(t.status)) continue;
+      // Review has finished writing: in a worktree only a merge conflict is left to warn about; in the folder its
+      // changes still wait there for Approve or Discard, so the same files still wait for it (D400).
+      const loose = t.status === "review" && worksInFolder(t) && t.footprint.touched.length > 0;
+      const c = t.status === "review" ? (loose ? clash({ ...card, live: false }, { ...t, live: false }) : null) : clash(card, t);
+      const later = mayConflict(card, t);
+      if (c) out.push({ id: t.id, title: t.title, status: t.status, waits: true, files: c.files, systems: c.systems, unknown: c.unknown });
+      else if (later.length) out.push({ id: t.id, title: t.title, status: t.status, waits: false, files: later, systems: [], unknown: false });
+    }
+    return out;
+  }
+
+  /** The running task this one would get in the way of, and why; null when they may run together (D400). */
+  private holdFor(task: Task): TaskHold | null {
+    for (const id of this.pipelines.keys()) {
+      if (id === task.id) continue;
+      const other = this.repo.getTask(id);
+      if (!other || other.project_id !== task.project_id) continue;
+      const c = clash(task, other);
+      if (c) return { with: other.id, title: other.title, files: c.files.slice(0, 20), systems: c.systems, unknown: c.unknown };
+    }
+    // Finished but not landed: its changes are still loose in the project folder, and its Approve commits
+    // and its Discard puts back whole files. Writing the same files now would mix two tasks' work, so the
+    // next one waits until it is approved or discarded (D400). Only files: a live write already happened.
+    for (const other of this.unlandedInFolder(task)) {
+      const c = clash({ ...task, live: false }, { ...other, live: false });
+      if (c) return { with: other.id, title: other.title, files: c.files.slice(0, 20), systems: [], unknown: c.unknown, landing: true };
+    }
+    return null;
+  }
+
+  /** Tasks of this project whose changes in the project folder wait for Approve or Discard (D398, D400). */
+  private unlandedInFolder(task: Task): Task[] {
+    return this.repo
+      .listTasks({ project_id: task.project_id })
+      .filter((t) => t.id !== task.id && !this.pipelines.has(t.id) && worksInFolder(t) && t.status !== "done" && t.status !== "queued" && t.footprint.touched.length > 0);
   }
 
   /** One timer for all paused tasks and out providers, set to the earliest time. Survives restarts via recover(). */
@@ -3725,6 +3913,23 @@ export class TaskRunner {
           });
         }
         this.forgetWorkspace(task);
+      } else if (worksInFolder(task)) {
+        // Worked in the project folder (D398): landing is one commit of exactly its own files on your
+        // branch, leaving anything you had changed or staged yourself alone. No repository: nothing to commit.
+        const files = this.folderFiles(task);
+        let sha: string | null = null;
+        if (await this.git.isGitRepo(project.path)) {
+          try {
+            sha = await this.git.commitOnly(project.path, files, task.title);
+          } catch (err) {
+            throw new ConflictError(`Could not commit this task's files: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+        keepLanding(files, sha ?? (await landedSha()));
+        remember();
+        dropKept(this.copiesDir(taskId));
+        done = this.setTask(taskId, { status: "done", merged_at: sha ? nowIso() : null, note: null });
+        this.forgetWorkspace(task);
       } else {
         keepLanding(await landedFiles(), null);
         remember();
@@ -3778,6 +3983,13 @@ export class TaskRunner {
       const { task, project } = this.load(taskId);
       let left: string | null = null;
       if (task.branch || task.worktree_path) left = await this.removeWorkspace(project, task);
+      if (worksInFolder(task)) {
+        // In the project folder, discarding puts back what the task found (D398).
+        const undone = restoreKept(this.copiesDir(taskId), project.path);
+        dropKept(this.copiesDir(taskId));
+        this.setTask(taskId, { footprint: { ...task.footprint, touched: [] }, checkout: null });
+        if (undone.left.length) left = `Could not put back ${undone.left.slice(0, 5).join(", ")}${undone.left.length > 5 ? " and more" : ""}: check them by hand.`;
+      }
       this.forgetWorkspace(task);
       // Discarding after a Reject must not erase why it was rejected: the note is the only record of it.
       const note = task.note?.trim() && task.note !== "work discarded" ? `${task.note.trim()} — work discarded` : "work discarded";
@@ -3823,8 +4035,9 @@ export class TaskRunner {
     return this.queueTask(taskId, { fromStage: Math.min(from, Math.max(0, task.pipeline.length - 1)) });
   }
 
-  async diff(taskId: string) {
+  async diff(taskId: string): Promise<DiffFile[]> {
     const { task, project } = this.load(taskId);
+    if (worksInFolder(task) && !task.branch) return this.folderDiff(task, project);
     if (!task.branch || !task.base_sha) return [];
     return this.git.diffTask(project.path, task.base_sha, task.branch);
   }
@@ -3870,7 +4083,10 @@ export class TaskRunner {
         // review that checks the live system itself — rather than as a mode switch (D241).
         // Reading a live system is not changing it: a lookup gets neither plan approval nor a live review (D287).
         const toLive = result.live_access?.changes && !fresh.live && fresh.status === "backlog" && !opts.decided?.live;
+        // The systems it writes to, named, unless someone named them already (D400).
+        const systems = result.live_access?.changes && !fresh.footprint.systems.length ? result.live_access.systems : [];
         this.setTask(taskId, {
+          ...(systems.length ? { footprint: { ...fresh.footprint, systems } } : {}),
           ...(confident ? { type: result.type, labels } : {}),
           triaged_at: nowIso(),
           suggestion: {
@@ -4032,9 +4248,13 @@ export class TaskRunner {
         may_ask: task.may_ask,
         status: "backlog",
       });
-      ids.push(child.id);
-      this.bus.publish({ type: "task.updated", task: child });
-      return child;
+      // Kept as data too, not only in the spec: the queue keeps it off a card changing the same files (D400).
+      const placed = s.files?.length || task.footprint.systems.length
+        ? this.repo.updateTask(child.id, { footprint: { files: s.files ?? [], systems: task.footprint.systems, touched: [] } })
+        : child;
+      ids.push(placed.id);
+      this.bus.publish({ type: "task.updated", task: placed });
+      return placed;
     });
     if (subtasks.length) setImmediate(() => this.promoteReady(project.id));
     return { task: updated, subtasks };

@@ -148,12 +148,15 @@ namespace ClaudeKanban
         // When the board died on its own lately; past the limit it waits for you instead of looping.
         readonly List<DateTime> crashes = new List<DateTime>();
         const int CrashLimit = 3;
+        // Windows ends the server too when it signs out or shuts down; that is not a crash (D397).
+        volatile bool sessionEnding;
         static readonly TimeSpan CrashWindow = TimeSpan.FromMinutes(15);
 
         public App(Mutex mutex, bool rebuilt)
         {
             this.mutex = mutex;
             this.rebuilt = rebuilt;
+            Microsoft.Win32.SystemEvents.SessionEnding += (s, e) => sessionEnding = true;
             // Work finished on other threads comes back through this control, so it needs its handle now.
             var unused = ui.Handle;
 
@@ -429,6 +432,30 @@ namespace ClaudeKanban
         {
             if (p != server || state != State.Running) return;
             Log.Line("The board stopped.");
+            if (WindowsIsEnding()) return;
+            // Windows can end the server a moment before it tells this program it is shutting down, so a
+            // stop is judged two seconds later: restarting mid-shutdown fails the work that was running (D397).
+            var wait = new System.Windows.Forms.Timer();
+            wait.Interval = 2000;
+            wait.Tick += (s, e) =>
+            {
+                wait.Stop();
+                wait.Dispose();
+                if (p != server || state != State.Running || WindowsIsEnding()) return;
+                StoppedOnItsOwn();
+            };
+            wait.Start();
+        }
+
+        bool WindowsIsEnding()
+        {
+            if (!sessionEnding && !Native.ShuttingDown()) return false;
+            Log.Line("Windows is signing out or shutting down: not starting it again.");
+            return true;
+        }
+
+        void StoppedOnItsOwn()
+        {
             DateTime now = DateTime.UtcNow;
             crashes.Add(now);
             crashes.RemoveAll(t => now - t > CrashWindow);
@@ -1444,6 +1471,14 @@ namespace ClaudeKanban
         [DllImport("user32.dll")] static extern bool ReleaseCapture();
         [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
         [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+        [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
+
+        /// <summary>True while Windows is signing out or shutting down (SM_SHUTTINGDOWN).</summary>
+        public static bool ShuttingDown()
+        {
+            try { return GetSystemMetrics(0x2000) != 0; }
+            catch (Exception) { return false; }
+        }
 
         /// <summary>Drawn at the screen's real size: otherwise Windows stretches it, and at 150% it is blurry.</summary>
         public static void MakeDpiAware()

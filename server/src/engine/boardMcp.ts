@@ -4,7 +4,7 @@ import type { Repo } from "../repo.ts";
 import type { Bus } from "../bus.ts";
 import type { Blocked, Mode, Project, Run, RunStyle, Stage, Task, TaskQuestion } from "../types.ts";
 import { EFFORTS, accessOf, isAnswerPipeline, runStyleFields } from "../types.ts";
-import { isGitRepo } from "../git/worktree.ts";
+import { overlaps } from "./footprint.ts";
 import { searchBoard } from "../search.ts";
 
 export interface BoardCtx {
@@ -29,7 +29,8 @@ const stageSchema = z.object({
 });
 
 /**
- * Mode a new task in this project may have: autonomous needs both policy switches allowed. A lookup
+ * Mode a new task in this project may have: autonomous needs the project to allow it. Without worktrees
+ * (or without git) it works in the project folder instead (D398, D399). A lookup
  * (`pipeline` all answer stages) needs no worktree; it needs the project to let autonomous work
  * outside a sandbox, where the live system it reads from can be reached (D352).
  */
@@ -37,18 +38,17 @@ export function allowedMode(project: Project, wanted: Mode, pipeline?: Stage[]):
   if (wanted !== "autonomous") return wanted;
   if (project.policy.autonomous === "forbidden") return "supervised";
   if (pipeline && isAnswerPipeline(pipeline)) return accessOf(project.policy) === "full" ? "autonomous" : "supervised";
-  return project.policy.worktrees === "forbidden" ? "supervised" : wanted;
+  return wanted;
 }
 
 /**
  * The mode and "asks me" a card gets when nobody named one: the board's default run style (D365),
- * held back to supervised where this project cannot run autonomous — its policy, or a folder that is
- * no git repository and so has nowhere to make a worktree.
+ * held back to supervised where this project's policy forbids autonomous. A folder without git no
+ * longer holds it back: the task works in the folder itself (D399).
  */
 export async function defaultRunFields(project: Project, style: RunStyle, pipeline?: Stage[]): Promise<{ mode: Mode; may_ask: boolean }> {
   const wanted = runStyleFields(style);
-  let mode = allowedMode(project, wanted.mode, pipeline);
-  if (mode === "autonomous" && !(pipeline && isAnswerPipeline(pipeline)) && !(await isGitRepo(project.path))) mode = "supervised";
+  const mode = allowedMode(project, wanted.mode, pipeline);
   return { mode, may_ask: mode === "autonomous" && wanted.may_ask };
 }
 
@@ -109,7 +109,7 @@ export function boardHandlers(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtasks?: 
       return text(`Message ${message.id} delivered to ${target.title} (${to}).`);
     },
 
-    createSubtasks(args: { subtasks: { title: string; spec_md: string; mode?: Mode; pipeline?: Stage[]; depends_on?: number[] }[] }) {
+    createSubtasks(args: { subtasks: { title: string; spec_md: string; mode?: Mode; pipeline?: Stage[]; depends_on?: number[]; files?: string[]; live_systems?: string[] }[] }) {
       const parent = own();
       const project = repo.getProject(parent.project_id)!;
       const ids: string[] = [];
@@ -120,7 +120,11 @@ export function boardHandlers(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtasks?: 
           .filter((n) => Number.isInteger(n) && n >= 1 && n <= index && n !== index + 1)
           .map((n) => ids[n - 1])
           .filter(Boolean);
-        const task = repo.createTask({
+        // Two pieces that change the same files go one after the other, whatever the list said (D400).
+        args.subtasks.slice(0, index).forEach((earlier, j) => {
+          if (s.files?.length && earlier.files?.length && overlaps(s.files, earlier.files) && !deps.includes(ids[j])) deps.push(ids[j]);
+        });
+        let task = repo.createTask({
           depends_on: deps,
           project_id: parent.project_id,
           parent_id: parent.id,
@@ -137,6 +141,9 @@ export function boardHandlers(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtasks?: 
           may_ask: parent.may_ask,
           status: "backlog",
         });
+        if (s.files?.length || s.live_systems?.length) {
+          task = repo.updateTask(task.id, { footprint: { files: (s.files ?? []).slice(0, 60), systems: (s.live_systems ?? []).slice(0, 10), touched: [] } });
+        }
         ids.push(task.id);
         bus.publish({ type: "task.updated", task });
         return task;
@@ -295,6 +302,10 @@ export function createBoardServer(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtask
             pipeline: z.array(stageSchema).optional(),
             depends_on: z.array(z.number().int().min(1)).optional()
               .describe("1-based positions of EARLIER subtasks in this list that must finish first. Omit for work that can run in parallel."),
+            files: z.array(z.string()).max(60).optional()
+              .describe("Project files (or folders ending in /) this subtask will change. Subtasks that share files run one after the other."),
+            live_systems: z.array(z.string()).max(10).optional()
+              .describe("Live systems this subtask writes to, by name. Two that write to the same one take turns."),
           })).min(1),
         },
         async (a) => h.createSubtasks(a as Parameters<typeof h.createSubtasks>[0])),

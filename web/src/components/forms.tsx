@@ -13,9 +13,15 @@ import { defaultWhen, startAtOf, WhenPicker, whenInvalid, type When } from "./Wh
 
 export function autonomousBlocked(p: ProjectWithGit): string | null {
   if (p.policy.autonomous === "forbidden") return "This project's policy forbids autonomous runs.";
-  if (p.policy.worktrees === "forbidden") return "This project's policy forbids worktrees (autonomous runs need one).";
-  if (!p.isGit) return "Not a git repository — autonomous runs need a worktree.";
   return null;
+}
+
+/**
+ * Where an autonomous task in this project will work: in the project folder when Settings say so,
+ * the project forbids worktrees, or the folder has no git (D398, D399); otherwise its own worktree.
+ */
+export function autonomousInFolder(p: ProjectWithGit, settings: { autonomousWorktree?: boolean } | null | undefined): boolean {
+  return !p.isGit || p.policy.worktrees === "forbidden" || settings?.autonomousWorktree === false;
 }
 
 /** Why a lookup here cannot run autonomous, or null when it can: it needs no worktree, only the project's say-so (D352). */
@@ -46,6 +52,7 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
   const [spec, setSpec] = useState("");
   // The board's default run style (D365), unless this project cannot run autonomous at all.
   const [style, setStyle] = useState<RunStyle>(() => (blocked ? "supervised" : settings?.defaultRunStyle ?? "ask"));
+  const inFolder = autonomousInFolder(project, settings);
   const { mode, may_ask } = runStyleFields(style);
   const full: Stage[] = project.policy.defaultPipeline?.length ? project.policy.defaultPipeline : settings?.defaultPipeline ?? [];
   const [pipeline, setPipeline] = useState<Stage[]>(full);
@@ -117,7 +124,7 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
             <DependsOn projectId={project.id} value={after} onChange={setAfter} />
           </Field>
         ) : null}
-        <Field group label={<span className="flex items-center gap-1.5">Run mode <ModeHelp /></span>} hint={style === "ask" ? "Runs in its own worktree on branch kanban/<id>, and waits for your answer when Claude asks you something; Approve merges it." : mode === "autonomous" ? "Runs in its own worktree on branch kanban/<id>; Approve merges it." : ownBranch && !noBranch ? "Runs on its own branch kanban/<id>; every write waits for your approval, and Approve merges it." : "Runs in the main checkout; every write waits for your approval."}>
+        <Field group label={<span className="flex items-center gap-1.5">Run mode <ModeHelp /></span>} hint={inFolder && mode === "autonomous" ? `Works in the project folder itself${style === "ask" ? ", waits for your answer when Claude asks you something," : ""} and ${project.isGit ? "Approve commits only the files it changed" : "Approve marks it done"}. Tasks that would change the same files take turns.` : style === "ask" ? "Runs in its own worktree on branch kanban/<id>, and waits for your answer when Claude asks you something; Approve merges it." : mode === "autonomous" ? "Runs in its own worktree on branch kanban/<id>; Approve merges it." : ownBranch && !noBranch ? "Runs on its own branch kanban/<id>; every write waits for your approval, and Approve merges it." : "Runs in the main checkout; every write waits for your approval."}>
           <RunStyleSwitch
             size="lg"
             capitalized
@@ -126,8 +133,8 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
             blocked={blocked}
             detail={{
               supervised: "main checkout · approval cards",
-              autonomous: blocked ?? "worktree · no approvals",
-              ask: blocked ?? "worktree · waits for your answers",
+              autonomous: blocked ?? (inFolder ? "project folder · no approvals" : "worktree · no approvals"),
+              ask: blocked ?? (inFolder ? "project folder · waits for your answers" : "worktree · waits for your answers"),
             }}
           />
           {mode === "supervised" && when.kind !== "repeat" ? (

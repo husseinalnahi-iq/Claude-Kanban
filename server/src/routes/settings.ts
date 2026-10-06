@@ -104,6 +104,7 @@ const patchSchema = z.object({
   loadUserPlugins: z.boolean().optional(),
   claudeAutoMemory: z.boolean().optional(),
   autonomousLive: z.boolean().optional(),
+  autonomousWorktree: z.boolean().optional(),
   browserChecks: z.boolean().optional(),
   chromeInSupervised: z.boolean().optional(),
   taskBrowser: z.enum(["board", "chrome"]).optional(),

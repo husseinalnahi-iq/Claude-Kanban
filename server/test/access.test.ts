@@ -173,7 +173,7 @@ test("a project that keeps autonomous in its sandbox sends a chat's lookup to su
     assert.equal(s.repo.getTask(open.created.id)!.mode, "autonomous", "a lookup needs no worktree, so forbidding them does not stop it");
     assert.match(open.note, /nothing is asked/);
     const change = JSON.parse(h.createTask({ title: "Dark mode", spec_md: "x", mode: "autonomous" } as never).content[0].text);
-    assert.equal(s.repo.getTask(change.created.id)!.mode, "supervised", "a card that changes something still needs its own copy");
+    assert.equal(s.repo.getTask(change.created.id)!.mode, "autonomous", "without worktrees a card that changes something works in the project folder (D398)");
   } finally {
     await s.cleanup();
   }

@@ -137,7 +137,7 @@ const git: SetupCheck = {
   id: "git",
   title: "git",
   level: "required",
-  why: "Autonomous runs work in git worktrees, and every change is reviewed as a diff.",
+  why: "Autonomous runs get their own copy of the project (a git worktree), and every change is merged as a diff. Without git they still run, in the project folder itself.",
   claude: { goal: "Install git on this computer.", doneWhen: "git --version" },
   manual: { win32: "winget install --id Git.Git -e", darwin: "xcode-select --install", linux: "sudo apt install git" },
   async detect({ probe }) {

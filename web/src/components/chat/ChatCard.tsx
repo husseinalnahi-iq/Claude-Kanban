@@ -7,6 +7,7 @@ import { navigate } from "../../lib/router.ts";
 import { Markdown } from "../../lib/markdown.tsx";
 import { cost, STATUS_META } from "../../lib/format.ts";
 import { phase, waitingOn, waitLine } from "../../lib/phase.ts";
+import { holdLine } from "../../../../server/src/engine/footprint.ts";
 import { isQuestion } from "../../lib/questions.ts";
 import { inputSummary } from "../../lib/approvals.ts";
 import { Button, Chip, ErrorLine, useAction } from "../ui.tsx";
@@ -126,6 +127,8 @@ export function ChatCard({ id, title, actions, messageId }: { id: string; title:
       </div>
       {card && blockers.length && (card.status === "queued" || card.status === "backlog") ? (
         <div className={`mt-1 text-[11.5px] ${blockers.some((b) => b.status === "failed") ? "text-rust" : "text-ink-400"}`}>⏳ {waitLine(blockers)}</div>
+      ) : card?.hold && card.status === "queued" ? (
+        <div className="mt-1 text-[11.5px] text-slate">⏳ {holdLine(card.hold)}</div>
       ) : null}
       {card && latest ? (
         <div className="mt-1.5 space-y-1.5">
