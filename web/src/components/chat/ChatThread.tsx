@@ -266,6 +266,7 @@ export function ChatThread({
         watchChat(c.id);
       }
       setText("");
+      if (input.current) input.current.style.height = "";
       setFiles([]);
       pinned.current = true;
       await api.sendChat(id, t || "Here is a file.");
@@ -370,11 +371,16 @@ export function ChatThread({
             >
               <textarea
                 ref={input}
-                rows={2}
-                className="block max-h-40 w-full resize-none bg-transparent px-3 pt-2 text-[12px] text-ink-100 outline-none placeholder:text-ink-500"
-                placeholder={dragging ? "Drop the file here" : `Ask about ${project.name}… (drop or paste a file to attach it)`}
+                rows={1}
+                className="block max-h-40 min-h-[34px] w-full resize-none bg-transparent px-3 pt-2 text-[12px] text-ink-100 outline-none placeholder:text-ink-500"
+                placeholder={dragging ? "Drop the file here" : `Ask about ${project.name}… · Enter to send, Shift+Enter for a new line`}
                 value={text}
-                onChange={(e) => setText(e.target.value)}
+                onChange={(e) => {
+                  setText(e.target.value);
+                  // One line until you write more: grows with the text, up to the max height (D421).
+                  e.currentTarget.style.height = "auto";
+                  e.currentTarget.style.height = `${e.currentTarget.scrollHeight}px`;
+                }}
                 onPaste={(e) => {
                   const pasted = [...e.clipboardData.files];
                   if (pasted.length) {
@@ -391,8 +397,10 @@ export function ChatThread({
               />
               {/* Every control is 34px tall (the drop-downs' height), so the row reads as one line; the send
                   group wraps as a whole and stays on the right instead of breaking apart. */}
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 border-t border-ink-800/70 px-2 py-1.5">
-                <div className="contents">
+              {/* One row that never wraps (D421): the pickers give way first, and What next? is a single icon,
+                  so Send stays on the line at the right instead of dropping under the rest. */}
+              <div className="flex items-center gap-1.5 border-t border-ink-800/70 px-1.5 py-1">
+                <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
                 <input ref={picker} type="file" multiple className="hidden" accept=".png,.jpg,.jpeg,.gif,.webp,.svg,.pdf,.csv,.tsv,.xlsx,.xls,.docx,.doc,.pptx,.txt,.md,.log,.json,.yaml,.yml,.xml,.html,.htm" onChange={(e) => { void attach([...(e.target.files ?? [])]); e.target.value = ""; }} />
                 <button
                   className={`flex h-[34px] w-[34px] shrink-0 cursor-pointer items-center justify-center rounded-md hover:bg-ink-800 ${uploading ? "breathe text-amber" : "text-ink-400 hover:text-amber"}`}
@@ -405,18 +413,18 @@ export function ChatThread({
                 </button>
                 {/* The same pickers the pipeline uses, and they work before the first message: an empty
                     chat has no row to patch yet, so the choice is held here and used when it is created. */}
-                <div className="w-[196px] shrink-0" title="Model for this chat: Claude, or a Claude-compatible provider (Settings → Providers)">
+                <div className="w-[170px] min-w-[120px] shrink" title="Model for this chat: Claude, or a Claude-compatible provider (Settings → Providers)">
                   <ChatModelPicker provider={provider} model={model} onChange={setModel} models={settings?.models ?? []} />
                 </div>
                 {/* Effort is Claude's: Claude Code does not send it to another model. */}
                 {!onClaude || effortsFor(model, claude.result).none ? null : (
-                  <div className="w-[100px] shrink-0">
+                  <div className="w-[92px] shrink-0">
                     <EffortSelect model={model} value={effort} onChange={setEffort} />
                   </div>
                 )}
                 {/* The mode the cards of this chat will run in; a message that names one wins (D344). */}
                 <RunStyleSwitch
-                  size="md"
+                  size="sm"
                   value={mode}
                   onChange={setMode}
                   blocked={noAuto}
@@ -428,24 +436,24 @@ export function ChatThread({
                   }}
                 />
                 </div>
-                <div className="ml-auto flex shrink-0 items-center gap-2">
-                <span className="hidden whitespace-nowrap text-[10.5px] text-ink-600 2xl:inline">Enter to send · Shift+Enter new line</span>
+                <div className="flex shrink-0 items-center gap-1.5">
                 {settings?.nextStepsSuggestions !== false && chatId && messages.some((m) => m.role === "assistant") && !chat?.busy ? (
                   <button
-                    className="flex h-[34px] shrink-0 cursor-pointer items-center rounded-md border border-iris/50 px-2.5 text-[12px] text-iris hover:bg-iris/10"
+                    className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-md border border-iris/50 text-[13px] text-iris hover:bg-iris/10"
                     onClick={() => void suggest()}
-                    title="Ask for the next five things worth doing after this: bugs to fix, security to tighten, follow-up edits, useful additions. One reply at this chat's model; nothing is created until you say so."
+                    aria-label="What next?"
+                    title="What next? — the next five things worth doing after this: bugs to fix, security to tighten, follow-up edits, useful additions. One reply at this chat's model; nothing is created until you say so."
                   >
-                    ✦ What next?
+                    ✦
                   </button>
                 ) : null}
                 {chat?.busy ? (
-                  <button className="flex h-[34px] shrink-0 cursor-pointer items-center rounded-md border border-rust/50 px-3 text-[12px] text-rust hover:bg-rust/10" onClick={() => chat && void api.stopChat(chat.id).catch(say)}>
+                  <button className="flex h-[30px] shrink-0 cursor-pointer items-center rounded-md border border-rust/50 px-2.5 text-[12px] text-rust hover:bg-rust/10" onClick={() => chat && void api.stopChat(chat.id).catch(say)}>
                     ■ Stop
                   </button>
                 ) : (
                   <button
-                    className="flex h-[34px] shrink-0 cursor-pointer items-center rounded-md bg-amber px-4 text-[12px] font-semibold text-ink-950 transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+                    className="flex h-[30px] shrink-0 cursor-pointer items-center rounded-md bg-amber px-3 text-[12px] font-semibold text-ink-950 transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
                     disabled={!text.trim() && !waiting.length}
                     onClick={() => void send()}
                   >

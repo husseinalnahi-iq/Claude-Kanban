@@ -262,7 +262,9 @@ export function Transcript({ runId, meta }: { runId: string; meta?: { model: str
       }}
     >
       {meta ? (
-        <div className="flex items-center gap-2 font-mono text-[11px] text-ink-400">
+        // Pinned while the steps scroll under it: the cost and context bar are what you check mid-run (D421).
+        <div className="sticky top-0 z-10 -mb-0.5 flex items-center gap-2 bg-ink-900 pb-1.5 font-mono text-[11px] text-ink-400">
+
           <span>{modelLabel(meta)} · {costLabel(meta)} · in {tokens(meta.input_tokens)} · out {tokens(meta.output_tokens)}</span>
           <span className="text-ink-600">·</span>
           <span className="text-ink-500">context</span>
