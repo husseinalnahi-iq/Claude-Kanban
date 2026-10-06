@@ -105,6 +105,7 @@ const patchSchema = z.object({
   claudeAutoMemory: z.boolean().optional(),
   autonomousLive: z.boolean().optional(),
   autoRecover: z.boolean().optional(),
+  autonomousReach: z.enum(["full", "sandbox"]).optional(),
   autoContinueWhileProgressing: z.boolean().optional(),
   debriefOnFinish: z.boolean().optional(),
   autonomousWorktree: z.boolean().optional(),

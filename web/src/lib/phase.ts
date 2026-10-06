@@ -1,4 +1,4 @@
-import { accessAsk, stoppedBy, type TaskCard, type TaskStatus } from "../../../server/src/types.ts";
+import { PREPARING_COPY, accessAsk, stoppedBy, type TaskCard, type TaskStatus } from "../../../server/src/types.ts";
 
 /** The provider of the stage a paused task stopped on: the first one that has not succeeded. */
 export function stoppedProvider(card: TaskCard): string | null {
@@ -24,6 +24,8 @@ export function phase(card: TaskCard, asking?: boolean): { text: string; tone: s
   if (card.resolution && ["resolving", "checking", "reviewing"].includes(card.resolution.state)) {
     return { text: "merging", tone: "border-moss/60 text-moss", title: `You approved it. It conflicted with what landed on ${card.resolution.base} meanwhile, so Claude is combining the two — it lands by itself when that passes` };
   }
+  // Started, making its own copy of the project before the first stage (D416).
+  if (card.summary === PREPARING_COPY) return { text: "preparing", tone: "border-slate/50 text-slate", title: "Making its own copy of the project — a minute or two on a big one; then the first stage starts" };
   if (card.status === "planning") return { text: "planning", tone: "border-cyan/50 text-cyan", title: "The plan stage is running" };
   const i = card.stage_states.indexOf("running");
   const stage = i >= 0 ? card.pipeline[i]?.stage : undefined;

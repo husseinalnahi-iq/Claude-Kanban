@@ -220,7 +220,7 @@ export function confineOutput(tool: string, input: Record<string, unknown>, outp
  */
 export function browserDecision(
   toolName: string, raw: Record<string, unknown>, autonomous: boolean, cwd: string, outputDir: string,
-  opts: { sites?: string[]; chrome?: boolean } = {},
+  opts: { sites?: string[]; chrome?: boolean; anywhere?: boolean } = {},
 ): BrowserDecision | null {
   if (toolName.startsWith(CHROME_PREFIX)) {
     // Settings → Browser for tasks → Your Chrome: the owner gives unattended runs their own signed-in browser.
@@ -233,13 +233,15 @@ export function browserDecision(
   const tool = toolName.slice(PREFIX.length);
   const input = confineOutput(tool, raw, outputDir);
   const url = typeof input.url === "string" ? input.url : null;
-  if (url !== null && !isLocalUrl(url, cwd) && !(autonomous && onSignedInSite(url, opts.sites ?? []))) {
+  // Full reach (D418): an autonomous run browses any site, as Claude Code would.
+  if (url !== null && !isLocalUrl(url, cwd) && !(autonomous && (opts.anywhere || onSignedInSite(url, opts.sites ?? [])))) {
     return autonomous
       ? { behavior: "deny", message: `Refused ${url}: autonomous runs may only open local pages (localhost, 127.0.0.1, or files in the task's folder) and the sites signed in to under Settings → Browser for tasks.` }
       : { behavior: "ask", input };
   }
   if (tool === "browser_navigate" || LOOK.has(tool)) return { behavior: "allow", input };
   if (ACT.has(tool)) return { behavior: autonomous ? "allow" : "ask", input };
+  if (autonomous && opts.anywhere) return { behavior: "allow", input };
   return autonomous
     ? { behavior: "deny", message: `Autonomous runs can't use ${tool}: it can reach beyond the page being checked. Ask for a supervised task if this is needed.` }
     : { behavior: "ask", input };

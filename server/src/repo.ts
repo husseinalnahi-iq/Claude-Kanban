@@ -583,6 +583,7 @@ export class Repo {
       claudeAutoMemory: m.get("claudeAutoMemory") === "true",
       autonomousLive: (m.get("autonomousLive") ?? "true") !== "false",
       autoRecover: (m.get("autoRecover") ?? "true") !== "false",
+      autonomousReach: m.get("autonomousReach") === "sandbox" ? "sandbox" : "full",
       autoContinueWhileProgressing: (m.get("autoContinueWhileProgressing") ?? "true") !== "false",
       debriefOnFinish: (m.get("debriefOnFinish") ?? "true") !== "false",
       autonomousWorktree: (m.get("autonomousWorktree") ?? "true") !== "false",

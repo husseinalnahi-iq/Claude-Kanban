@@ -16,10 +16,10 @@ const SEV: Record<Objection["severity"], string> = {
  * the critic's objections and the revised plan, pick one. With plan approval on (D231): the plan
  * alone — approve it, edit it, or send the task back with a note.
  */
-export function PlanGate({ d }: { d: TaskDetail }) {
+export function PlanGate({ d, showingPlan, onShowPlan }: { d: TaskDetail; showingPlan?: boolean; onShowPlan?: () => void }) {
   const gate = d.task.plan_gate;
   if (!gate) return null;
-  return gate.kind === "approval" ? <ApprovalGate d={d} gate={gate} /> : <DebateGate d={d} gate={gate} />;
+  return gate.kind === "approval" ? <ApprovalGate d={d} gate={gate} showingPlan={showingPlan} onShowPlan={onShowPlan} /> : <DebateGate d={d} gate={gate} />;
 }
 
 function PlanEditor({ initial, busy, onUse, onCancel }: { initial: string; busy: boolean; onUse: (text: string) => void; onCancel: () => void }) {
@@ -35,7 +35,12 @@ function PlanEditor({ initial, busy, onUse, onCancel }: { initial: string; busy:
   );
 }
 
-function ApprovalGate({ d, gate }: { d: TaskDetail; gate: Gate }) {
+/**
+ * The action, not the plan: the plan is on the Plan tab, which the drawer opens on. Showing it here
+ * too put the same long text on screen twice (owner, 2026-10-06: "annoying, I see same things twice";
+ * D419). Editing happens here, because an edit is the action.
+ */
+function ApprovalGate({ d, gate, showingPlan, onShowPlan }: { d: TaskDetail; gate: Gate; showingPlan?: boolean; onShowPlan?: () => void }) {
   const { busy, error, run } = useAction();
   const [editing, setEditing] = useState(false);
   const [sending, setSending] = useState(false);
@@ -47,16 +52,16 @@ function ApprovalGate({ d, gate }: { d: TaskDetail; gate: Gate }) {
         <span className="pulse-rose inline-block h-2 w-2 rounded-full bg-iris" />
         <span className="text-[12.5px] font-semibold text-iris">Plan waiting for you</span>
         <span className="text-[11.5px] text-ink-400">
-          nothing is written until you approve it{d.task.live ? " — this task touches a live system" : ""}. The full plan is also on the Plan tab.
+          nothing is written until you approve it{d.task.live ? " — this task touches a live system" : ""}.{showingPlan ? " Read it below." : ""}
         </span>
+        {!showingPlan && onShowPlan ? (
+          <button type="button" className="cursor-pointer text-[11.5px] text-iris hover:underline" onClick={onShowPlan}>Read the plan →</button>
+        ) : null}
       </div>
       {editing ? (
         <PlanEditor initial={gate.original} busy={busy} onUse={(text) => decide("custom", text)} onCancel={() => setEditing(false)} />
       ) : (
         <>
-          <div className="max-h-80 overflow-y-auto rounded-lg border border-ink-700 bg-ink-950/40 p-2.5">
-            <Markdown text={gate.original} className="text-[12px]" />
-          </div>
           {sending ? (
             <div className="mt-2 flex items-center gap-2">
               <input className={inputCls} placeholder="What should change? The planner reads this first." value={note} onChange={(e) => setNote(e.target.value)} autoFocus />

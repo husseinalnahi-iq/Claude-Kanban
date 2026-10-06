@@ -188,14 +188,14 @@ const Card = memo(function Card({
         ) : null}
         {watching ? (
           <button
-            className="rise flex cursor-pointer items-center gap-1 rounded border border-rose/50 bg-rose/10 px-1.5 py-px font-mono text-[10px] font-semibold uppercase tracking-wide text-rose hover:bg-rose/20"
+            className="rise flex cursor-pointer items-center gap-1 rounded border border-live/50 bg-live/10 px-1 py-0 font-mono text-[9.5px] font-semibold lowercase text-live hover:bg-live/20"
             title="Its browser is open: watch it work"
             onClick={(e) => {
               e.stopPropagation();
               openTaskOn(card.id, "browser");
             }}
           >
-            <span className="pulse-rose h-1.5 w-1.5 rounded-full bg-rose" /> live
+            <span className="pulse-live h-1.5 w-1.5 rounded-full bg-live" /> live
           </button>
         ) : null}
         {progress ? (

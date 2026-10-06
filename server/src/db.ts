@@ -260,6 +260,7 @@ export function openDb(file: string): DatabaseSync {
   seed.run("claudeAutoMemory", "false");
   seed.run("autonomousLive", "true");
   seed.run("autoRecover", "true");
+  seed.run("autonomousReach", "full");
   seed.run("autoContinueWhileProgressing", "true");
   seed.run("debriefOnFinish", "true");
   seed.run("autonomousWorktree", "true");

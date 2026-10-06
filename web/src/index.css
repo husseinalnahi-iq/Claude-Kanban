@@ -27,6 +27,7 @@
   /* signal colours — one per status */
   --color-amber: #f2a93b;   /* running / live */
   --color-cyan: #5ec8d8;    /* planning */
+  --color-live: #4f8ef7;    /* a task's browser is open and working */
   --color-rose: #f0567a;    /* approval — needs you */
   --color-lime: #b5d95b;    /* review */
   --color-moss: #6fa872;    /* done */
@@ -125,6 +126,7 @@
 
   --color-amber: #9c6200;
   --color-cyan: #1b7383;
+  --color-live: #2563d6;
   --color-rose: #bd1f57;
   --color-lime: #57741b;
   --color-moss: #2b7450;
@@ -191,6 +193,7 @@
 
   --color-amber: #f7b545;
   --color-cyan: #5ccbf2;
+  --color-live: #5b9bff;
   --color-rose: #ff6b9d;
   --color-lime: #c3e35c;
   --color-moss: #62c68e;
@@ -395,6 +398,14 @@ select:focus-visible {
   100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-rose) 0%, transparent); }
 }
 .pulse-rose { animation: pulse-ring 1.6s ease-out infinite; }
+/* A task's browser at work (D420): blue, so it never reads as the rose "needs you". */
+@keyframes pulse-ring-live {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-live) 60%, transparent); }
+  70% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--color-live) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-live) 0%, transparent); }
+}
+.pulse-live { animation: pulse-ring-live 1.6s ease-out infinite; }
+@media (prefers-reduced-motion: reduce) { .pulse-live { animation: none; } }
 
 @keyframes breathe {
   0%, 100% { opacity: 1; }

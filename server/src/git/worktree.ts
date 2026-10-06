@@ -13,15 +13,39 @@ export class GitError extends Error {
 }
 
 /**
+ * Windows refuses paths over 260 characters unless git is told to use its long-path API. A task's copy
+ * sits ~30 characters deeper than the project (`.kanban\wt\t_…\`), so a repository whose own checkout
+ * just fits (one had 42k files, some with long attachment names) failed in every worktree with
+ * "Could not reset index file" before Claude ran at all (D415). Per command, so the repository's own
+ * config is never touched.
+ */
+export const GIT_FLAGS = ["-c", "core.quotepath=false", ...(process.platform === "win32" ? ["-c", "core.longpaths=true"] : [])];
+
+/** The same for git run by Claude inside a task's folder: git reads extra config from these variables. */
+export const GIT_ENV: Record<string, string> = process.platform === "win32"
+  ? { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.longpaths", GIT_CONFIG_VALUE_0: "true" }
+  : {};
+
+/**
+ * What git said, without the progress meter: a checkout writes "Updating files: 6% (2858/42454)" over
+ * itself with carriage returns, and the card showed 600 characters of that instead of the error.
+ */
+export function gitErrorText(raw: string): string {
+  const lines = raw.split(/\r?\n/).flatMap((l) => l.split("\r")).map((l) => l.trim()).filter(Boolean);
+  const real = lines.filter((l) => !/^(Updating files|Checking out files|Receiving objects|Resolving deltas|remote: (Counting|Compressing|Enumerating))\b/i.test(l));
+  return (real.length ? real : lines.slice(-1)).slice(-6).join("\n");
+}
+
+/**
  * Runs git and rejects on ANY non-zero exit. (simple-git's raw() resolved on a conflicted merge because
  * git prints CONFLICT to stdout — see docs/DECISIONS.md D18.)
  */
 function git(cwd: string, args: string[]): Promise<string> {
   return new Promise((resolvePromise, reject) => {
-    execFile("git", ["-c", "core.quotepath=false", ...args], { cwd, maxBuffer: 64 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+    execFile("git", [...GIT_FLAGS, ...args], { cwd, maxBuffer: 64 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
       if (err) {
         const code = typeof (err as { code?: unknown }).code === "number" ? ((err as { code: number }).code) : null;
-        const detail = (stderr || stdout || err.message).trim();
+        const detail = gitErrorText(stderr || stdout || err.message);
         reject(new GitError(`git ${args[0]} failed: ${detail}`, code, stdout, stderr));
       } else {
         resolvePromise(stdout);
@@ -92,13 +116,29 @@ export async function addWorktree(projectPath: string, taskId: string): Promise<
   const path = worktreePathFor(projectPath, taskId);
   const branch = branchFor(taskId);
   mkdirSync(join(projectPath, ".kanban", "wt"), { recursive: true });
+  await git(projectPath, ["worktree", "prune"]);
+  // A half-made copy from an attempt that failed: git will not add a worktree over it (D415).
+  if (existsSync(path) && !(await listWorktrees(projectPath)).some((p) => samePath(p, path))) await removeFolder(path);
   if (await branchExists(projectPath, branch)) {
-    await git(projectPath, ["worktree", "prune"]);
-    await git(projectPath, ["worktree", "add", path, branch]);
-    return { path, branch, baseSha: null };
+    // A branch with no work of its own is what a failed attempt leaves: start it again from HEAD, so the
+    // task gets a base to diff against. One with commits is real work: re-attach to it.
+    const own = Number((await git(projectPath, ["rev-list", "--count", `HEAD..${branch}`])).trim()) || 0;
+    if (own > 0) {
+      await git(projectPath, ["worktree", "add", path, branch]);
+      return { path, branch, baseSha: null };
+    }
+    await git(projectPath, ["branch", "-D", branch]);
   }
   const baseSha = (await git(projectPath, ["rev-parse", "HEAD"])).trim();
-  await git(projectPath, ["worktree", "add", "-b", branch, path, baseSha]);
+  try {
+    await git(projectPath, ["worktree", "add", "-b", branch, path, baseSha]);
+  } catch (err) {
+    // Leave nothing behind: an orphan branch and a half-written folder only got in the next attempt's way.
+    await removeFolder(path).catch(() => null);
+    await git(projectPath, ["worktree", "prune"]).catch(() => "");
+    if (await branchExists(projectPath, branch).catch(() => false)) await git(projectPath, ["branch", "-D", branch]).catch(() => "");
+    throw err;
+  }
   return { path, branch, baseSha };
 }
 

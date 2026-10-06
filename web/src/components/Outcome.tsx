@@ -4,6 +4,7 @@ import { api, type TaskDetail } from "../lib/api.ts";
 import { Markdown } from "../lib/markdown.tsx";
 import { Button, ErrorLine, inputCls, useAction } from "./ui.tsx";
 import { useAsk } from "./Ask.tsx";
+import { useAppData } from "../lib/store.tsx";
 
 type Verdict = "APPROVE" | "CHANGES_NEEDED" | "BLOCKED";
 
@@ -32,7 +33,9 @@ export function BlockedPanel({ d }: { d: TaskDetail }) {
   const stage = t.pipeline[b.stage_index]?.stage ?? "stage";
   const report = lastOf(stageRuns(d), (r) => r.stage_index === b.stage_index)?.result_md;
   const hasWork = !!(t.branch || t.worktree_path);
-  const canSwitch = b.needs === "supervised" && t.mode === "autonomous";
+  const { settings } = useAppData();
+  // With full reach (D418) an autonomous task can already do what a supervised one could: no switch.
+  const canSwitch = b.needs === "supervised" && t.mode === "autonomous" && settings?.autonomousReach === "sandbox";
   const n = b.stage_index + 1;
   // The same rule as the server's supervisedFrom: the plan is not made again, the stage that writes reruns.
   const from = advisory ? supervisedFrom(t.pipeline, b.stage_index) : b.stage_index;

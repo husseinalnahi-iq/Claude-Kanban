@@ -12,7 +12,7 @@ import { ScheduleModal, startLabel } from "../components/SchedulesPanel.tsx";
 import { QuestionCard, QuestionHistory } from "../components/QuestionCard.tsx";
 import { isQuestion } from "../lib/questions.ts";
 import { openTerminal } from "../lib/terminal.ts";
-import { LiveBrowser } from "../components/LiveBrowser.tsx";
+import { LiveBrowser, useBrowserLive } from "../components/LiveBrowser.tsx";
 import { useAppData } from "../lib/store.tsx";
 import { Markdown } from "../lib/markdown.tsx";
 import { ago, cost, costLabel, duration, modelLabel, PRIORITY_META, shortModel, STATUS_META, TYPE_META } from "../lib/format.ts";
@@ -943,6 +943,8 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
   // For the tab's count; the tab itself keeps its own live list.
   const commands = useTaskCommands(taskId);
   const result = Boolean(d && hasResult(d));
+  // Its browser is open and working: the Browser tab pulses blue so you can watch (D420).
+  const browsing = useBrowserLive(taskId);
   const current: Tab =
     tab ?? (d?.task.plan_gate ? (d.task.plan_gate.kind === "approval" ? "plan" : "spec") : pending.length ? "approvals" : d && ["planning", "running"].includes(d.task.status) ? "activity" : result ? "result" : "spec");
 
@@ -1004,14 +1006,15 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
                 <TitleEditor d={d} />
                 {d.task.error && d.task.status === "failed" && !stoppedBy(d.task) ? <div className="mt-1 font-mono text-[11.5px] text-rust">{d.task.error}</div> : null}
                 {/* A task that ran out says so in its own panel below, with the ways on. */}
-                {d.task.note && !(d.task.status === "paused" && d.task.pause_reason !== "cost") ? (
+                {/* Not while a strip below says the same thing (a plan to approve): once is enough (D419). */}
+                {d.task.note && !d.task.plan_gate && !(d.task.status === "paused" && d.task.pause_reason !== "cost") ? (
                   <div className="mt-1 text-[11px] italic text-ink-400">Note: {d.task.note}</div>
                 ) : null}
               </div>
               <button className="text-xl leading-none text-ink-400 hover:text-ink-100 cursor-pointer" onClick={onClose} aria-label="Close">×</button>
             </div>
             {showCost ? <div className="border-b border-ink-800 px-5 py-3"><CostPanel runs={d.runs} /></div> : null}
-            {d.task.plan_gate ? <PlanGate d={d} /> : null}
+            {d.task.plan_gate ? <PlanGate d={d} showingPlan={current === "plan"} onShowPlan={() => setTab("plan")} /> : null}
             {/* A suggestion matters only while the work it is about waits on you (D382). */}
             {(stoppedBy(d.task) || (d.task.blocked?.advisory && ["review", "failed"].includes(d.task.status))) && !d.busy ? <BlockedPanel d={d} /> : null}
             <QuestionsPanel d={d} />
@@ -1029,7 +1032,12 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
                     title={TAB_HINT[t]}
                     className={`relative whitespace-nowrap px-3 py-2.5 text-[11.5px] transition-colors cursor-pointer ${current === t ? "text-ink-100" : "text-ink-400 hover:text-ink-200"} ${t === "result" ? "font-semibold" : ""}`}
                   >
-                    {TAB_LABEL[t]}
+                    {t === "browser" && browsing ? (
+                      <span className="mr-1.5 inline-flex items-center gap-1.5 text-live" title="Its browser is open and working — click to watch">
+                        <span className="pulse-live inline-block h-1.5 w-1.5 rounded-full bg-live" />
+                      </span>
+                    ) : null}
+                    <span className={t === "browser" && browsing ? "font-semibold text-live" : undefined}>{TAB_LABEL[t]}</span>
                     {badge ? <span className={`ml-1.5 font-mono text-[10.5px] ${t === "approvals" ? "text-rose" : "text-ink-500"}`}>{badge}</span> : null}
                     {current === t ? <span className="absolute inset-x-2 -bottom-px h-0.5 rounded bg-amber" /> : null}
                   </button>

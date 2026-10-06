@@ -143,6 +143,7 @@ test("an autonomous stage that keeps hitting the sandbox is stopped and marked b
     },
   );
   const s = setup(f.fn);
+  s.repo.updateSettings({ autonomousReach: "sandbox" } as never);
   f.holder.ctx = s;
   gitInit(s.dir);
   try {

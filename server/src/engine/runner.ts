@@ -23,7 +23,7 @@ type RateLimitInfo = {
 };
 import { RunQueue } from "./queue.ts";
 import { buildFixPrompt, buildRoundFallbackPrompt, buildRoundPrompt, buildStagePrompt, type PromptCtx } from "./prompts.ts";
-import { PATH_KEYS, autonomousGate, blockedCommand, escalationHint, handsOffGate, isReadOnlyMcp, isReadOnlyShell, isSafeMcp, isTrusted, killsByName, markitdownRead, READ_ONLY_TOOLS, readViolation, serverRule, trustRules } from "./gate.ts";
+import { PATH_KEYS, autonomousGate, blockedCommand, fullReachGate, escalationHint, handsOffGate, isReadOnlyMcp, isReadOnlyShell, isSafeMcp, isTrusted, killsByName, markitdownRead, READ_ONLY_TOOLS, readViolation, serverRule, trustRules } from "./gate.ts";
 import { credentialRisk } from "./credentials.ts";
 import { clash, mayConflict, planFootprint, type FootprintOf } from "./footprint.ts";
 import { dropKept, keepOriginal, keptCopy, keptFiles, relInside, restoreKept } from "./folderCopies.ts";
@@ -53,7 +53,7 @@ import { QuotaReader, type LiveQuota } from "./providers/usage.ts";
 import type { Resolved, StageInvocation } from "./providers/types.ts";
 import { saveAttachment } from "../routes/attachments.ts";
 import { pickBrowser, realProbe } from "../setup/probe.ts";
-import { ANTHROPIC_PROVIDER_ID, ARTIFACT_EXTS, DEBATE_ROUND_CEILING, EFFORTS, MARKITDOWN_TOOL, TRANSIENT_DELAYS_MS, TRANSIENT_RETRIES, accessOf, isHandsOff, recommendedOption, sharesProjectFolder, supervisedFrom, unlockedBySignIn, usesWorktree, worksInFolder, MAX_ATTACHMENT_BYTES, attachmentKind, supportsFastMode, type ClaudeModelsResult, type FastModeStatus } from "../types.ts";
+import { ANTHROPIC_PROVIDER_ID, ARTIFACT_EXTS, DEBATE_ROUND_CEILING, EFFORTS, MARKITDOWN_TOOL, PREPARING_COPY, TRANSIENT_DELAYS_MS, TRANSIENT_RETRIES, accessOf, isHandsOff, recommendedOption, sharesProjectFolder, supervisedFrom, unlockedBySignIn, usesWorktree, worksInFolder, MAX_ATTACHMENT_BYTES, attachmentKind, supportsFastMode, type ClaudeModelsResult, type FastModeStatus } from "../types.ts";
 import { claudeUpgrades, fromSdk, type SdkModelInfo } from "./claudeModels.ts";
 import { BROWSER_AGENT, helperAgents, usesHelper } from "./helpers.ts";
 import { applyChecklistTool } from "./checklist.ts";
@@ -295,7 +295,7 @@ export async function settled(folder?: string, timeoutMs = 5000): Promise<boolea
 }
 
 /** On the card while a worktree is made; cleared once it is ready (D395). */
-const PREPARING_SUMMARY = "Preparing its worktree — a fresh checkout of the repository, up to a minute on a big one";
+const PREPARING_SUMMARY = PREPARING_COPY;
 
 /** A stage cut off by this many board crashes within the window is left for you, not started again (D384). */
 const CRASH_RESUME_LIMIT = 3;
@@ -852,8 +852,25 @@ export class TaskRunner {
     }
     // A checkout of a big repository takes a minute — measured 61 s for 40k files, and 47 s outside
     // OneDrive, so it is the size, not the sync. Say so instead of sitting silently in Queued (D192).
-    this.setTask(task.id, { summary: PREPARING_SUMMARY });
-    const wt = await this.git.addWorktree(project.path, task.id);
+    // In progress, not Queued: it has started, and the copy of a big project takes a minute or two.
+    // Sitting in Queued all that time read as "stuck waiting for its turn" (D416).
+    this.setTask(task.id, { status: "running", summary: PREPARING_SUMMARY });
+    let wt: Awaited<ReturnType<typeof this.git.addWorktree>>;
+    try {
+      wt = await this.git.addWorktree(project.path, task.id);
+    } catch (err) {
+      // The copy could not be made (a file git cannot write on this computer, a disk full of checkouts).
+      // An autonomous task still has a place to work: the project folder, with the same safeguards as
+      // when worktrees are off (D398) — rather than failing before Claude has done anything (D415).
+      if (task.mode !== "autonomous" || task.own_branch) throw err;
+      const why = err instanceof Error ? err.message.replace(/^git \w+ failed: /, "") : String(err);
+      this.setTask(task.id, {
+        in_folder: true,
+        summary: null,
+        note: `Its own copy of the project could not be made (${why.split("\n").at(-1)}), so it works in the project folder itself. Approve commits only the files it changed; Discard puts them back.`.slice(0, 600),
+      });
+      return project.path;
+    }
     // baseSha is null when an existing branch was re-attached: keep the stored base so the diff stays right.
     this.setTask(task.id, { branch: wt.branch, worktree_path: wt.path, base_sha: wt.baseSha ?? task.base_sha });
     await this.prepareWorkspace(task, project, wt.path);
@@ -1483,6 +1500,7 @@ export class TaskRunner {
       previousStage: stageIndex > 0 ? task.pipeline[stageIndex - 1]?.stage ?? null : null,
       live: task.live,
       liveAllowed: this.liveAllowed(task),
+      fullReach: this.repo.getSettings().autonomousReach !== "sandbox",
       skillsDir: task.mode === "autonomous" ? join(homedir(), ".claude", "skills") : null,
       inFolder: worksInFolder(task),
       // Narrowed to "a picture maker is ready" in stagePromptFor, which can ask Codex (D303).
@@ -1758,7 +1776,7 @@ export class TaskRunner {
     // The Stop hook's verify passed and no tool has run since: the board need not run it again (D108).
     let verifiedAtStop = false;
     // Where the board browser may go without asking in an autonomous run, and whether Chrome is the owner's choice (D389).
-    const browserReach = { sites: settings.taskBrowser === "board" ? settings.browserSites : [], chrome: settings.taskBrowser === "chrome" };
+    const browserReach = { sites: settings.taskBrowser === "board" ? settings.browserSites : [], chrome: settings.taskBrowser === "chrome", anywhere: settings.autonomousReach !== "sandbox" };
     const refuse = (message: string): { behavior: "deny"; message: string } => {
       refusals++;
       this.log(run.id, `\n[board] sandbox refusal ${refusals}: ${message}\n`);
@@ -1809,6 +1827,14 @@ export class TaskRunner {
       if (decision.behavior === "deny") this.log(run.id, `\n[board] ${decision.message}\n`);
       return decision;
     };
+    // Full reach (D418, the default): what Claude Code itself may do, walled only from the main checkout and
+    // the board's own branches. Sandbox: the old walls (D187).
+    const fullReach = settings.autonomousReach !== "sandbox";
+    const projectPath = this.repo.getProject(task.project_id)?.path ?? a.cwd;
+    const gateFor = (name: string, input: Record<string, unknown>) =>
+      fullReach
+        ? fullReachGate(name, input, a.cwd, { project: projectPath, folder: inFolder, markitdown: settings.markitdownInTasks })
+        : autonomousGate(name, input, a.cwd, readRoots, { markitdown: settings.markitdownInTasks, folder: inFolder, scratch });
     // Board tools are always allowed; handled here rather than via allowedTools so nothing shadows this callback.
     const canUseTool: CanUseTool = async (toolName, input, o) => {
       if (toolName.startsWith("mcp__board__")) return { behavior: "allow", updatedInput: input };
@@ -1833,7 +1859,7 @@ export class TaskRunner {
       // MarkItDown reads a document: free where a Read would be, otherwise refused or a card (D316).
       if (toolName === MARKITDOWN_TOOL && settings.markitdownInTasks) {
         const read = markitdownRead(input, a.cwd, readRoots);
-        if (autonomous) return read.ok ? { behavior: "allow", updatedInput: input } : refuse(read.message);
+        if (autonomous) return read.ok || settings.autonomousReach !== "sandbox" ? { behavior: "allow", updatedInput: input } : refuse(read.message);
         if (read.ok && !(read.path && credentialRisk("Read", { file_path: read.path }))) {
           const event = this.repo.insertEvent(run.id, "board:auto-allowed", { type: "auto_allowed", tool: toolName, command: String(input.uri ?? "") });
           this.bus.publish({ type: "event", runId: run.id, taskId: task.id, event });
@@ -1866,7 +1892,7 @@ export class TaskRunner {
         }
         return this.askApproval(run, task.id, toolName, input, o);
       }
-      const decision = autonomousGate(toolName, input, a.cwd, readRoots, { markitdown: settings.markitdownInTasks, folder: inFolder, scratch });
+      const decision = gateFor(toolName, input);
       // A question nobody can answer is not the sandbox saying no: it gets its own message, uncounted.
       if (decision.behavior === "deny" && toolName !== "AskUserQuestion") return refuse(decision.message);
       // Inside the folder, and reaching for a key file: the sandbox allows it, the transcript must not see it.
@@ -1902,7 +1928,7 @@ export class TaskRunner {
             const browser = browserDecision(name, input, true, a.cwd, browserDir, browserReach);
             if (browser?.behavior === "allow") return {};
             if (browser?.behavior === "deny") return deny(refuse(browser.message).message);
-            const decision = autonomousGate(name, input, a.cwd, readRoots, { markitdown: settings.markitdownInTasks, folder: inFolder, scratch });
+            const decision = gateFor(name, input);
             if (decision.behavior === "deny") return deny(refuse(decision.message).message);
             // The sandbox lets a key file in the folder be read; the transcript must not see it (D385).
             const keys = printsKeys(name, input);
@@ -1970,6 +1996,8 @@ export class TaskRunner {
       },
       env: {
         ...process.env,
+        // git inside a task's copy hits Windows' 260-character limit on long file names (D415).
+        ...gitOps.GIT_ENV,
         KANBAN_PORT: String(await this.portFor(task.id)),
         KANBAN_TASK_ID: task.id,
         // Never the board's own: see taskStateDir.
@@ -2707,7 +2735,7 @@ export class TaskRunner {
 
   /** What the project's verify command runs with: the task's port, and a state folder that is not the board's. */
   private commandEnv(taskId: string): Record<string, string> {
-    return { KANBAN_PORT: String(this.ports.get(taskId) ?? 0), KANBAN_STATE_DIR: taskStateDir(taskId) };
+    return { ...gitOps.GIT_ENV, KANBAN_PORT: String(this.ports.get(taskId) ?? 0), KANBAN_STATE_DIR: taskStateDir(taskId) };
   }
 
   /** Board-side verification after a stage: the record of record for whether the work is good. */

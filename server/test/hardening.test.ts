@@ -179,6 +179,7 @@ test("Resume now on one task releases every task the usage limit paused", async 
 test("an autonomous run's sandbox and blocked list are enforced by a hook too, since a settings allow-rule never reaches canUseTool", async () => {
   const f = fakeQuery();
   const s = setup(f.fn);
+  s.repo.updateSettings({ autonomousReach: "sandbox" } as never);
   const runner = new TaskRunner({ repo: s.repo, bus: s.bus, queryFn: f.fn, git: fakeGit() });
   try {
     const task = s.repo.createTask({ project_id: s.project.id, title: "auto", mode: "autonomous", pipeline: SONNET });

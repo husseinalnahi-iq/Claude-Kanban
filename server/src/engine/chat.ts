@@ -317,7 +317,12 @@ export class ChatService {
       "A card you are managing just " + (kind === "failed" ? "failed" : "finished") + ". In three short lines for the person, plainly:",
       "1. what it did (or why it failed), 2. what is left or unverified, if anything, 3. whether a follow-up card is worth making and what it would do — or \"nothing more needed\".",
       "Do not make any card now; just advise. If a follow-up is worth it, end by offering to make it.",
-      `\n## Card\n${task.title}`,
+      // A debrief once told the owner to "re-run it supervised in the main checkout" after a setup error
+      // the board fixes itself — the opposite of the end-to-end rule (D410, D415).
+      "For a failure, never suggest switching to supervised or doing it by hand: say what the board is already doing about it (below), or offer Retry. Do not guess at the project's settings.",
+      `\n## Card\n${task.title} (${task.mode}${task.in_folder ? ", in the project folder" : ""})`,
+      ...(task.note ? [`\n## What the board says on the card\n${task.note}`] : []),
+      ...(task.recovery?.last ? [`\n## What the board's recovery decided\n${task.recovery.last.action}: ${task.recovery.last.reason}`] : []),
       `\n## Its spec\n${task.spec_md.slice(0, 2000)}`,
       `\n## Files it changed\n${files}`,
       `\n## Its result\n${result.slice(0, 4000)}`,

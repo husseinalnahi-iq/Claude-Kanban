@@ -128,7 +128,7 @@ test("once its worktree is ready, the card stops saying it is preparing one (D39
     runner.queueTask(task.id);
     await until(() => ["review", "failed"].includes(repo.getTask(task.id)!.status));
     assert.equal(repo.getTask(task.id)!.status, "review");
-    assert.doesNotMatch(repo.getTask(task.id)!.summary ?? "", /Preparing its worktree/);
+    assert.doesNotMatch(repo.getTask(task.id)!.summary ?? "", /Making its own copy/);
   } finally {
     await removeTemp(dir);
   }

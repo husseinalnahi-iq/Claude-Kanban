@@ -93,9 +93,9 @@ const guard = async (o: Options, input: Record<string, unknown>) => {
   return "allowed";
 };
 
-test("an autonomous task reads a document in its worktree with MarkItDown, and is refused one outside it", async () => {
+test("an autonomous task in sandbox reach reads a document in its worktree with MarkItDown, and is refused one outside it", async () => {
   const seen: Record<string, string> = {};
-  await stage("autonomous", {}, async (o) => {
+  await stage("autonomous", { autonomousReach: "sandbox" }, async (o) => {
     const inside = { uri: pathToFileURL(join(o.cwd!, "README.md")).href };
     const outside = { uri: pathToFileURL(join(tmpdir(), "elsewhere", "secret.pdf")).href };
     seen.inside = (await o.canUseTool!(MARKITDOWN_TOOL, inside, opts))?.behavior ?? "none";
@@ -107,7 +107,7 @@ test("an autonomous task reads a document in its worktree with MarkItDown, and i
   assert.deepEqual(seen, { inside: "allow", outside: "deny", web: "allow", guardInside: "allowed", guardOutside: "deny" });
 
   let off = "";
-  await stage("autonomous", { markitdownInTasks: false }, async (o) => {
+  await stage("autonomous", { markitdownInTasks: false, autonomousReach: "sandbox" }, async (o) => {
     off = (await o.canUseTool!(MARKITDOWN_TOOL, { uri: "https://example.com/report.pdf" }, opts))?.behavior ?? "none";
   });
   assert.equal(off, "deny", "switched off: an outside tool again");

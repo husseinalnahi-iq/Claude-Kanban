@@ -583,6 +583,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [autonomousLive, setAutonomousLive] = useState(true);
   const [autonomousWorktree, setAutonomousWorktree] = useState(true);
   const [autoRecover, setAutoRecover] = useState(true);
+  const [fullReach, setFullReach] = useState(true);
   const [autoContinueProgress, setAutoContinueProgress] = useState(true);
   const [debriefOnFinish, setDebriefOnFinish] = useState(true);
   const [autoResume, setAutoResume] = useState(true);
@@ -667,6 +668,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
     take((s) => s.autonomousLive ?? true, setAutonomousLive);
     take((s) => s.autonomousWorktree ?? true, setAutonomousWorktree);
     take((s) => s.autoRecover ?? true, setAutoRecover);
+    take((s) => (s.autonomousReach ?? "full") === "full", setFullReach);
     take((s) => s.autoContinueWhileProgressing ?? true, setAutoContinueProgress);
     take((s) => s.debriefOnFinish ?? true, setDebriefOnFinish);
     take((s) => s.autoResume, setAutoResume);
@@ -707,6 +709,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           autonomousLive,
           autonomousWorktree,
           autoRecover,
+          autonomousReach: fullReach ? "full" : "sandbox",
           autoContinueWhileProgressing: autoContinueProgress,
           debriefOnFinish,
           autoResume,
@@ -1142,6 +1145,18 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
                 folder and does the live steps itself, end to end, instead of leaving them for a supervised run. If it truly lacks access —
                 a sign-in, a missing key — it says exactly what, and the card asks you for it. Turn this off to have autonomous tasks stop
                 short of the live system.
+              </span>
+            </span>
+          </label>
+          <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
+            <input type="checkbox" className="mt-1 accent-amber" checked={fullReach} onChange={(e) => setFullReach(e.target.checked)} />
+            <span>
+              Autonomous tasks can do whatever Claude Code can
+              <span className="block text-[11.5px] text-ink-400">
+                Read anywhere on this computer, run any command, install tools, use your connectors and open any site — like your own
+                Claude Code session — so a task never has to be switched to supervised to finish. It still changes your project only in its
+                own copy (or in the project folder when copies are off), so Approve and Discard keep working. Off: the old sandbox, where a
+                task may reach only its own folder.
               </span>
             </span>
           </label>

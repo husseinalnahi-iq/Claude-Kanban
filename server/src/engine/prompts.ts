@@ -52,6 +52,8 @@ export interface PromptCtx {
   live?: boolean;
   /** An autonomous live task that may reach the live system itself (Settings: autonomousLive, D385). */
   liveAllowed?: boolean;
+  /** Full reach (D418): the run may read and run anything on this computer, as Claude Code can. */
+  fullReach?: boolean;
   /** An autonomous run may also edit the skills Claude loads, here (D406). */
   skillsDir?: string | null;
   /** An autonomous task working in the project folder itself, not a worktree (D398). */
@@ -187,6 +189,9 @@ function sandboxNote(ctx: PromptCtx): string | null {
         ? "Plan the live steps as steps of this task, not as work for a later supervised run."
         : "Do the live steps yourself, following the live-system rules below; do not leave them for a supervised run.") +
       " Let scripts load the key files; never print them." +
+      (ctx.fullReach
+        ? " As in your own Claude Code session, you may read anything on this computer, run any command, install tools, use any connector and open any site you need; the one rule is that changes to this project go in your folder" + (ctx.inFolder ? " (and leave .git and .kanban alone)." : ", not the project's main checkout.")
+        : "") +
       skillsLine(ctx) +
       " " +
       NEEDS_ACCESS

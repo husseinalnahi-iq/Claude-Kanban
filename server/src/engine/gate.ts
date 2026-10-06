@@ -1149,10 +1149,12 @@ export function markitdownRead(input: Record<string, unknown>, cwd: string, read
  * a suggestion on the card, and the run does the rest (D382).
  */
 export function escalationHint(refusals: number): string {
+  // Said the old way ("switch to supervised", "## Left for a supervised run") after D410 had dropped both:
+  // the owner read it on a card and asked what it meant. Now it says what D410's prompts say.
   const base =
-    " If the task needs this, do not look for another way in: call `board_report_blocked` with needs \"supervised\" once, saying what access you need and why — " +
-    "it puts a suggestion on the card and does not stop the run, and the person can switch the task to supervised later, where it runs in the main checkout with every write approved. " +
-    "Then carry on with what can be done inside your folder, and list this step under `## Left for a supervised run`.";
+    " Most of the time you do not need it: carry on another way inside your folder. If the task truly cannot be finished without it, do not look for another way in: " +
+    "call `board_report_blocked` with needs \"supervised\" once and `needs_access` naming exactly what is missing (a site to sign in to, a key file, a host) — " +
+    "the card asks the person for it and this stage runs again once it is there. Then carry on with everything else.";
   return refusals >= 3 ? `${base} This is refusal number ${refusals} in this stage: stop trying to reach it — a few more and the board stops this stage. Report it and carry on with the rest.` : base;
 }
 
@@ -1364,6 +1366,70 @@ export function autonomousGate(
     if (why) return { behavior: "deny", message: `Refused because ${why}. Autonomous runs stay inside ${cwd}.`.replace(/the worktree/g, "the project folder") };
   }
   return decision;
+}
+
+/**
+ * "It should do whatever Claude Code does" (owner, D418): an autonomous run reads what it likes — your
+ * home folder, other tools' caches, `$LOCALAPPDATA` — runs any command, installs tools, uses any
+ * connector. What stays is only what keeps the board's own bookkeeping true, not a fence round Claude:
+ * - while the task works in its own copy, the project's main checkout and other tasks' copies: a change
+ *   there skips Approve and Discard (reading there is refused too — the copy has the same files);
+ * - `.git` and `.kanban` when it works in the project folder;
+ * - git that moves the branch the board manages (push, reset, checkout, merge…), and in the project
+ *   folder git that writes at all, since Approve commits exactly the task's files.
+ * The blocked-command list and keeping key files out of the stored transcript are checked before this.
+ */
+export function fullReachGate(
+  toolName: string,
+  input: Record<string, unknown>,
+  cwd: string,
+  opts: { project: string; folder: boolean; markitdown?: boolean },
+): GateResult {
+  if (toolName === "AskUserQuestion") {
+    return { behavior: "deny", message: "No one is watching this autonomous run. Make a reasonable choice, note it in your summary, and continue." };
+  }
+  const P = pathsFor(cwd);
+  const windows = isWindowsPath(cwd);
+  const own = opts.folder ? null : cwd;
+  const walled = (raw: string): string | null => {
+    const abs = P.resolve(cwd, normalizeShellPath(raw, windows));
+    if (own) {
+      return inside(opts.project, abs) && !inside(own, abs)
+        ? `${raw} is in the project's main checkout or another task's copy. This task works in its own copy (${own}), which has the same files: change them there, so Approve lands them and Discard can undo them`
+        : null;
+    }
+    return [".git", ".kanban"].some((d) => inside(P.join(opts.project, d), abs))
+      ? `autonomous runs in the project folder stay out of .git and .kanban (your repository's history and other tasks' copies); ${raw} is there`
+      : null;
+  };
+  for (const key of [...(READ_PATH_KEYS[toolName] ?? []), PATH_KEYS[toolName]]) {
+    const raw = key ? input[key] : undefined;
+    if (typeof raw !== "string" || !raw.trim()) continue;
+    const why = walled(key === "pattern" ? raw.replace(/[*?[{].*$/, "") || raw : raw);
+    if (why) return { behavior: "deny", message: `Refused: ${why}.` };
+  }
+  if (SHELL_TOOLS.has(toolName)) {
+    const cmd = String(input.command ?? "");
+    if (opts.folder && BOARD_FOLDERS.test(cmd)) return { behavior: "deny", message: "Refused: autonomous runs in the project folder stay out of .git and .kanban, which hold your repository's history and other tasks' copies." };
+    for (const p of absolutePaths(cmd)) {
+      const why = walled(p);
+      if (why) return { behavior: "deny", message: `Refused: ${why}.` };
+    }
+    // A `..` that climbs out of the task's copy into the main checkout, judged from where the run starts.
+    // After a `cd` the board cannot be sure where it stands, and full reach gives the benefit of the doubt.
+    const moves = /(^|[;&|(\s])(cd|pushd|set-location|sl)\s/i.test(cmd);
+    for (const word of moves ? [] : cmd.split(/[\s"'=;&|()<>]+/)) {
+      if (!TRAVERSAL.test(word) || !PLAIN_PATH.test(word)) continue;
+      const why = walled(word);
+      if (why) return { behavior: "deny", message: `Refused: ${why}.` };
+    }
+    const lex = lexShell(cmd, toolName === "PowerShell" ? "powershell" : "bash");
+    for (const c of lex.cmds) {
+      const git = gitViolation(c.words, opts.folder);
+      if (git) return { behavior: "deny", message: `Refused: ${git}.` };
+    }
+  }
+  return { behavior: "allow", updatedInput: input };
 }
 
 function worktreeGate(toolName: string, input: Record<string, unknown>, cwd: string, readRoots: string[], opts: { markitdown?: boolean; scratch?: string[] }): GateResult {

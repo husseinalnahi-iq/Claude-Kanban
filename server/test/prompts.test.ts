@@ -184,6 +184,8 @@ test("absolute paths are read the way a shell would, whatever quotes sit elsewhe
 
 test("every autonomous refusal says how to escalate, and the third one says to stop (D186)", () => {
   assert.match(escalationHint(1), /board_report_blocked[\s\S]*supervised/);
+  assert.match(escalationHint(1), /needs_access/, "it names the missing access (D410)");
+  assert.doesNotMatch(escalationHint(1), /Left for a supervised run|switch the task to supervised/, "no hand-back to a supervised run");
   assert.doesNotMatch(escalationHint(2), /stop trying/);
   assert.match(escalationHint(3), /refusal number 3[\s\S]*stop trying/);
 });

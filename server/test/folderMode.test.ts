@@ -8,9 +8,10 @@ import type { Options } from "@anthropic-ai/claude-agent-sdk";
 import { openDb } from "../src/db.ts";
 import { Repo } from "../src/repo.ts";
 import { Bus } from "../src/bus.ts";
-import { TaskRunner, type QueryFn } from "../src/engine/runner.ts";
-import type { Stage } from "../src/types.ts";
-import { removeTemp, until } from "./helpers.ts";
+import { TaskRunner, settled, type QueryFn } from "../src/engine/runner.ts";
+import * as gitOps from "../src/git/worktree.ts";
+import { PREPARING_COPY, type Stage } from "../src/types.ts";
+import { fakeQuery, removeTemp, until } from "./helpers.ts";
 
 const ONE_STAGE: Stage[] = [{ stage: "code", model: "m", effort: "low" }];
 
@@ -241,5 +242,59 @@ test("another agent's CLI may not change files in the project folder", async () 
     assert.throws(() => h.runner.queueTask(task.id), /only change files in a task's own copy/);
   } finally {
     await h.cleanup();
+  }
+});
+
+test("an autonomous task whose own copy cannot be made works in the project folder instead of failing (D415)", async () => {
+  const f = fakeQuery({ sessionId: "s1" });
+  const dir = mkdtempSync(join(tmpdir(), "kfold-"));
+  for (const args of [["init", "-q", "-b", "main"], ["config", "user.email", "t@example.com"], ["config", "user.name", "T"], ["config", "commit.gpgsign", "false"]]) execFileSync("git", args, { cwd: dir });
+  writeFileSync(join(dir, "README.md"), "hi\n");
+  execFileSync("git", ["add", "-A"], { cwd: dir });
+  execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+  const repo = new Repo(openDb(":memory:"));
+  const git = { ...gitOps, addWorktree: async () => { throw new Error("git worktree failed: error: unable to create file a/very/long/name.pdf: Filename too long\nfatal: Could not reset index file to revision 'HEAD'."); } };
+  const runner = new TaskRunner({ repo, bus: new Bus(), queryFn: f.fn, git });
+  const project = repo.createProject({ name: "p", path: dir, policy: { worktrees: "allowed", autonomous: "allowed", maxConcurrent: 3 } });
+  try {
+    const task = repo.createTask({ project_id: project.id, title: "x", mode: "autonomous", pipeline: [{ stage: "code", model: "m", effort: "low" }] });
+    runner.queueTask(task.id);
+    await until(() => repo.getTask(task.id)!.status === "review" && !runner.isBusy(task.id));
+    const t = repo.getTask(task.id)!;
+    assert.equal(t.in_folder, true);
+    assert.equal(f.calls[0].options.cwd, dir, "it ran in the project folder");
+    assert.match(t.note ?? "", /could not be made \(fatal: Could not reset index file/);
+  } finally {
+    await settled(dir);
+    await removeTemp(dir);
+  }
+});
+
+test("while the board makes a task's copy the card is in progress, saying so, not sitting in Queued (D416)", async () => {
+  const f = fakeQuery({ sessionId: "s1" });
+  const dir = mkdtempSync(join(tmpdir(), "kprep-"));
+  for (const args of [["init", "-q", "-b", "main"], ["config", "user.email", "t@example.com"], ["config", "user.name", "T"], ["config", "commit.gpgsign", "false"]]) execFileSync("git", args, { cwd: dir });
+  writeFileSync(join(dir, "README.md"), "hi\n");
+  execFileSync("git", ["add", "-A"], { cwd: dir });
+  execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+  let release!: () => void;
+  const copying = new Promise<void>((r) => (release = r));
+  const git = { ...gitOps, addWorktree: async (p: string, id: string) => { await copying; return gitOps.addWorktree(p, id); } };
+  const repo = new Repo(openDb(":memory:"));
+  const runner = new TaskRunner({ repo, bus: new Bus(), queryFn: f.fn, git });
+  const project = repo.createProject({ name: "p", path: dir, policy: { worktrees: "allowed", autonomous: "allowed", maxConcurrent: 3 } });
+  try {
+    const task = repo.createTask({ project_id: project.id, title: "x", mode: "autonomous", pipeline: [{ stage: "code", model: "m", effort: "low" }] });
+    runner.queueTask(task.id);
+    await until(() => repo.getTask(task.id)!.summary === PREPARING_COPY);
+    assert.equal(repo.getTask(task.id)!.status, "running", "in progress while the copy is made");
+    release();
+    await until(() => repo.getTask(task.id)!.status === "review" && !runner.isBusy(task.id));
+    assert.notEqual(repo.getTask(task.id)!.summary, PREPARING_COPY);
+  } finally {
+    const t = repo.listTasks({ project_id: project.id })[0];
+    if (t) await runner.discardTask(t.id).catch(() => undefined);
+    await settled(dir);
+    await removeTemp(dir);
   }
 });

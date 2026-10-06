@@ -389,6 +389,9 @@ export interface NeedsAccess {
   target: string;
 }
 
+/** The card's line while the board makes a task's own copy of the project (D192, D395, D416). */
+export const PREPARING_COPY = "Making its own copy of the project — a minute or two on a big one";
+
 /** The block that stopped the task, if one did: a suggestion the run carried on past is not one (D382). */
 export const stoppedBy = (t: { blocked: Blocked | null }): Blocked | null => (t.blocked && !t.blocked.advisory ? t.blocked : null);
 
@@ -1256,6 +1259,13 @@ export interface Settings {
    * read-only look by the triage model, which may retry a stage; after two attempts the person is asked (D411).
    */
   autoRecover: boolean;
+  /**
+   * What an autonomous run may reach (D418). "full" (default): whatever Claude Code itself can — read
+   * anywhere, any command, any connector, any site in the board's browser — walled only from your main
+   * checkout (and other tasks' copies) while it works in its own copy, and from git that moves the
+   * board's branches. "sandbox": the old D187 walls: only its own folder and the folders the board names.
+   */
+  autonomousReach: "full" | "sandbox";
   /**
    * A stage that reaches its turn limit while still making changes carries on in its session as long as it
    * does; a task that reaches a cost ceiling while progressing is granted another stage ceiling by the board

@@ -212,3 +212,52 @@ test("a worktree folder that cannot be deleted is reported, never left silently,
     await removeTemp(repo);
   }
 });
+
+test("a file name that only fits the project's own checkout still checks out in a task's copy on Windows (D415)", { skip: process.platform !== "win32" }, async () => {
+  const repo = makeRepo();
+  try {
+    // Pad the file's path so the project's checkout is just under 260 characters and the copy, which
+    // sits under .kanban\wt\<task>\, is well over it — as a real repo's long attachment names were.
+    const dirPart = "attachments";
+    const room = 255 - (repo.length + 1 + dirPart.length + 1) - 4;
+    const name = `${"b".repeat(Math.max(10, room))}.pdf`;
+    mkdirSync(join(repo, dirPart), { recursive: true });
+    writeFileSync(join(repo, dirPart, name), "x");
+    execFileSync("git", ["-c", "core.longpaths=true", "add", "-A"], { cwd: repo });
+    execFileSync("git", ["-c", "core.longpaths=true", "commit", "-q", "-m", "long name"], { cwd: repo });
+    assert.ok(join(repo, ".kanban", "wt", "t_long0001", dirPart, name).length > 260, "the copy's path is over the limit");
+
+    const wt = await addWorktree(repo, "t_long0001");
+    assert.ok(existsSync(join(wt.path, dirPart, name)), "the long-named file is in the task's copy");
+    await removeWorktree(repo, "t_long0001", { deleteBranch: "force" });
+  } finally {
+    await removeTemp(repo);
+  }
+});
+
+test("a copy that cannot be made leaves no branch or folder behind, and an empty leftover branch is started again (D415)", async () => {
+  const repo = makeRepo();
+  try {
+    // What a failed attempt used to leave: the task's branch, pointing at HEAD, with nothing of its own.
+    git(repo, "branch", "kanban/t_left0001");
+    mkdirSync(join(repo, ".kanban", "wt", "t_left0001"), { recursive: true });
+    writeFileSync(join(repo, ".kanban", "wt", "t_left0001", "half.txt"), "half-written");
+    const wt = await addWorktree(repo, "t_left0001");
+    assert.match(wt.baseSha ?? "", /^[0-9a-f]{40}$/, "started again from HEAD, so it has a base to diff against");
+    assert.ok(existsSync(join(wt.path, "README.md")));
+    assert.ok(!existsSync(join(wt.path, "half.txt")), "the half-written folder was cleared first");
+    await removeWorktree(repo, "t_left0001", { deleteBranch: "force" });
+
+    // A base git cannot check out: the attempt fails and cleans up after itself.
+    await assert.rejects(addWorktree(join(repo, "no-such-subfolder"), "t_fail0001"));
+    assert.equal(git(repo, "branch", "--list", "kanban/t_fail0001"), "");
+  } finally {
+    await removeTemp(repo);
+  }
+});
+
+test("git's error is shown without its progress meter", async () => {
+  const { gitErrorText } = await import("../src/git/worktree.ts");
+  const raw = "Preparing worktree (new branch 'kanban/t_x')\nUpdating files:   6% (2858/42454)\rUpdating files:   7% (2972/42454)\rUpdating files: 100% (42454/42454), done.\nerror: unable to create file migration/very/long/name.pdf: Filename too long\nfatal: Could not reset index file to revision 'HEAD'.";
+  assert.equal(gitErrorText(raw), "Preparing worktree (new branch 'kanban/t_x')\nerror: unable to create file migration/very/long/name.pdf: Filename too long\nfatal: Could not reset index file to revision 'HEAD'.");
+});

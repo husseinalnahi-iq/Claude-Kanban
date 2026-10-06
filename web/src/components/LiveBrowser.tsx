@@ -1,10 +1,27 @@
 import { useEffect, useState } from "react";
 import type { LiveMeta } from "../../../server/src/engine/browserWatch.ts";
+import { useWs } from "../lib/ws.ts";
 
 /** Which tasks' browsers are open right now: the board's "live" chips. */
 export async function liveTasks(): Promise<string[]> {
   const r = await fetch("/api/browser/live");
   return r.ok ? ((await r.json()) as string[]) : [];
+}
+
+/** Whether this task's browser is open right now, kept current by the board's own `browser.live` news. */
+export function useBrowserLive(taskId: string): boolean {
+  const [live, setLive] = useState(false);
+  useEffect(() => {
+    let gone = false;
+    void liveTasks().then((ids) => !gone && setLive(ids.includes(taskId)), () => {});
+    return () => {
+      gone = true;
+    };
+  }, [taskId]);
+  useWs((m) => {
+    if (m.type === "browser.live" && m.taskId === taskId) setLive(m.live);
+  });
+  return live;
 }
 
 /**
