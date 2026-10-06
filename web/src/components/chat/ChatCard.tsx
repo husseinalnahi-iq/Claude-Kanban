@@ -25,7 +25,7 @@ type CardAction = NonNullable<ChatMessage["meta"]["cards"]>[number]["action"];
 const ACTION_LABEL: Record<CardAction, string> = {
   created: "created", updated: "edited", queued: "queued", scheduled: "scheduled",
   messaged: "told", answered: "answered", stopped: "stopped", retried: "run again",
-  continued: "new round", forked: "branched",
+  continued: "new round", forked: "branched", approved: "approved",
 };
 
 /**

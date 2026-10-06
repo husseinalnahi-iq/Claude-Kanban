@@ -1,4 +1,4 @@
-import { stoppedBy, type TaskCard, type TaskStatus } from "../../../server/src/types.ts";
+import { accessAsk, stoppedBy, type TaskCard, type TaskStatus } from "../../../server/src/types.ts";
 
 /** The provider of the stage a paused task stopped on: the first one that has not succeeded. */
 export function stoppedProvider(card: TaskCard): string | null {
@@ -51,7 +51,10 @@ export function waitsOnYou(card: TaskCard, asking?: boolean): { chip: string | n
     // Claude is still at work on it: the review stage, or combining it with what landed meanwhile.
     if (card.resolution && ["resolving", "checking", "reviewing"].includes(card.resolution.state)) return null;
     if (card.stage_states.includes("running")) return null;
-    if (card.blocked?.advisory && card.mode === "autonomous") return said("Ready for your review; some live steps were left for a supervised run", "Review it — live steps left");
+    // An autonomous run that reached review but still lacks an access it named: the card asks for exactly
+    // that, and signing in (or adding the key) runs the stage again on its own (D410).
+    if (card.blocked?.advisory && card.mode === "autonomous" && card.blocked.needs_access) return said(`It is done bar one step that needs access — ${accessAsk(card.blocked)?.toLowerCase()}`, accessAsk(card.blocked) ?? "Give it the access it named");
+    if (card.blocked?.advisory && card.mode === "autonomous") return said("Ready for your review; a step was left that needs access you can give", "Review it");
     return said("Every stage finished — open it to approve, send it back or discard it", "Review and approve");
   }
   if (card.status === "failed") {

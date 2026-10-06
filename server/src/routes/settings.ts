@@ -104,6 +104,9 @@ const patchSchema = z.object({
   loadUserPlugins: z.boolean().optional(),
   claudeAutoMemory: z.boolean().optional(),
   autonomousLive: z.boolean().optional(),
+  autoRecover: z.boolean().optional(),
+  autoContinueWhileProgressing: z.boolean().optional(),
+  debriefOnFinish: z.boolean().optional(),
   autonomousWorktree: z.boolean().optional(),
   browserChecks: z.boolean().optional(),
   chromeInSupervised: z.boolean().optional(),
@@ -139,7 +142,8 @@ export async function settingsRoutes(app: FastifyInstance, { repo, bus, runner }
     const { url } = z.object({ url: z.string().trim().min(3).max(500) }).parse(req.body ?? {});
     const host = siteHost(url);
     if (!host) return reply.code(400).send({ error: "That is not a web address. Type one like erp.example.com." });
-    const opened = openSignIn(repo.getSettings().stateDir, /^https?:\/\//i.test(url) ? url : `https://${url}`, realProbe);
+    // Closing the window is the sign-in: the cards that waited for this site run their stage again (D410).
+    const opened = openSignIn(repo.getSettings().stateDir, /^https?:\/\//i.test(url) ? url : `https://${url}`, realProbe, () => runner.resumeAfterSignIn(host));
     if (!opened.ok) return reply.code(409).send({ error: opened.error });
     const sites = [...new Set([...repo.getSettings().browserSites, host])].slice(0, 50);
     const settings = repo.updateSettings({ browserSites: sites } as never);

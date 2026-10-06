@@ -49,6 +49,7 @@ export const mergeSchema = z.object({
   onConflict: z.enum(["ask", "claude"]),
   // Optional so a board page from before these existed can still save; a missing one reads as the default.
   autoLandResolved: z.boolean().optional(),
+  autoUpdateFromBase: z.boolean().optional(),
   resolveReviewer: z.object({ provider: z.string().min(1), model: z.string().trim().min(1), effort: z.enum(EFFORTS as [Effort, ...Effort[]]) }).nullable().optional(),
   // A path in the repository, never a way out of it: no line breaks (one line per file) and no `..`.
   unionFiles: z

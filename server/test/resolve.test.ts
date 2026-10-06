@@ -58,7 +58,8 @@ async function scene(fn: QueryFn, merge: Record<string, unknown> = {}) {
   writeFileSync(join(s.dir, "notes.txt"), "one\n");
   git(s.dir, "add", "-A");
   git(s.dir, "commit", "-q", "-m", "init");
-  s.repo.updateProject(s.project.id, { merge: { ...s.project.merge, onConflict: "claude", ...merge } });
+  // These tests drive the manual warning / Fix now / Approve path; the auto catch-up (D410) has its own test below.
+  s.repo.updateProject(s.project.id, { merge: { ...s.project.merge, onConflict: "claude", autoUpdateFromBase: false, ...merge } });
 
   const runner = new TaskRunner({ repo: s.repo, bus: s.bus, queryFn: fn });
   const other = s.repo.createTask({ project_id: s.project.id, title: "Add a discount", mode: "autonomous", pipeline: ONE_STAGE });
@@ -365,6 +366,23 @@ test("Stop while the result is being reviewed sets it aside: a resolution nobody
     assert.match(s.get().resolution!.error ?? "", /Stopped by you/);
     assert.equal(git(s.dir, "rev-parse", "HEAD"), mainBefore, "nothing landed");
     assert.equal(await headSha(s.wt.path), s.pre, "and the branch is back where it was");
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test("the base moves while a card waits in review: the board brings it up to date by itself, and resolves a conflict without being asked (D410)", async () => {
+  const a = actor({ resolve: () => BOTH });
+  const s = await scene(a.fn, { autoUpdateFromBase: true });
+  try {
+    await s.runner.checkBasesMoved();
+    await until(() => settled(s.get()));
+    const t = s.get();
+    assert.equal(t.status, "review", "it stays in review, now holding the combined code — nobody approved it");
+    assert.equal(t.resolution!.state, "resolved");
+    assert.equal(t.resolution!.land_after, false, "the board did not land it");
+    assert.equal(read(s.wt.path, "app.ts"), BOTH, "the task's branch now carries both sides");
+    assert.notEqual(read(s.dir, "app.ts"), BOTH, "main is untouched until Approve");
   } finally {
     await s.cleanup();
   }

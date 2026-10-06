@@ -34,7 +34,7 @@ function projectWithKeys(): string {
 
 type Seen = { cwd: string; envCopied: boolean; erpCopied: boolean; catKeys: unknown; editSkill: unknown };
 
-async function runLiveTask(settings: Record<string, unknown>): Promise<{ seen: Seen; prompt: string }> {
+async function runLiveTask(settings: Record<string, unknown>, taskFields: { live?: boolean } = {}): Promise<{ seen: Seen; prompt: string }> {
   const dir = projectWithKeys();
   const repo = new Repo(openDb(":memory:"));
   const state = mkdtempSync(join(tmpdir(), "klivestate-"));
@@ -54,7 +54,7 @@ async function runLiveTask(settings: Record<string, unknown>): Promise<{ seen: S
     })();
   const runner = new TaskRunner({ repo, bus: new Bus(), queryFn: q });
   const project = repo.createProject({ name: "erp", path: dir, policy: { worktrees: "allowed", autonomous: "allowed", maxConcurrent: 3 } });
-  const task = repo.createTask({ project_id: project.id, title: "push the script", mode: "autonomous", pipeline: ONE_STAGE, live: true });
+  const task = repo.createTask({ project_id: project.id, title: "push the script", mode: "autonomous", pipeline: ONE_STAGE, live: taskFields.live ?? true });
   try {
     runner.queueTask(task.id);
     await until(() => ["review", "failed"].includes(repo.getTask(task.id)!.status));
@@ -96,6 +96,14 @@ test("an autonomous task without live access may update the skills Claude loads 
   const { seen, prompt } = await runLiveTask({ autonomousLive: false });
   assert.notEqual(decision(seen.editSkill), "deny");
   assert.match(prompt, /The skills Claude loads are in .*.claude.skills and you may edit them/);
+});
+
+test("an autonomous task nobody marked live gets the keys and the same instruction to finish: live was triage's guess (D410)", async () => {
+  const { seen, prompt } = await runLiveTask({}, { live: false });
+  assert.ok(seen.envCopied && seen.erpCopied, "the key files were copied in all the same");
+  assert.match(prompt, /Do the live steps yourself/);
+  assert.match(prompt, /Finish the task end to end/);
+  assert.match(prompt, /needs_access/);
 });
 
 test("with the setting off, an autonomous live task gets no keys and leaves live steps for a supervised run", async () => {

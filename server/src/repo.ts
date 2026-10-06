@@ -140,6 +140,7 @@ const toTask = (r: Row): Task => ({
   in_folder: Number(r.in_folder ?? 0) === 1,
   footprint: { files: [], systems: [], touched: [], ...json<Partial<Footprint>>(r.footprint_json, {}) },
   hold: json<Task["hold"]>(r.hold_json, null),
+  recovery: json<Task["recovery"]>(r.recovery_json, null),
   may_ask: Number(r.may_ask ?? 0) === 1,
   setup_pending: Number(r.setup_pending ?? 0) === 1,
   chat_id: (r.chat_id as string) ?? null,
@@ -383,6 +384,7 @@ function setClause(patch: Record<string, unknown>, columns: Record<string, (v: u
       : k === "conflict_risk" ? "conflict_risk_json"
       : k === "footprint" ? "footprint_json"
       : k === "hold" ? "hold_json"
+      : k === "recovery" ? "recovery_json"
       : k === "days" ? "days_json"
       : k;
     sets.push(`${col} = ?`);
@@ -423,7 +425,7 @@ const TASK_COLUMNS: Record<string, (v: unknown) => SQLInputValue> = {
   own_branch: (v) => (v ? 1 : 0),
   in_folder: (v) => (v ? 1 : 0),
   footprint: js,
-  hold: js,
+  hold: js, recovery: js,
   may_ask: (v) => (v ? 1 : 0),
   setup_pending: (v) => (v ? 1 : 0),
   chat_id: str,
@@ -580,6 +582,9 @@ export class Repo {
       loadUserPlugins: (m.get("loadUserPlugins") ?? "true") !== "false",
       claudeAutoMemory: m.get("claudeAutoMemory") === "true",
       autonomousLive: (m.get("autonomousLive") ?? "true") !== "false",
+      autoRecover: (m.get("autoRecover") ?? "true") !== "false",
+      autoContinueWhileProgressing: (m.get("autoContinueWhileProgressing") ?? "true") !== "false",
+      debriefOnFinish: (m.get("debriefOnFinish") ?? "true") !== "false",
       autonomousWorktree: (m.get("autonomousWorktree") ?? "true") !== "false",
       browserChecks: (m.get("browserChecks") ?? "true") !== "false",
       chromeInSupervised: m.get("chromeInSupervised") === "true",
@@ -961,6 +966,18 @@ export class Repo {
     return r && toChatMessage(r);
   }
 
+  /**
+   * The newest message the person actually typed: not a keep-alive or a suggestion, which the board
+   * sends on its own. Board news is gathered since this, so a keep-alive never swallows news that
+   * should ride in front of the person's next real message (D410).
+   */
+  lastOwnUserMessage(chatId: string): ChatMessage | undefined {
+    const r = this.stmt(
+      "SELECT * FROM chat_messages WHERE chat_id = ? AND role = 'user' AND COALESCE(json_extract(meta_json, '$.keepalive'), 0) = 0 AND COALESCE(json_extract(meta_json, '$.suggest'), 0) = 0 ORDER BY id DESC LIMIT 1",
+    ).get(chatId) as Row | undefined;
+    return r && toChatMessage(r);
+  }
+
   /** Every update a chat has had about one card, oldest first: what was already said, so a restart does not say it again. */
   chatUpdatesFor(chatId: string, taskId: string): ChatMessage[] {
     return (this.stmt("SELECT * FROM chat_messages WHERE chat_id = ? AND role = 'update' AND json_extract(meta_json, '$.update.id') = ? ORDER BY id")
@@ -974,7 +991,7 @@ export class Repo {
   }
 
   /** What every side chat has cost, for the dashboard. */
-  addIntakeCost(c: { task_id: string; kind: "triage" | "vision"; model: string; cost_usd: number }): void {
+  addIntakeCost(c: { task_id: string; kind: "triage" | "vision" | "recovery"; model: string; cost_usd: number }): void {
     if (!(c.cost_usd > 0)) return;
     const project = this.getTask(c.task_id)?.project_id ?? null;
     this.stmt("INSERT INTO intake_costs(task_id, project_id, kind, model, cost_usd, ts) VALUES (?, ?, ?, ?, ?, ?)").run(c.task_id, project, c.kind, c.model, c.cost_usd, nowIso());

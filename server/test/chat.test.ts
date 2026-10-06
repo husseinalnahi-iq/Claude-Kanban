@@ -244,7 +244,91 @@ test("the chat's own words for its new tools, and what it must leave to the user
   assert.equal(describeTool("mcp__board__board_message_task", { text: "use blue" }, "/p"), "told a card: “use blue”");
   const p = chatPrompt({ name: "Shop", path: "/p" } as any);
   assert.match(p, /board_task_progress/);
-  assert.match(p, /Approving, landing or discarding a card's work is the user's own decision/);
+  assert.match(p, /board_approve_task or board_approve_plan/, "it may approve when the user says so (D410)");
+  assert.match(p, /Never approve on your own/);
+});
+
+test("the chat approves a card only through board_approve_task, and only when it is in review and clean (D410)", async () => {
+  const q = fakeQuery();
+  const s = setup(q.fn);
+  const cards: any[] = [];
+  const h = chatBoardHandlers({ repo: s.repo, bus: s.bus, runner: s.runner }, s.project.id, null, (c) => cards.push(c));
+  const read = (r: { content: { text: string }[] }) => JSON.parse(r.content[0].text);
+  try {
+    const t = s.repo.createTask({ project_id: s.project.id, title: "Add a footer", mode: "supervised", pipeline: ONE });
+    assert.equal((h.approveTask({ task_id: t.id }) as any).isError, true, "a backlog card is not in review");
+    s.runner.queueTask(t.id);
+    await until(() => s.repo.getTask(t.id)!.status === "review");
+    s.repo.updateTask(t.id, { conflict_risk: { base: "main", files: ["app.ts"], checked_at: new Date().toISOString() } });
+    assert.match((h.approveTask({ task_id: t.id }) as any).content[0].text, /would conflict/, "a conflict is not approved blind");
+    s.repo.updateTask(t.id, { conflict_risk: null });
+    assert.match(read(h.approveTask({ task_id: t.id })).note, /Merging it into the base/);
+    assert.ok(cards.some((c) => c.action === "approved"));
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test("the chat reuses an open card with the same title instead of making a second (D410)", async () => {
+  const q = fakeQuery();
+  const s = setup(q.fn);
+  const h = chatBoardHandlers({ repo: s.repo, bus: s.bus, runner: s.runner }, s.project.id, null, () => {});
+  const read = (r: { content: { text: string }[] }) => JSON.parse(r.content[0].text);
+  try {
+    const first = read(h.createTask({ title: "Find the latest purchase order", spec_md: "look it up" }));
+    assert.ok(first.created);
+    const again = read(h.createTask({ title: "Find latest Purchase Order", spec_md: "look it up" }));
+    assert.ok(again.reused, "the near-identical title is caught");
+    assert.equal(again.reused.id, first.created.id);
+    const forced = read(h.createTask({ title: "Find the latest purchase order", spec_md: "really different", force: true }));
+    assert.ok(forced.created, "force makes it anyway");
+    assert.notEqual(forced.created.id, first.created.id);
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test("a lookup in an ask-mode chat runs autonomous, not supervised (D410, amends D365)", async () => {
+  const q = fakeQuery();
+  const s = setup(q.fn);
+  const chat = s.repo.createChat({ project_id: s.project.id, title: "c", model: "m", effort: "low", mode: "ask" });
+  const h = chatBoardHandlers({ repo: s.repo, bus: s.bus, runner: s.runner }, s.project.id, chat.id, () => {});
+  const read = (r: { content: { text: string }[] }) => JSON.parse(r.content[0].text);
+  try {
+    const made = read(h.createTask({ title: "What is the latest PO?", spec_md: "look it up", stages: [{ stage: "answer" }] }));
+    assert.equal(made.created.mode, "autonomous");
+    assert.notEqual(made.created.asks_user, true, "nothing to ask on a lookup");
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test("board_ask_task asks the card's coder read-only and returns the answer, without moving the card (D410)", async () => {
+  let asked = "";
+  const q: QueryFn = (params) =>
+    (async function* () {
+      let prompt = "";
+      for await (const m of params.prompt) prompt += String(m.message.content);
+      asked = prompt;
+      yield { type: "system", subtype: "init", session_id: "s1" } as any;
+      yield { type: "result", subtype: "success", is_error: false, result: "It uses the brand blue, #0a3.", total_cost_usd: 0.01, session_id: "s1", modelUsage: {} } as any;
+    })();
+  const s = setup(q);
+  const h = chatBoardHandlers({ repo: s.repo, bus: s.bus, runner: s.runner }, s.project.id, null, () => {});
+  const read = (r: { content: { text: string }[] }) => JSON.parse(r.content[0].text);
+  try {
+    const t = s.repo.createTask({ project_id: s.project.id, title: "Style the header", mode: "supervised", pipeline: ONE });
+    s.runner.queueTask(t.id);
+    await until(() => s.repo.getTask(t.id)!.status === "review");
+    const before = s.repo.getTask(t.id)!;
+    const out = read(await h.askTask({ task_id: t.id, question: "which blue did you use?" }));
+    assert.match(out.answer, /brand blue/);
+    assert.match(asked, /change nothing/);
+    const after = s.repo.getTask(t.id)!;
+    assert.equal(after.status, before.status, "the card did not move");
+  } finally {
+    await s.cleanup();
+  }
 });
 
 test("the chat reads only inside its project, and never a file that holds keys", async () => {
@@ -353,7 +437,7 @@ test("the chat sets each stage's model and effort in words, and an unknown model
   }
 });
 
-test("a lookup is one answer stage that runs supervised on the main checkout and lands in Done with its answer", async () => {
+test("a lookup is one answer stage that runs autonomous in the project folder and lands in Done with its answer (D410)", async () => {
   const q = fakeQuery({ result: "The latest PO is PUR-ORD-0001 (ACME, $120)." });
   const s = setup(q.fn);
   s.repo.updateSettings({ autoTriage: false });
@@ -364,7 +448,8 @@ test("a lookup is one answer stage that runs supervised on the main checkout and
     assert.equal(t.pipeline.length, 1);
     assert.ok(isAnswerStage(t.pipeline[0]));
     assert.deepEqual([t.pipeline[0].model, t.pipeline[0].effort], ["claude-sonnet-5-5", "medium"], "the everyday model: reading is not where Opus earns its price");
-    assert.deepEqual([t.mode, t.own_branch, t.live], ["supervised", false, false], "a read needs no branch, and a sandbox could not reach a live system");
+    // A lookup reads and reports; autonomous means it does so without asking (D410). No branch, no live writes.
+    assert.deepEqual([t.mode, t.own_branch, t.live], ["autonomous", false, false]);
     assert.match(made.note, /answer card/);
     assert.match(made.created.pipeline, /^answer · /);
     assert.equal((h.createTask({ title: "x", spec_md: "", stages: [{ stage: "answer" }, { stage: "code" }] }) as any).isError, true, "an answer card is one stage on its own");
@@ -381,7 +466,8 @@ test("a lookup is one answer stage that runs supervised on the main checkout and
 test("a card the chat made reports into that chat when it finishes, fails, has a plan ready or asks something, once each and once after a restart", async () => {
   const q = fakeQuery({ result: "The latest PO is PUR-1.", byCall: (i) => (i === 1 ? { fail: true } : undefined) });
   const s = setup(q.fn);
-  s.repo.updateSettings({ autoTriage: false });
+  // This checks the board's own one-line news, not the manager's debrief, so keep the debrief out of the call count.
+  s.repo.updateSettings({ autoTriage: false, debriefOnFinish: false });
   const chat = new ChatService({ repo: s.repo, bus: s.bus, runner: s.runner });
   const updates = (chatId: string) => s.repo.chatMessages(chatId).filter((m) => m.role === "update").map((m) => m.meta.update!);
   const touch = (id: string, patch: Partial<Task>) => s.bus.publish({ type: "task.updated", task: s.repo.updateTask(id, patch) });
@@ -541,7 +627,7 @@ test("a card made by a chat set to autonomous runs autonomous unless the message
     const h = chatBoardHandlers({ repo: s.repo, bus: s.bus, runner: s.runner }, s.project.id, c.id, () => {});
     const made = (args: Record<string, unknown>) => s.repo.getTask(JSON.parse(h.createTask(args as never).content[0].text).created.id)!;
     assert.equal(made({ title: "Dark mode", spec_md: "x" }).mode, "autonomous", "the chat's switch is the default");
-    assert.equal(made({ title: "Dark mode", spec_md: "x", mode: "supervised" }).mode, "supervised", "a mode named in the message wins");
+    assert.equal(made({ title: "A light theme", spec_md: "x", mode: "supervised" }).mode, "supervised", "a mode named in the message wins");
     assert.equal(made({ title: "Latest PO", spec_md: "x", stages: [{ stage: "answer" }] }).mode, "autonomous", "a lookup follows the switch too: the project's own folder, nothing asked (D352)");
     assert.match(chatPrompt(s.project, { models: [], defaults: [], mode: "autonomous" }), /mode switch applies \(it is set to autonomous now\)/);
   } finally {

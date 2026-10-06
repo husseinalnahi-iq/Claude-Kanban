@@ -172,7 +172,11 @@ export class Scheduler {
   /** Queue through the runner so caps, dependencies, limits and approvals all still apply. */
   private queue(taskId: string, who: string): void {
     try {
-      this.deps.runner.queueTask(taskId);
+      // A failed task scheduled to try again picks up where it stopped, in its own session: that is what
+      // "try again later" means for it, and what a retry after a connection problem relies on (D411).
+      const task = this.deps.repo.getTask(taskId);
+      if (task?.status === "failed") this.deps.runner.retryTask(taskId);
+      else this.deps.runner.queueTask(taskId);
     } catch (err) {
       const why = err instanceof Error ? err.message : String(err);
       this.setTask(taskId, { note: `${who} could not begin: ${why}` });

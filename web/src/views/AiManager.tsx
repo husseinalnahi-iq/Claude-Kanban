@@ -9,7 +9,7 @@ import { useAppData } from "../lib/store.tsx";
 import { useWs } from "../lib/ws.ts";
 import { ago, cost, modelLabel } from "../lib/format.ts";
 import { isQuestion } from "../lib/questions.ts";
-import { waitingOn } from "../lib/phase.ts";
+import { waitingOn, waitsOnYou } from "../lib/phase.ts";
 import { chatSignal, MOVING, NEEDS_YOU, type Signal, type SignalKind } from "../lib/chatSignal.ts";
 import { useAsk } from "../components/Ask.tsx";
 import { ArchiveIcon, Button, Chevron, Empty, ErrorLine, FolderIcon, OpenIcon, PencilIcon, RestoreIcon, Select, StageDots, TrashIcon, inputCls, useAction, useEscape } from "../components/ui.tsx";
@@ -722,6 +722,7 @@ const URL_RE = /https?:\/\/[^\s<>()"'`\]]+/g;
 
 /** The cards this chat made, with Claude's steps on each; the files they produced; the links mentioned. */
 function ChatWork({ chatId, cards, messages, width }: { chatId: string | null; cards: TaskCard[]; messages: ChatMessage[]; width: number }) {
+  const { pending } = useAppData();
   const byId = useMemo(() => new Map(cards.map((c) => [c.id, c])), [cards]);
   const mine = useMemo(() => cards.filter((c) => c.chat_id === chatId && !c.archived_at).sort((a, b) => b.created_at.localeCompare(a.created_at)), [cards, chatId]);
   const files = useAttachments(mine.map((c) => c.id));
@@ -771,8 +772,25 @@ function ChatWork({ chatId, cards, messages, width }: { chatId: string | null; c
     f.open(where).catch((e: unknown) => setOpenError(e instanceof Error ? e.message : String(e)));
   };
 
+  // Everything on this project that waits on you, whichever chat made it — so the manager's panel is
+  // where you clear your plate, not only the selected chat's cards (D410).
+  const needs = useMemo(
+    () => cards.filter((c) => !c.archived_at && waitsOnYou(c, pending.some((a) => a.task_id === c.id && isQuestion(a)))).sort((a, b) => b.updated_at.localeCompare(a.updated_at)),
+    [cards, pending],
+  );
+
   return (
     <aside className="flex shrink-0 flex-col overflow-y-auto bg-ink-900/60" style={{ width }}>
+      {needs.length ? (
+        <>
+          {head("needs", "Needs you", needs.length)}
+          {shut.has("needs") ? null : (
+            <div className="space-y-2 px-3 pb-2">
+              {needs.map((c) => <WorkCard key={`n-${c.id}`} card={c} byId={byId} now={now.get(c.id) ?? null} children={[]} />)}
+            </div>
+          )}
+        </>
+      ) : null}
       {head("tasks", "Tasks from this chat", mine.length)}
       {shut.has("tasks") ? null : mine.length ? (
         <div className="space-y-2 px-3 pb-2">
@@ -1045,12 +1063,17 @@ function WorkCard({ card, byId, now, children }: { card: TaskCard; byId: Map<str
             </details>
           ) : null}
           {card.status === "failed" ? <div className="line-clamp-3 font-mono text-[11px] text-rust">{stoppedBy(card)?.reason ?? card.error ?? "It stopped."}</div> : null}
-          {card.status === "review" ? <div className="text-[11.5px] text-ink-400">Ready for your review: open it to look at the work and approve it.</div> : null}
+          {card.status === "review" && !card.conflict_risk && !card.resolution ? <div className="text-[11.5px] text-ink-400">Ready for your review — approve here, or open it to see the work first.</div> : null}
           <div className="flex items-center justify-end gap-1.5">
             {card.status === "backlog" && card.setup_pending ? <Button size="sm" variant="go" title="See its mode and models, then press Start there" onClick={() => navigate({ taskId: card.id })}>Check setup</Button> : null}
             {card.status === "backlog" && !card.setup_pending ? <Button size="sm" variant="go" busy={busy} title="Queue it now" onClick={() => run(() => api.queue(card.id))}>▶ Start</Button> : null}
             {IN_PROGRESS.has(card.status) ? <Button size="sm" variant="ghost" busy={busy} onClick={() => run(() => api.stop(card.id))}>stop</Button> : null}
+            {/* Approve the plan or merge the work right here, so a card a chat made never has to be chased
+                onto the board (D410). A conflict goes to the board, where Fix now and the diff live. */}
+            {card.status === "approval" && card.plan_gate ? <Button size="sm" variant="go" busy={busy} title="Approve the plan and let it start" onClick={() => run(() => api.planDecision(card.id, { choice: "original" }))}>Approve plan</Button> : null}
+            {card.status === "review" && !card.conflict_risk && !card.resolution ? <Button size="sm" variant="go" busy={busy} title="Approve and merge this work" onClick={() => run(() => api.approve(card.id))}>✓ Approve</Button> : null}
             {card.status === "failed" && !needsSwitch ? <Button size="sm" busy={busy} title="Carry on from the stage that failed" onClick={() => run(() => api.retry(card.id))}>Retry</Button> : null}
+            {card.status === "paused" && card.pause_reason === "cost" ? <Button size="sm" variant="go" busy={busy} title="Let it spend a little more and carry on" onClick={() => run(() => api.continueTask(card.id))}>▶ Continue</Button> : null}
             <Button size="sm" onClick={() => navigate({ taskId: card.id })}>open</Button>
           </div>
           <ErrorLine error={error} />

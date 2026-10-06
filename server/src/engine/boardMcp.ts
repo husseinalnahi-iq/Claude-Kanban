@@ -2,8 +2,8 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { Repo } from "../repo.ts";
 import type { Bus } from "../bus.ts";
-import type { Blocked, Mode, Project, Run, RunStyle, Stage, Task, TaskQuestion } from "../types.ts";
-import { EFFORTS, accessOf, isAnswerPipeline, runStyleFields } from "../types.ts";
+import type { Blocked, Mode, NeedsAccess, Project, Run, RunStyle, Stage, Task, TaskQuestion } from "../types.ts";
+import { EFFORTS, accessAsk, accessOf, isAnswerPipeline, runStyleFields } from "../types.ts";
 import { overlaps } from "./footprint.ts";
 import { searchBoard } from "../search.ts";
 
@@ -234,16 +234,26 @@ export function boardHandlers(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtasks?: 
      * except an autonomous run that needs a supervised one: the person chose to let it run, so that is
      * a suggestion on the card and the run does what the sandbox allows (D382).
      */
-    reportBlocked(args: { reason: string; needs: Blocked["needs"]; ask?: string }) {
+    reportBlocked(args: { reason: string; needs: Blocked["needs"]; ask?: string; needs_access?: NeedsAccess }) {
       const run = repo.getRun(ctx.runId);
       const mode = own().mode;
       if (mode === "autonomous" && args.needs === "supervised") {
+        // Missing access has a name — a site, a file, a host. A run that cannot give one is not missing
+        // access; it is leaving work, and the card has no way to ask for "something" (D410).
+        const target = args.needs_access?.target?.trim().slice(0, 200);
+        if (!args.needs_access || !target) {
+          return text(
+            "Not recorded: say what access you lack with `needs_access` — kind sign_in with the site, key_file with the file's name, host with the host, or other with a few words — and call again. " +
+              "If nothing is missing, there is nothing to report: finish the task yourself.",
+          );
+        }
         const advisory: Blocked = {
           advisory: true,
           mode,
           stage_index: run?.stage_index ?? 0,
           reason: args.reason.trim().slice(0, 1000),
           needs: "supervised",
+          needs_access: { kind: args.needs_access.kind, target },
           ask: args.ask?.trim().slice(0, 1000) || null,
           source: "agent",
           created_at: new Date().toISOString(),
@@ -252,10 +262,8 @@ export function boardHandlers(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtasks?: 
         const current = own().blocked;
         if (!current || current.advisory) bus.publish({ type: "task.updated", task: repo.updateTask(ctx.taskId, { blocked: advisory }) });
         return text(
-          "Recorded on the card as a suggestion: the person can switch this task to supervised later. The run is not stopped. " +
-            "Do not try to reach what the sandbox refuses another way. Carry on with everything that can be done inside your folder — " +
-            "plan it, write the code and the tests, prepare the scripts and the exact commands — and end your report with a " +
-            "`## Left for a supervised run` list: each step that needs the access, in order, with what it does and how to check it.",
+          `Recorded: the card asks the person to ${accessAsk(advisory)!.replace(/^./, (c) => c.toLowerCase())}, and this stage runs again once that is there. The run is not stopped. ` +
+            "Do not try to reach it another way. Carry on with everything else the task asks for, and say in your summary which step waits for that access.",
         );
       }
       const blocked: Blocked = {
@@ -332,13 +340,24 @@ export function createBoardServer(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtask
         async (a) => h.ask(a as Parameters<typeof h.ask>[0])),
       tool("board_report_blocked",
         "Report that you cannot do this task from where you run — the sandbox refuses what it needs (live systems, credentials, files outside your folder), or you need a decision or information only the person has. The board stops the pipeline after this stage instead of passing half-done work on as a success, and shows your reason and ask on the card. Call it once, then end your turn. " +
-          "In an autonomous (sandboxed) run, needs \"supervised\" does not stop the run: it puts a suggestion on the card and you carry on with what can be done inside your folder.",
+          "In an autonomous run, needs \"supervised\" does not stop the run: it asks the person for the access named in needs_access and runs this stage again once it is there; you carry on with everything else.",
         {
           reason: z.string().min(8).describe("What stops you, in one or two plain sentences."),
-          needs: z.enum(["supervised", "input", "other"]).describe("supervised = it needs access only an approved run has; input = a decision or information from the person; other = anything else."),
+          needs: z.enum(["supervised", "input", "other"]).describe("supervised = it needs access you do not have (a sign-in, a key file, a host); input = a decision or information from the person; other = anything else."),
           ask: z.string().optional().describe("The exact question or request for the person, if there is one."),
+          needs_access: z
+            .object({
+              kind: z.enum(["sign_in", "key_file", "host", "other"]),
+              target: z.string().min(2).max(200).describe("The site to sign in to, the key file's name, the host, or a few words."),
+            })
+            .optional()
+            .describe("Required with needs \"supervised\" in an autonomous run: exactly what access is missing, so the card can ask for it."),
         },
         async (a) => h.reportBlocked(a as Parameters<typeof h.reportBlocked>[0])),
+      tool("board_needs_sign_in",
+        "A page you must use needs a sign-in the board's browser does not have. Call this with the site's host: the card asks the person to sign in to it, and this stage runs again once they have. Carry on with everything else meanwhile.",
+        { host: z.string().min(3).max(200).describe("The site's host, e.g. erp.example.com.") },
+        async (a) => h.reportBlocked({ reason: `It needs you signed in to ${a.host} to go on.`, needs: "supervised", needs_access: { kind: "sign_in", target: a.host } })),
     ],
   });
 }

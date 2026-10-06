@@ -29,7 +29,7 @@ const SYSTEMS: [name: string, words: RegExp][] = [
   ["Supabase", /\bsupabase\b/i],
   ["Vercel", /\bvercel\b/i],
   ["Dropbox", /\bdropbox\b/i],
-  ["CloudSync", /\bcloudsync\b/i],
+  ["OneDrive", /\bonedrive\b/i],
   ["SharePoint", /\bsharepoint\b/i],
   ["Microsoft Teams", /\bms teams\b|\bmicrosoft teams\b/i],
   ["Discord", /\bdiscord\b/i],

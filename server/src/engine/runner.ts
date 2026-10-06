@@ -22,7 +22,7 @@ type RateLimitInfo = {
   unifiedWindows?: Record<string, { utilization?: number; resetsAt?: number }>;
 };
 import { RunQueue } from "./queue.ts";
-import { buildRoundFallbackPrompt, buildRoundPrompt, buildStagePrompt, type PromptCtx } from "./prompts.ts";
+import { buildFixPrompt, buildRoundFallbackPrompt, buildRoundPrompt, buildStagePrompt, type PromptCtx } from "./prompts.ts";
 import { PATH_KEYS, autonomousGate, blockedCommand, escalationHint, handsOffGate, isReadOnlyMcp, isReadOnlyShell, isSafeMcp, isTrusted, killsByName, markitdownRead, READ_ONLY_TOOLS, readViolation, serverRule, trustRules } from "./gate.ts";
 import { credentialRisk } from "./credentials.ts";
 import { clash, mayConflict, planFootprint, type FootprintOf } from "./footprint.ts";
@@ -47,12 +47,13 @@ import { ModelCatalog, isLocal } from "./providers/catalog.ts";
 import { codexAuth, codexModels, codexStatus, codexUpgrades } from "./providers/codexLocal.ts";
 import { codexImagePart } from "./codexImages.ts";
 import { setCliSecrets } from "./providers/cli/index.ts";
-import { classifyProviderError, naiveOffsetFor, retryDelayMs, type OutKind } from "./providers/limits.ts";
+import { classifyProviderError, isTransient, naiveOffsetFor, plainReason as plainError, retryDelayMs, type OutKind } from "./providers/limits.ts";
+import { isProgressing, stageProgress } from "./progress.ts";
 import { QuotaReader, type LiveQuota } from "./providers/usage.ts";
 import type { Resolved, StageInvocation } from "./providers/types.ts";
 import { saveAttachment } from "../routes/attachments.ts";
 import { pickBrowser, realProbe } from "../setup/probe.ts";
-import { ANTHROPIC_PROVIDER_ID, ARTIFACT_EXTS, DEBATE_ROUND_CEILING, EFFORTS, MARKITDOWN_TOOL, accessOf, isHandsOff, recommendedOption, sharesProjectFolder, supervisedFrom, usesWorktree, worksInFolder, MAX_ATTACHMENT_BYTES, attachmentKind, supportsFastMode, type ClaudeModelsResult, type FastModeStatus } from "../types.ts";
+import { ANTHROPIC_PROVIDER_ID, ARTIFACT_EXTS, DEBATE_ROUND_CEILING, EFFORTS, MARKITDOWN_TOOL, TRANSIENT_DELAYS_MS, TRANSIENT_RETRIES, accessOf, isHandsOff, recommendedOption, sharesProjectFolder, supervisedFrom, unlockedBySignIn, usesWorktree, worksInFolder, MAX_ATTACHMENT_BYTES, attachmentKind, supportsFastMode, type ClaudeModelsResult, type FastModeStatus } from "../types.ts";
 import { claudeUpgrades, fromSdk, type SdkModelInfo } from "./claudeModels.ts";
 import { BROWSER_AGENT, helperAgents, usesHelper } from "./helpers.ts";
 import { applyChecklistTool } from "./checklist.ts";
@@ -95,10 +96,15 @@ interface StartOpts {
    * fresh with `fallback` when that session cannot be reopened; after it only a review runs, if asked.
    */
   round?: { n: number; prompt: string; fallback: string; review: boolean; fork?: boolean };
+  /** The review's findings for the stage that fixes them, in its own session (D410); unset = the full stage prompt. */
+  fix?: string;
 }
 
 /** Claude Code's answer when a session it was asked to continue is gone (deleted, or never on this machine). */
 const LOST_SESSION = /no conversation found|session.*not found/i;
+
+/** How many times a review's CHANGES_NEEDED sends the code stage back before the person reads both sides (D410). */
+const REVIEW_FIX_ROUNDS = 2;
 
 /** One live query() call. */
 interface Active {
@@ -506,8 +512,10 @@ export class TaskRunner {
   private verified = new Map<string, string>();
   /** taskId → what blocked the last attempt, handed to the next run's prompt (D185). */
   private priorBlocks = new Map<string, Blocked>();
-  /** taskId → why a human sent it back, carried past the queue (which clears the card's note). */
+  /** taskId → why it was sent back (a person's note, or the review's findings), carried past the queue (which clears the card's note). */
   private sentBack = new Map<string, string>();
+  /** taskId → how many times a review's CHANGES_NEEDED sent the code stage back to fix it this pipeline (D410). */
+  private reviewLoops = new Map<string, number>();
   /** taskId → the checkout's uncommitted files when a supervised run started, with size+mtime (D204). */
   private checkoutStamps = new Map<string, { cwd: string; own: Set<string>; stamps: Map<string, string> }>();
 
@@ -773,18 +781,22 @@ export class TaskRunner {
     if (task.blocked) this.priorBlocks.set(taskId, task.blocked);
     // Queuing clears the card's note, so a Reject's reason is carried to the prompt here — before,
     // it was wiped before any run could read it (D196). A bare "work discarded" is not a reason.
-    if (task.status === "backlog" && task.note?.trim() && task.note !== "work discarded") this.sentBack.set(taskId, task.note.trim());
+    if (task.status === "backlog" && task.note?.trim() && task.note !== "work discarded") this.sentBack.set(taskId, `A person rejected the previous attempt: ${task.note.trim()}`);
     const updated = this.setTask(taskId, { status: "queued", error: null, note: null, blocked: null, hold: null });
     this.queue.enqueue({ taskId, projectId: project.id, force });
     return updated;
   }
 
-  retryTask(taskId: string, stageIndex?: number, force = false): Task {
+  /** `fresh`: start that stage in a new session rather than continuing the one that failed (D411's recovery, when it so decides). */
+  retryTask(taskId: string, stageIndex?: number, force = false, fresh = false): Task {
     const { task } = this.load(taskId);
-    if (stageIndex === undefined) return this.queueTask(taskId, this.defaultStart(task), force);
+    if (stageIndex === undefined) {
+      const start = this.defaultStart(task);
+      return this.queueTask(taskId, fresh ? { fromStage: start.fromStage } : start, force);
+    }
     if (stageIndex < 0 || stageIndex >= task.pipeline.length) throw new ConflictError(`No stage #${stageIndex + 1} in this pipeline.`);
     const prior = this.latestByStage(taskId).get(stageIndex);
-    return this.queueTask(taskId, { fromStage: stageIndex, resume: prior?.session_id ?? undefined }, force);
+    return this.queueTask(taskId, { fromStage: stageIndex, resume: fresh ? undefined : prior?.session_id ?? undefined }, force);
   }
 
   /**
@@ -799,9 +811,13 @@ export class TaskRunner {
     return this.setTask(task.id, { in_folder: true });
   }
 
-  /** Settings → autonomousLive: an autonomous task marked live does its live steps itself (D385). */
+  /**
+   * Settings → autonomousLive: an autonomous task does its live steps itself (D385). Every autonomous
+   * task, not only one marked live (D410): whether a card touched a live system was triage's guess, and a
+   * wrong guess split the work into a "left for a supervised run" list nobody wanted.
+   */
   private liveAllowed(task: Task): boolean {
-    return task.mode === "autonomous" && task.live && this.repo.getSettings().autonomousLive;
+    return task.mode === "autonomous" && this.repo.getSettings().autonomousLive;
   }
 
   /** Every stage, not only a new worktree: the setting may have been turned on after the folder was made. */
@@ -835,7 +851,7 @@ export class TaskRunner {
       );
     }
     // A checkout of a big repository takes a minute — measured 61 s for 40k files, and 47 s outside
-    // CloudSync, so it is the size, not the sync. Say so instead of sitting silently in Queued (D192).
+    // OneDrive, so it is the size, not the sync. Say so instead of sitting silently in Queued (D192).
     this.setTask(task.id, { summary: PREPARING_SUMMARY });
     const wt = await this.git.addWorktree(project.path, task.id);
     // baseSha is null when an existing branch was re-attached: keep the stored base so the diff stays right.
@@ -933,6 +949,8 @@ export class TaskRunner {
       // Stage index → automatic continues used after hitting the turn cap (D232).
       const continued = new Map<number, number>();
       let continuing = false;
+      // Set when the review still asks for changes after every fix round it gets (D410).
+      let reviewNote: string | null = null;
 
       for (let i = opts.fromStage; i < task.pipeline.length; i++) {
         if (ctl.stopped) {
@@ -949,8 +967,13 @@ export class TaskRunner {
         const capped = this.taskCeiling(task);
         const spent = this.repo.taskCost(taskId);
         if (spent >= capped) {
-          this.pauseForCost(taskId, spent, capped, "this task reached its ceiling");
-          return;
+          // A stage just finished and the next is new work: that is progress, so the board grants the
+          // next stage's ceiling itself while under the hard ceiling (D412).
+          if (!this.grantMore(taskId, spent, "a stage finished and the next one is waiting")) {
+            this.pauseForCost(taskId, spent, capped, "this task reached its ceiling");
+            return;
+          }
+          task = this.repo.getTask(taskId)!;
         }
         // Its provider is known to be out: carry on where Settings say, or wait without calling it (D225).
         const pre = this.preflightProvider(task, i);
@@ -968,8 +991,10 @@ export class TaskRunner {
         // Written before the run row exists: if this throws, no run is left behind marked "running".
         const prompt = continuing ? CONTINUE_PROMPT
           : opts.round && i === opts.fromStage ? (resume ? opts.round.prompt : opts.round.fallback)
+          : opts.fix && i === opts.fromStage && resume ? opts.fix
           : await this.stagePromptFor(task, i, project, cwd);
         continuing = false;
+        if (i === opts.fromStage) opts.fix = undefined;
         const run = this.repo.createRun({
           task_id: taskId, stage: stage.stage, stage_index: i, model: stage.model, effort: stage.effort,
           provider: stage.provider && stage.provider !== ANTHROPIC_PROVIDER_ID ? stage.provider : null,
@@ -1037,14 +1062,18 @@ export class TaskRunner {
             i--;
             continue;
           }
-          // Out of turns is not a fault either: the session is intact, so carry on in it (D232).
+          // Out of turns is not a fault either: the session is intact, so carry on in it (D232) — a set
+          // number of times, or for as long as the stage keeps making changes (D412).
           const used = continued.get(i) ?? 0;
           const sessionId = this.repo.getRun(run.id)?.session_id;
-          if (outcome.turnLimit && !ctl.stopped && sessionId && res.adapter.canResume && used < this.repo.getSettings().autoContinueTurns) {
+          const settings = this.repo.getSettings();
+          const working = settings.autoContinueWhileProgressing && isProgressing(stageProgress(this.repo.eventsAfter(run.id)), stage.stage);
+          if (outcome.turnLimit && !ctl.stopped && sessionId && res.adapter.canResume && (used < settings.autoContinueTurns || working)) {
             continued.set(i, used + 1);
-            const note = `[board] The ${stage.stage} stage used all ${this.repo.getSettings().maxTurnsPerStage} turns — continuing in the same session (${used + 1} of ${this.repo.getSettings().autoContinueTurns}).`;
+            const why = used < settings.autoContinueTurns ? `${used + 1} of ${settings.autoContinueTurns}` : `still making changes, continue ${used + 1}`;
+            const note = `[board] The ${stage.stage} stage used all ${settings.maxTurnsPerStage} turns — continuing in the same session (${why}).`;
             this.log(run.id, `\n${note}\n`);
-            const event = this.repo.insertEvent(run.id, "turns:continued", { type: "turns_continued", n: used + 1 });
+            const event = this.repo.insertEvent(run.id, "turns:continued", { type: "turns_continued", n: used + 1, working });
             this.bus.publish({ type: "event", runId: run.id, taskId, event });
             opts.fromStage = i;
             opts.resume = sessionId;
@@ -1052,8 +1081,16 @@ export class TaskRunner {
             i--;
             continue;
           }
-          // Money, not a fault: wait for Continue or Stop rather than fail (D216).
+          // Money, not a fault: a stage still making changes gets another ceiling from the board itself,
+          // under the hard ceiling (D412); otherwise wait for Continue or Stop rather than fail (D216).
           if (outcome.budgetStop) {
+            if (working && sessionId && res.adapter.canResume && this.grantMore(taskId, this.repo.taskCost(taskId), "it is still making changes")) {
+              opts.fromStage = i;
+              opts.resume = sessionId;
+              continuing = true;
+              i--;
+              continue;
+            }
             this.pauseForCost(taskId, this.repo.taskCost(taskId), this.taskCeiling(task), outcome.error ?? "the stage reached its ceiling");
             return;
           }
@@ -1072,6 +1109,28 @@ export class TaskRunner {
               continue;
             }
             if (next === "paused") return;
+          }
+          // The connection dropped, the server was busy: nothing about the work went wrong. The same
+          // stage tries again in its own session after a short wait — three times, then the person (D411).
+          if (!ctl.stopped && sessionId && res.adapter.canResume && this.repo.getSettings().autoRecover && isTransient(outcome.error)) {
+            const prior = task.recovery?.transient;
+            const n = (prior?.stage === i ? prior.n : 0) + 1;
+            if (n <= TRANSIENT_RETRIES) {
+              const delay = TRANSIENT_DELAYS_MS[Math.min(n, TRANSIENT_DELAYS_MS.length) - 1]!;
+              const wait = delay >= 60_000 ? `${Math.round(delay / 60_000)} min` : `${Math.round(delay / 1000)} s`;
+              const reason = `connection problem: ${plainError(outcome.error ?? "the connection dropped")}`;
+              this.log(run.id, `\n[board] ${reason} — trying this stage again in ${wait} (${n} of ${TRANSIENT_RETRIES}), in the same session.\n`);
+              const event = this.repo.insertEvent(run.id, "recovery:retry_scheduled", { type: "recovery_retry_scheduled", n, of: TRANSIENT_RETRIES, delay_ms: delay, reason });
+              this.bus.publish({ type: "event", runId: run.id, taskId, event });
+              this.setTask(taskId, {
+                status: "failed",
+                error: outcome.error,
+                start_at: new Date(Date.now() + delay).toISOString(),
+                note: `Trying again in ${wait} — ${reason} (${n} of ${TRANSIENT_RETRIES})`.slice(0, 600),
+                recovery: { ...(task.recovery ?? {}), transient: { stage: i, n }, last: { at: nowIso(), action: "transient", reason, stage: i } },
+              });
+              return;
+            }
           }
           this.setTask(taskId, { status: "failed", error: outcome.error });
           return;
@@ -1120,25 +1179,58 @@ export class TaskRunner {
             this.setTask(taskId, { note: "The review did not say whether it looked at this change in a browser. Open it yourself before you approve." });
           }
         }
-        // A review stage that asked for changes must not look like a pass.
+        // A review that asked for changes sends the work back to the stage that wrote it, with the findings,
+        // in that stage's own session (D410). Twice; after that the person reads both sides.
         if (stage.stage === "review" && verdict === "CHANGES_NEEDED") {
-          this.setTask(taskId, {
-            status: "failed",
-            error: `Review asked for changes — Retry from stage #${i} (code) after reading the review. ${verdictReason(this.repo.getRun(run.id)?.result_md)}`,
-          });
-          return;
+          const report = this.repo.getRun(run.id)?.result_md;
+          const reason = verdictReason(report);
+          const fixAt = supervisedFrom(task.pipeline, i);
+          const loops = this.reviewLoops.get(taskId) ?? 0;
+          if (fixAt < i && loops < REVIEW_FIX_ROUNDS && !ctl.stopped) {
+            this.reviewLoops.set(taskId, loops + 1);
+            const prior = this.latestByStage(taskId).get(fixAt);
+            const fixer = this.providers.resolve(this.stageAt(task, fixAt).provider);
+            this.sentBack.set(taskId, `The review asked for changes: ${reason}`);
+            this.log(run.id, `\n[board] The review asked for changes — the ${task.pipeline[fixAt]!.stage} stage fixes them (${loops + 1} of ${REVIEW_FIX_ROUNDS}), then review runs again.\n`);
+            const event = this.repo.insertEvent(run.id, "review:changes_requested", { type: "review_changes_requested", n: loops + 1, reason });
+            this.bus.publish({ type: "event", runId: run.id, taskId, event });
+            this.setTask(taskId, { note: `The review asked for changes; fixing them (${loops + 1} of ${REVIEW_FIX_ROUNDS}): ${reason}`.slice(0, 600) });
+            opts.fromStage = fixAt;
+            opts.resume = prior?.session_id && fixer.adapter.canResume ? prior.session_id : undefined;
+            opts.fix = opts.resume ? buildFixPrompt({ attempt: loops + 1, reason, report: report?.slice(0, 6000) ?? null }) : undefined;
+            i = fixAt - 1;
+            continue;
+          }
+          reviewNote = `The review still asks for changes after ${loops} fix${loops === 1 ? "" : "es"} — read its findings before you approve: ${reason}`.slice(0, 600);
         }
       }
       // An answer card changed nothing, so there is nothing to approve or land: its answer is the result (D284).
       const finished = isAnswerPipeline(this.repo.getTask(taskId)?.pipeline ?? []) ? "done" : "review";
-      this.setTask(taskId, ctl.stopped ? { status: "failed", error: "stopped by user" } : { status: finished, ...(finished === "done" ? { note: null } : {}) });
+      // The "fixing them" note goes once the review is satisfied; the one it is not satisfied with stays.
+      const note = finished === "done" ? { note: null } : reviewNote ? { note: reviewNote } : this.reviewLoops.has(taskId) ? { note: null } : {};
+      // The work is done: what the board did to get it here (retries after connection problems) is history.
+      this.setTask(taskId, ctl.stopped ? { status: "failed", error: "stopped by user" } : { status: finished, ...note, summary: this.finishSummary(taskId), recovery: null });
     } finally {
       this.pipelines.delete(taskId);
       this.priorBlocks.delete(taskId);
       this.checkoutStamps.delete(taskId);
       // Kept while the task still has stages to go (a debate gate, a limit pause): cleared once it lands in review.
-      if (["review", "done"].includes(this.repo.getTask(taskId)?.status ?? "")) this.sentBack.delete(taskId);
+      if (["review", "done"].includes(this.repo.getTask(taskId)?.status ?? "")) {
+        this.sentBack.delete(taskId);
+        this.reviewLoops.delete(taskId);
+      }
     }
+  }
+
+  /**
+   * What the card says once the work is done: the result's own first line, never the last progress line
+   * ("Plan ready…", "Looking up…") a stage left on it (D410). A block's summary stays, it is the result.
+   */
+  private finishSummary(taskId: string): string | null {
+    const task = this.repo.getTask(taskId);
+    if (!task) return null;
+    if (task.summary?.startsWith("Blocked:")) return task.summary;
+    return outcomeLine(this.repo.runsForTask(taskId), null)?.slice(0, 280) ?? task.summary ?? null;
   }
 
   /** The workspace's uncommitted files, each with its size and time: what a read-only stage must leave as it found. */
@@ -1774,11 +1866,12 @@ export class TaskRunner {
         }
         return this.askApproval(run, task.id, toolName, input, o);
       }
-      const keys = printsKeys(toolName, input);
-      if (keys) return { behavior: "deny", message: keys };
       const decision = autonomousGate(toolName, input, a.cwd, readRoots, { markitdown: settings.markitdownInTasks, folder: inFolder, scratch });
       // A question nobody can answer is not the sandbox saying no: it gets its own message, uncounted.
       if (decision.behavior === "deny" && toolName !== "AskUserQuestion") return refuse(decision.message);
+      // Inside the folder, and reaching for a key file: the sandbox allows it, the transcript must not see it.
+      const keys = printsKeys(toolName, input);
+      if (keys) return { behavior: "deny", message: keys };
       return decision;
     };
     // An autonomous run's whole gate, as a hook too. canUseTool is only asked about a call nothing has
@@ -1806,13 +1899,14 @@ export class TaskRunner {
               const decision = handsOffDecision(name, input);
               return decision.behavior === "deny" ? deny(decision.message) : {};
             }
-            const keys = printsKeys(name, input);
-            if (keys) return deny(keys);
             const browser = browserDecision(name, input, true, a.cwd, browserDir, browserReach);
             if (browser?.behavior === "allow") return {};
             if (browser?.behavior === "deny") return deny(refuse(browser.message).message);
             const decision = autonomousGate(name, input, a.cwd, readRoots, { markitdown: settings.markitdownInTasks, folder: inFolder, scratch });
             if (decision.behavior === "deny") return deny(refuse(decision.message).message);
+            // The sandbox lets a key file in the folder be read; the transcript must not see it (D385).
+            const keys = printsKeys(name, input);
+            if (keys) return deny(keys);
             const written = PATH_KEYS[name] ? input[PATH_KEYS[name]] : undefined;
             if (typeof written === "string") {
               const rel = relInside(a.cwd, written);
@@ -3119,8 +3213,34 @@ export class TaskRunner {
         if (!sha || this.baseSeen.get(p.id) === sha) continue;
         this.baseSeen.set(p.id, sha);
         await tracked(p.path, this.refreshConflictRisk(p.id));
+        await tracked(p.path, this.catchUpReview(p, base));
       } catch {
         // a repository git cannot read right now is looked at again on the next tick
+      }
+    }
+  }
+
+  /**
+   * The base moved: every card waiting in Review takes it in now, in its own worktree, instead of only
+   * when someone presses Approve (D413). A conflict goes to Claude at once (when `onConflict` is
+   * "claude"); otherwise the card keeps its warning and its Update button. A project set to "ask me"
+   * for conflicts opts out of the whole thing. Idle cards only: one mid-stage or mid-resolution is left.
+   */
+  private async catchUpReview(project: Project, base: string): Promise<void> {
+    if (!project.merge.autoUpdateFromBase || project.merge.onConflict === "ask") return;
+    const cards = this.repo.listTasks({ project_id: project.id }).filter((t) => t.status === "review" && t.branch && t.worktree_path && !t.resolution);
+    for (const t of cards) {
+      if (this.isBusy(t.id)) continue;
+      try {
+        const { behind } = await gitOps.aheadBehind(project.path, base, t.branch!);
+        if (behind <= 0) continue;
+        if (t.conflict_risk?.files.length && project.merge.onConflict === "claude") {
+          await this.resolveConflict(t.id); // Claude combines both sides in the worktree; it does not land
+        } else if (!t.conflict_risk?.files.length) {
+          await this.updateTaskFromBase(t.id); // clean: just bring the new commits in
+        }
+      } catch {
+        // busy, a hold, or a branch git cannot read now: next tick tries again
       }
     }
   }
@@ -3219,6 +3339,35 @@ export class TaskRunner {
   /** Counted per round: what the card spent before this round started is not this round's bill (D375). */
   private taskCeiling(task: Task): number {
     return this.repo.getSettings().maxCostPerTaskUsd + (task.budget_extra_usd ?? 0) + (task.round_cost_base ?? 0);
+  }
+
+  /** Past this the board stops granting by itself and asks: twice the task ceiling, counted per round (D412). */
+  private hardCeiling(task: Task): number {
+    return 2 * this.repo.getSettings().maxCostPerTaskUsd + (task.round_cost_base ?? 0);
+  }
+
+  /**
+   * The board's own Continue (D412): one more stage ceiling for a task that reached its own while it
+   * was getting somewhere, said on the card in plain words. False when the setting is off or the next
+   * grant would pass the hard ceiling — then the person decides, as before.
+   */
+  private grantMore(taskId: string, spent: number, why: string): boolean {
+    const settings = this.repo.getSettings();
+    const task = this.repo.getTask(taskId);
+    if (!task || !settings.autoContinueWhileProgressing) return false;
+    const grant = settings.maxCostPerStageUsd;
+    const hard = this.hardCeiling(task);
+    if (this.taskCeiling(task) + grant > hard) return false;
+    const run = this.repo.latestRun(taskId);
+    if (run) {
+      const event = this.repo.insertEvent(run.id, "cost:auto_granted", { type: "cost_auto_granted", spent, grant, ceiling: this.taskCeiling(task) + grant, hard, why });
+      this.bus.publish({ type: "event", runId: run.id, taskId, event });
+    }
+    this.setTask(taskId, {
+      budget_extra_usd: (task.budget_extra_usd ?? 0) + grant,
+      note: `Spent $${spent.toFixed(2)} — ${why}, so it carries on (the board asks you at $${hard.toFixed(2)}).`,
+    });
+    return true;
   }
 
   /**
@@ -3856,6 +4005,36 @@ export class TaskRunner {
   }
 
   /** Follow-up chat: continue the session that did the work (the coder, not the reviewer) with the user's text. */
+  /**
+   * Ask the card's coder a question without changing anything (D410): its work session answers, forked
+   * so the real session is untouched, with every write and shell tool off. The answer comes from its warm
+   * cache (D374) instead of a fresh read. Used by the chat's board_ask_task; it never moves the card.
+   */
+  async askSession(taskId: string, question: string): Promise<string> {
+    const { task, project } = this.load(taskId);
+    const last = this.repo.workRun(taskId);
+    const resumable = last?.session_id && this.providers.resolve(last.provider).adapter.canResume;
+    const cwd = usesWorktree(task) && task.worktree_path && existsSync(task.worktree_path) ? task.worktree_path : project.path;
+    const prompt =
+      `Answer this question about the work on this task. Read whatever you need to, but change nothing — no edits, no commands, no commits. Reply in plain words.\n\n${question.trim()}`;
+    const options: Options = {
+      model: last?.model ?? this.repo.getSettings().triageModel,
+      cwd,
+      ...LEAN,
+      permissionMode: "default",
+      maxTurns: 6,
+      maxBudgetUsd: 1,
+      allowedTools: ["Read", "Glob", "Grep"],
+      disallowedTools: ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "PowerShell", "WebFetch", "WebSearch"],
+      ...(resumable ? { resume: last!.session_id!, forkSession: true } : {}),
+    };
+    let out = "";
+    for await (const msg of this.queryFn({ prompt: userMessage(prompt), options })) {
+      if (msg.type === "result" && msg.subtype === "success") out = (msg as { result?: string }).result ?? "";
+    }
+    return out.trim() || "The card's session had nothing to add.";
+  }
+
   chat(taskId: string, text: string): Run {
     const { task, project } = this.load(taskId);
     const live = this.active.get(taskId);
@@ -4123,6 +4302,26 @@ export class TaskRunner {
     const from = task.blocked?.advisory ? supervisedFrom(task.pipeline, task.blocked.stage_index) : task.blocked?.stage_index ?? this.defaultStart(task).fromStage;
     // A fresh session: the old one lived in a worktree that no longer exists.
     return this.queueTask(taskId, { fromStage: Math.min(from, Math.max(0, task.pipeline.length - 1)) });
+  }
+
+  /**
+   * A sign-in to `host` just finished: every card that waited for exactly that runs the stage that
+   * needed it again, still autonomous and still in its own folder (D410). Returns the cards sent.
+   */
+  resumeAfterSignIn(host: string): Task[] {
+    const sent: Task[] = [];
+    for (const task of this.repo.listTasks({})) {
+      if (!task.blocked?.advisory || !unlockedBySignIn(task.blocked, host)) continue;
+      if (!["review", "failed", "backlog"].includes(task.status) || this.isBusy(task.id) || task.archived_at) continue;
+      try {
+        const from = supervisedFrom(task.pipeline, task.blocked.stage_index);
+        this.setTask(task.id, { note: `You signed in to ${host}: running the ${task.pipeline[from]?.stage ?? "work"} stage again with it.` });
+        sent.push(this.queueTask(task.id, { fromStage: Math.min(from, Math.max(0, task.pipeline.length - 1)) }));
+      } catch {
+        // a card that cannot be queued right now (a hold, a project gone) keeps its "your turn" line
+      }
+    }
+    return sent;
   }
 
   async diff(taskId: string): Promise<DiffFile[]> {
@@ -4576,15 +4775,17 @@ export class TaskRunner {
       this.startOpts.set(t.id, this.pipelineComplete(t) ? { fromStage: 0 } : this.defaultStart(t));
       this.queue.enqueue({ taskId: t.id, projectId: t.project_id });
     }
-    if (opts.afterCrash) for (const [taskId, stageIndex] of cutOff) this.carryOnAfterCrash(taskId, stageIndex);
+    // Any restart, not only a crash (D411): an update or a Restart from the tray also cut the stage off, and
+    // its session holds everything it had done. Nothing is gained by waiting for someone to press Retry.
+    for (const [taskId, stageIndex] of cutOff) this.carryOnAfterCrash(taskId, stageIndex, Boolean(opts.afterCrash));
   }
 
   /**
-   * A stage the board's own crash cut off: run it again in its session, which still holds everything
-   * it had done. A task cut off again and again stays failed, because the next crash may be its doing
-   * and a board that restarts into it would never stay up (D384).
+   * A stage a restart cut off: run it again in its session, which still holds everything it had done.
+   * A task cut off again and again stays failed, because the next crash may be its doing and a board
+   * that restarts into it would never stay up (D384).
    */
-  private carryOnAfterCrash(taskId: string, stageIndex: number): void {
+  private carryOnAfterCrash(taskId: string, stageIndex: number, crash: boolean): void {
     const since = Date.now() - CRASH_WINDOW_MS;
     const cuts = this.repo.stageRuns(taskId).filter((r) => r.error === "interrupted" && r.ended_at && Date.parse(r.ended_at) >= since).length;
     if (cuts >= CRASH_RESUME_LIMIT) {
@@ -4595,7 +4796,12 @@ export class TaskRunner {
     }
     // Before the start: the note is read when the stage's first event is written.
     const notes = this.pendingNotes.get(taskId) ?? [];
-    this.pendingNotes.set(taskId, [...notes, "The board stopped unexpectedly while this stage ran. It started again by itself, and this stage carries on in the same session."]);
+    this.pendingNotes.set(taskId, [
+      ...notes,
+      crash
+        ? "The board stopped unexpectedly while this stage ran. It started again by itself, and this stage carries on in the same session."
+        : "The board restarted while this stage ran. This stage carries on in the same session.",
+    ]);
     try {
       this.retryTask(taskId, stageIndex);
     } catch {

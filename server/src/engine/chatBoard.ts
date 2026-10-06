@@ -49,6 +49,19 @@ const brief = (t: Task) => ({
 const FOLLOW_UP_STATUSES = new Set<Task["status"]>(["running", "planning", "review", "failed", "done"]);
 /** Words that say nothing about which card a request is about. */
 const STOP_WORDS = new Set(["make", "change", "please", "with", "that", "this", "from", "into", "have", "should", "would", "could", "about", "there", "their", "them", "then", "than", "what", "when", "where", "which", "also", "just", "like", "more", "some", "same", "add", "the", "and", "for"]);
+
+/** Two card titles that mean the same work: the same once lower-cased and stripped to its words (D410). */
+export function sameWork(a: string, b: string): boolean {
+  const key = (s: string) => [...new Set((s.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).filter((w) => !STOP_WORDS.has(w)))].sort().join(" ");
+  const ka = key(a);
+  const kb = key(b);
+  if (!ka || !kb) return false;
+  if (ka === kb) return true;
+  const wa = new Set(ka.split(" "));
+  const wb = new Set(kb.split(" "));
+  const shared = [...wa].filter((w) => wb.has(w)).length;
+  return shared / Math.max(wa.size, wb.size) >= 0.85;
+}
 const normFile = (f: string) => f.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
 
 /** The questions on an AskUserQuestion card and their option labels, tolerant of anything malformed. */
@@ -169,10 +182,16 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
 
     createTask(args: {
       title: string; spec_md: string; type?: string; priority?: string; mode?: RunStyle; depends_on?: string[];
-      stages?: StageArg[]; live?: boolean; own_branch?: boolean; follows?: string; files?: string[]; live_systems?: string[];
+      stages?: StageArg[]; live?: boolean; own_branch?: boolean; follows?: string; files?: string[]; live_systems?: string[]; force?: boolean;
     }) {
       const follows = args.follows ? mine(args.follows) : undefined;
       if (args.follows && !follows) return fail(`No card ${args.follows} in this project.`);
+      // The same request to two chats made two cards, and nobody noticed (owner, D410). An open card with
+      // the same title is almost always the same work: offer it instead, unless the model insists with force.
+      if (!args.force && !args.follows) {
+        const dup = repo.listTasks({ project_id: projectId }).find((t) => !t.archived_at && t.status !== "done" && sameWork(t.title, args.title));
+        if (dup) return text({ reused: brief(dup), note: `An open card already does this: "${dup.title}" (${dup.status}). Use it — board_queue_task to start it, board_continue_task to add to it, or board_update_task to change it. Pass force: true only if this is genuinely different work.` });
+      }
       const project = repo.getProject(projectId)!;
       const deps = (args.depends_on ?? []).filter((id) => mine(id));
       const built = args.stages?.length ? buildPipeline(args.stages) : null;
@@ -183,10 +202,11 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
       // lookup follows it too: under autonomous it runs in the project's own folder with nobody asked,
       // where the project gives autonomous that access (D352); otherwise it is supervised (D284).
       const picked: RunStyle = args.mode ?? (chatId ? repo.getChat(chatId)?.mode : undefined) ?? repo.getSettings().defaultRunStyle;
-      // "Asks me" is about change work you want a say in. On a lookup it would mean autonomous: a
-      // session that reaches the live system with nobody asked, so a lookup takes it as supervised
-      // and runs autonomous only when the message or the chat's switch says so outright (D365).
-      const style: RunStyle = answer && picked === "ask" && args.mode !== "ask" ? "supervised" : picked;
+      // A lookup reads and reports; it writes nothing. "Asks me" (change work you want a say in) has
+      // nothing to pause on here, so a lookup in an autonomous or ask chat just runs autonomous — the
+      // owner's rule that autonomous means "do not ask me", lookups included (D410, amends D365). Only a
+      // chat set to supervised keeps a lookup supervised.
+      const style: RunStyle = answer && picked === "ask" ? "autonomous" : picked;
       const wanted: Mode = runStyleFields(style).mode;
       const mode: Mode = allowedMode(project, wanted, pipeline);
       const t = repo.createTask({
@@ -534,6 +554,30 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
       return text({ answered: q.text, with: args.answer.trim() });
     },
 
+    approveTask(args: { task_id: string }) {
+      const t = mine(args.task_id);
+      if (!t) return fail(`No card ${args.task_id} in this project.`);
+      if (t.status !== "review") return fail(`"${t.title}" is ${t.status}, not waiting for review — there is nothing to approve.`);
+      if (t.conflict_risk?.files.length) return fail(`"${t.title}" would conflict with ${t.conflict_risk.base} in ${t.conflict_risk.files.join(", ")}. It is being brought up to date; try again shortly, or the user can press Fix now on the card.`);
+      // Nothing awaits this: approveTask merges and may hand a conflict to Claude, both of which take a while.
+      void runner.approveTask(t.id).catch((err) => bus.publish({ type: "task.updated", task: repo.updateTask(t.id, { note: `Approve did not go through: ${err instanceof Error ? err.message : String(err)}` }) }));
+      onCard({ id: t.id, title: t.title, action: "approved" });
+      return text({ approving: brief(t), note: "Merging it into the base now. It lands by itself, or stops to resolve a conflict in its own copy." });
+    },
+
+    approvePlan(args: { task_id: string }) {
+      const t = mine(args.task_id);
+      if (!t) return fail(`No card ${args.task_id} in this project.`);
+      if (!t.plan_gate) return fail(`"${t.title}" has no plan waiting for a decision.`);
+      try {
+        const task = runner.decidePlan(t.id, "original");
+        onCard({ id: t.id, title: t.title, action: "approved" });
+        return text({ approved: brief(task), note: "The plan is approved; the next stage runs." });
+      } catch (err) {
+        return fail(`Could not approve the plan: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+
     stopTask(args: { task_id: string }) {
       const t = mine(args.task_id);
       if (!t) return fail(`No card ${args.task_id} in this project.`);
@@ -556,6 +600,18 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
         return text({ retried: brief(retried), note: "It continues from the stage that failed, in the same session." });
       } catch (err) {
         return fail(`Could not retry "${t.title}": ${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+
+    async askTask(args: { task_id: string; question: string }) {
+      const t = mine(args.task_id);
+      if (!t) return fail(`No card ${args.task_id} in this project.`);
+      if (runner.isBusy(t.id)) return fail(`"${t.title}" is busy right now; use board_task_progress to see what it is doing, or wait.`);
+      try {
+        const answer = await runner.askSession(t.id, args.question);
+        return text({ task: t.title, answer });
+      } catch (err) {
+        return fail(`Could not ask "${t.title}": ${err instanceof Error ? err.message : String(err)}`);
       }
     },
 
@@ -592,7 +648,7 @@ export function createChatBoardServer(deps: ChatBoardDeps, projectId: string, ch
     version: "1.0.0",
     alwaysLoad: true,
     instructions:
-      "This project's Claude Kanban board. List and read cards and how their runs are going, create cards for work to be done, send follow-ups to the card that did the work (by what it remembers), edit Backlog cards, queue or schedule them, and talk to a card's own Claude session (message it, answer its question, stop it, retry it).",
+      "This project's Claude Kanban board. List and read cards and how their runs are going, create cards for work to be done, send follow-ups to the card that did the work (by what it remembers), edit Backlog cards, queue or schedule them, approve a card's plan or approve and merge a finished card when the user says so, and talk to a card's own Claude session (message it, answer its question, stop it, retry it).",
     tools: [
       tool("board_list_tasks", "List the cards on this project's board with a count per status. Done cards are only counted unless you ask for status \"done\".",
         { status: z.enum(TASK_STATUSES as [string, ...string[]]).optional() }, async (a) => h.listTasks(a)),
@@ -615,6 +671,7 @@ export function createChatBoardServer(deps: ChatBoardDeps, projectId: string, ch
           follows: z.string().optional().describe("The id of an earlier card this one follows on from, when board_related_cards recommends a fresh card: it is told what that card did and which files it changed."),
           files: FILES_ARG,
           live_systems: SYSTEMS_ARG,
+          force: z.boolean().optional().describe("Make the card even when an open card has the same title — only when this is genuinely different work."),
         },
         async (a) => h.createTask(a)),
       tool("board_overlaps",
@@ -662,8 +719,17 @@ export function createChatBoardServer(deps: ChatBoardDeps, projectId: string, ch
           answers: z.record(z.string(), z.string().max(4000)).optional(),
         },
         async (a) => h.answerQuestion(a)),
+      tool("board_approve_task",
+        "Approve and merge a card that is waiting in review, when the user's latest message tells you to (\"approve it\", \"merge all three\", \"ship it\"). Never on your own. It merges into the base and resolves any conflict in the card's own copy.",
+        { task_id: z.string() }, async (a) => h.approveTask(a)),
+      tool("board_approve_plan",
+        "Approve a card's waiting plan so the work can start, when the user's latest message tells you to. Never on your own.",
+        { task_id: z.string() }, async (a) => h.approvePlan(a)),
       tool("board_stop_task", "Stop a card that is queued or running. Only when the user asked.", { task_id: z.string() }, async (a) => h.stopTask(a)),
       tool("board_retry_task", "Run a failed card again from the stage that failed. Only when the user asked.", { task_id: z.string() }, async (a) => h.retryTask(a)),
+      tool("board_ask_task",
+        "Ask the card's own coder a question about the work it did — why it chose something, where a thing lives, whether it handled a case — and get the answer back here. It reads but changes nothing, and uses what the card still remembers, so it is cheap. Use this to answer the user's questions about a finished card instead of reading the project yourself.",
+        { task_id: z.string(), question: z.string().min(4).max(2000) }, async (a) => h.askTask(a)),
       tool("board_memory", "Read what the board remembers about this project: decisions and conventions from earlier tasks.", {}, async () => h.memory()),
       tool("board_remember",
         "Save one lesson to the project's memory, so every later card starts with it. Only when the user asks you to remember something (\"remember: buttons use the brand blue\", \"from now on…\"). One plain sentence, in the user's terms.",

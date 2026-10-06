@@ -63,6 +63,9 @@ export function chatSignal(cards: TaskCard[], pending: Approval[], busy: boolean
   return { kind, ...SIGNALS[kind], count: Math.max(1, kinds.filter((k) => k === kind).length) };
 }
 
-/** Signals that want you, then ones still moving: the AI Manager's "Group by status" sections. */
-export const NEEDS_YOU = new Set<SignalKind>(["question", "permission", "plan"]);
+/**
+ * Signals that want you, then ones still moving: the AI Manager's "Group by status" sections. A card in
+ * review, a failure and an unresolved conflict all wait on you too (D410) — before, they sat under "Quiet".
+ */
+export const NEEDS_YOU = new Set<SignalKind>(["question", "permission", "plan", "review", "failed", "conflict"]);
 export const MOVING = new Set<SignalKind>(["working", "paused", "queued"]);

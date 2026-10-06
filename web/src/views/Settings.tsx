@@ -582,6 +582,9 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [autoMemory, setAutoMemory] = useState(false);
   const [autonomousLive, setAutonomousLive] = useState(true);
   const [autonomousWorktree, setAutonomousWorktree] = useState(true);
+  const [autoRecover, setAutoRecover] = useState(true);
+  const [autoContinueProgress, setAutoContinueProgress] = useState(true);
+  const [debriefOnFinish, setDebriefOnFinish] = useState(true);
   const [autoResume, setAutoResume] = useState(true);
   const [claudeFallback, setClaudeFallback] = useState<TierRef | null>(null);
   const [keepAwake, setKeepAwake] = useState(true);
@@ -663,6 +666,9 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
     take((s) => s.claudeAutoMemory ?? false, setAutoMemory);
     take((s) => s.autonomousLive ?? true, setAutonomousLive);
     take((s) => s.autonomousWorktree ?? true, setAutonomousWorktree);
+    take((s) => s.autoRecover ?? true, setAutoRecover);
+    take((s) => s.autoContinueWhileProgressing ?? true, setAutoContinueProgress);
+    take((s) => s.debriefOnFinish ?? true, setDebriefOnFinish);
     take((s) => s.autoResume, setAutoResume);
     take((s) => s.claudeFallback, setClaudeFallback);
     take((s) => s.keepAwake, setKeepAwake);
@@ -700,6 +706,9 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           claudeAutoMemory: autoMemory,
           autonomousLive,
           autonomousWorktree,
+          autoRecover,
+          autoContinueWhileProgressing: autoContinueProgress,
+          debriefOnFinish,
           autoResume,
           claudeFallback: claudeFallback?.model && claudeFallback.provider !== ANTHROPIC_PROVIDER_ID ? claudeFallback : null,
           keepAwake,
@@ -1127,11 +1136,43 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
             <input type="checkbox" className="mt-1 accent-amber" checked={autonomousLive} onChange={(e) => setAutonomousLive(e.target.checked)} />
             <span>
-              Let autonomous tasks change live systems themselves
+              Let autonomous tasks finish live work themselves
               <span className="block text-[11.5px] text-ink-400">
-                For a task marked <b>live</b>: the project's private key files (the ones kept out of git, such as <code>.env</code>) are
-                copied into the task's folder, and the task does the live steps itself instead of leaving them for a supervised run.
-                Turn this off to have autonomous tasks stop short of the live system.
+                Every autonomous task gets the project's private key files (the ones kept out of git, such as <code>.env</code>) in its
+                folder and does the live steps itself, end to end, instead of leaving them for a supervised run. If it truly lacks access —
+                a sign-in, a missing key — it says exactly what, and the card asks you for it. Turn this off to have autonomous tasks stop
+                short of the live system.
+              </span>
+            </span>
+          </label>
+          <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
+            <input type="checkbox" className="mt-1 accent-amber" checked={autoRecover} onChange={(e) => setAutoRecover(e.target.checked)} />
+            <span>
+              Recover from failures on its own
+              <span className="block text-[11.5px] text-ink-400">
+                A connection drop or a busy server is retried in the same session, a few times, before you are asked. Any other failure
+                gets one cheap read-only look that decides whether to try again or hand it to you with a plain reason — at most twice.
+              </span>
+            </span>
+          </label>
+          <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
+            <input type="checkbox" className="mt-1 accent-amber" checked={autoContinueProgress} onChange={(e) => setAutoContinueProgress(e.target.checked)} />
+            <span>
+              Keep going while it is making progress
+              <span className="block text-[11.5px] text-ink-400">
+                A stage that hits the turn limit while still editing files carries on; a task that reaches its cost ceiling while it is
+                getting somewhere is given a little more by the board, up to twice the task ceiling, and only then stops to ask. A looping
+                session is still stopped at once.
+              </span>
+            </span>
+          </label>
+          <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
+            <input type="checkbox" className="mt-1 accent-amber" checked={debriefOnFinish} onChange={(e) => setDebriefOnFinish(e.target.checked)} />
+            <span>
+              The AI Manager sums up each finished card in its chat
+              <span className="block text-[11.5px] text-ink-400">
+                When a card a chat started finishes or fails, the manager posts a short note in that chat — what was done, what is left,
+                and whether a follow-up is worth making — so you are told without having to ask. One cheap call per card.
               </span>
             </span>
           </label>

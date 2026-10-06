@@ -182,11 +182,15 @@ test("autonomous reads are guarded by a hook too, since a read may never reach c
   }
 });
 
-test("an autonomous run that needs a supervised run says so on the card and carries on to review (D382)", async () => {
+test("an autonomous run that lacks access names it, carries on to review, and the card asks for exactly that (D382, D410)", async () => {
   const f = scripted(
-    (i) => (i === 0 ? "plan: 1. write the verifier 2. **(supervised run)** deploy it" : i === 1 ? "verifier written\n## Left for a supervised run\n1. deploy it" : "VERDICT: APPROVE"),
+    (i) => (i === 0 ? "plan: 1. write the verifier 2. deploy it (waits for the sign-in)" : i === 1 ? "verifier written; the deploy waits for the sign-in" : "VERDICT: APPROVE"),
     async (i, _o, board) => {
-      if (i === 0) board().reportBlocked({ reason: "Deploying needs live BizApp.", needs: "supervised", ask: "Switch to supervised for the deploy." });
+      if (i === 0) {
+        const refused = board().reportBlocked({ reason: "Deploying needs live BizApp.", needs: "supervised", ask: "Switch to supervised for the deploy." });
+        assert.match(JSON.stringify(refused), /Not recorded/, "without naming the access, nothing is recorded");
+        board().reportBlocked({ reason: "Deploying needs live BizApp.", needs: "supervised", needs_access: { kind: "sign_in", target: "erp.example.com" } });
+      }
     },
   );
   const s = setup(f.fn);
@@ -202,19 +206,23 @@ test("an autonomous run that needs a supervised run says so on the card and carr
     assert.equal(f.calls.length, 3, "the code and review stages ran after the suggestion");
     assert.equal(t.blocked?.advisory, true);
     assert.equal(t.blocked?.stage_index, 0);
-    assert.equal(t.blocked?.ask, "Switch to supervised for the deploy.");
+    assert.deepEqual(t.blocked?.needs_access, { kind: "sign_in", target: "erp.example.com" });
     assert.equal(stoppedBy(t), null, "a suggestion is not a stop");
     assert.ok(s.repo.runsForTask(task.id).every((r) => r.status === "success"), "every stage counts as done");
-    assert.match(f.calls[1].prompt, /## Left for a supervised run/, "the code stage is told to do the rest and list what is left");
-    assert.match(f.calls[2].prompt, /are not defects of this run/, "review does not fail it for the steps left");
+    assert.match(f.calls[1].prompt, /Finish the task end to end/, "the code stage is told to finish, not to leave a list");
+    assert.doesNotMatch(f.calls[1].prompt, /Left for a supervised run/);
+    assert.doesNotMatch(f.calls[2].prompt, /are not defects of this run/, "review has no excuse to give");
 
-    const queued = await s.runner.escalateToSupervised(task.id);
-    assert.equal(queued.mode, "supervised");
+    // The sign-in the card asked for happens: the code stage runs again, still autonomous.
+    const sent = s.runner.resumeAfterSignIn("erp.example.com");
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].mode, "autonomous");
     await until(() => f.calls.length > 3, 10_000);
-    assert.match(f.calls[3].prompt, /# Stage: code/, "the plan finished: the switch reruns the code stage, not the plan");
-    assert.match(f.calls[3].prompt, /## What the last attempt left for a supervised run\nDeploying needs live BizApp\./);
-    assert.match(f.calls[3].prompt, /It now runs supervised, in the main checkout/);
+    assert.match(f.calls[3].prompt, /# Stage: code/, "the plan finished: it reruns the code stage, not the plan");
+    assert.match(f.calls[3].prompt, /## What the last attempt waited for\nDeploying needs live BizApp\./);
+    assert.match(f.calls[3].prompt, /The person has since done this: sign in to erp\.example\.com/);
     await until(() => !s.runner.isBusy(task.id));
+    assert.equal(s.runner.resumeAfterSignIn("other.example.com").length, 0, "a sign-in elsewhere wakes nothing");
   } finally {
     await s.cleanup();
   }
@@ -224,7 +232,7 @@ test("a review that still blocks after a suggestion stops the task and asks for 
   const f = scripted(
     (i) => (i === 2 ? "VERDICT: BLOCKED — nothing can be checked without the live system" : "ok"),
     async (i, _o, board) => {
-      if (i === 0) board().reportBlocked({ reason: "The data is only in live BizApp.", needs: "supervised" });
+      if (i === 0) board().reportBlocked({ reason: "The data is only in live BizApp.", needs: "supervised", needs_access: { kind: "sign_in", target: "erp.example.com" } });
     },
   );
   const s = setup(f.fn);
@@ -305,7 +313,7 @@ test("a Reject's reason reaches the next run, and Discard keeps it (D196)", asyn
     s.runner.queueTask(task.id);
     assert.equal(s.repo.getTask(task.id)!.note, null, "the card's note clears on queue, as before");
     await until(() => s.repo.getTask(task.id)!.status === "review");
-    assert.match(f.calls[1].prompt, /## Why this was sent back\nA human rejected the previous attempt: The how-to steps are missing\./);
+    assert.match(f.calls[1].prompt, /## Why this was sent back\nA person rejected the previous attempt: The how-to steps are missing\./);
   } finally {
     await s.cleanup();
   }

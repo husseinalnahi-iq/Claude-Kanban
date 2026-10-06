@@ -102,16 +102,15 @@ opens that page for you if not). A ZIP copy does not update itself — the one-l
    folder for a new one).
 3. **Create a task**: the **+** on the *Backlog* column → a title, and a few lines on what “done” looks
    like → **Create & queue** (or **Create** to keep it in Backlog for later).
-4. **Watch it**: it moves to **In progress** while Claude plans, codes and reviews it; anything that
-   needs you shows as **needs you**. An autonomous task marked **live** does its live steps itself: the
-   project's key files that git leaves out (such as `.env`) are copied into its folder, and it never shows
-   them in the transcript (Settings → Plan approval & live tasks; on by default). Those copies are deleted
-   first when the task's folder is removed; if a program still holds the folder, the card says so and
-   names it, so nothing is left behind unnoticed. With that off, or
-   when it still lacks some access, it does not stop: it says so on the card, does everything else, and lists the steps
-   left for a supervised run — the card reaches Review with **live steps left**, and **Switch to
-   supervised & run** does them with your approval on every write. If a stage cannot go on at all, the
-   card says **blocked · needs you** with the reason.
+4. **Watch it**: it moves to **In progress** while Claude plans, codes and reviews it, and a single
+   **Your turn: …** line says when it needs you. An autonomous task does its live steps itself, end to
+   end: the project's key files that git leaves out (such as `.env`) are copied into its folder, and it
+   never shows them in the transcript (Settings → Runs & limits; on by default). If it truly lacks an
+   access — a sign-in it has no cookies for, a key file the project has no copy of — it does not leave a
+   list: it names exactly that, the card says **Your turn: sign in to …**, and signing in runs the step
+   again on its own. A review that wants changes goes back to the coder, not to you. A dropped connection
+   is retried by itself; a stage still editing files is not cut off by a turn or cost ceiling. If a stage
+   cannot go on at all, the card says **Your turn** with the reason.
 5. **Review it**: when it reaches **Review**, open the card: it opens on its **Result** tab, with the review's
    verdict. **Approve** lands the changes in your project; **Reject** keeps them aside with your reason,
    which the next run is told first. You can re-run any stage.
@@ -1045,8 +1044,10 @@ writes the list into the repository's own `.git/info/attributes`, in a marked bl
 never committed and leaves any lines of yours alone. Only list files that are added to: a line that
 both tasks changed would be kept twice.
 
-A task open for a while shows **"N commits landed on main since this started"** with an *Update it*
-button, so it can catch up while that is still cheap.
+While a card waits in review and main moves under it, the board brings it up to date in its own copy by
+itself, and hands any conflict to Claude at once (Settings → Git & merging; a project set to *Ask me*
+for conflicts opts out). The drawer shows how far behind it is and an *Update it* button right above
+Approve as the manual fallback.
 
 **Locked-down projects.** A repository whose own rules say *main branch only, every write approved* is
 registered with the **Supervised-only preset** (`worktrees: forbidden, autonomous: forbidden`). The
@@ -1505,7 +1506,7 @@ branch mechanics with real Haiku runs (cents).
 
 ## Welcome and the Tour tab
 
-The first time the board opens on a machine it says hello: seven headline features, and a demo card
+The first time the board opens on a machine it says hello: its headline features, and a demo card
 walking across a pretend board in the real status colours. The **Skip** button is shy. It slides away
 from your mouse twice, then gives up with a 😂 and lets you click it. From the keyboard, Enter or Esc
 closes it straight away.

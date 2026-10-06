@@ -53,6 +53,22 @@ export function resetFrom(text: string, now: number, naiveOffsetMin = 0): number
   return null;
 }
 
+/**
+ * A failure that says nothing about the work: the connection dropped, the server was busy, a stream
+ * closed. The same stage in the same session is tried again after a short wait (D411). A context-length
+ * error is not one: waiting does not shrink a prompt.
+ */
+const TRANSIENT =
+  /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|EPIPE|socket hang up|fetch failed|network error|connection (error|reset|closed|refused|timed out)|timed? ?out|stream closed|permission stream closed|overloaded|server error|internal server error|service unavailable|bad gateway|gateway time-?out|temporarily unavailable|try again later|\b(5\d\d|529)\b/i;
+
+export function isTransient(error: string | null | undefined): boolean {
+  const text = error ?? "";
+  if (!text.trim() || NOT_USAGE.test(text)) return false;
+  // A stop someone asked for, a block, a verify failure and a usage limit each have their own path.
+  if (/stopped by user|^blocked|verification failed|usage limit|out of credits?|insufficient/i.test(text)) return false;
+  return TRANSIENT.test(text);
+}
+
 /** The provider's message without the JSON around it, short enough for a card. */
 export function plainReason(error: string): string {
   const msg = error.match(/"message"\s*:\s*"([^"]{3,300})"/)?.[1];

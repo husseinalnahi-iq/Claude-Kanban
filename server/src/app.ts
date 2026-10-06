@@ -34,6 +34,7 @@ import { wsRoutes } from "./routes/ws.ts";
 import { scheduleRoutes } from "./routes/schedules.ts";
 import { Scheduler } from "./engine/scheduler.ts";
 import { ChatService } from "./engine/chat.ts";
+import { RecoveryService } from "./engine/recovery.ts";
 import { chatRoutes } from "./routes/chats.ts";
 import { ExplainService } from "./engine/explainAi.ts";
 import { explainRoutes } from "./routes/explain.ts";
@@ -58,6 +59,8 @@ export interface AppDeps {
   scheduler?: Scheduler;
   /** The side chat. Built here when not given; it shares the runner's SDK entry point. */
   chat?: ChatService;
+  /** Looks at failed tasks and retries what can be retried (D411). Built here when not given. */
+  recovery?: RecoveryService;
   /** The shells behind the Terminal dock. All of them end when the server closes. */
   terminals?: TerminalManager;
   /** The Spec section's ✦ Rewrite. */
@@ -108,6 +111,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const setup = deps.setup ?? new SetupService({ repo: deps.repo, bus: deps.bus, runner: deps.runner, stateDir: join(STATE_DIR, "setup"), skillsBusy: () => suggested.busy() });
   const scheduler = deps.scheduler ?? new Scheduler({ repo: deps.repo, bus: deps.bus, runner: deps.runner });
   const chat = deps.chat ?? new ChatService({ repo: deps.repo, bus: deps.bus, runner: deps.runner, scheduler });
+  deps.recovery ?? new RecoveryService({ repo: deps.repo, bus: deps.bus, runner: deps.runner });
   const specs = deps.specs ?? new SpecWriter({ repo: deps.repo, bus: deps.bus, runner: deps.runner });
   await app.register(async (api) => {
     await projectRoutes(api, deps);

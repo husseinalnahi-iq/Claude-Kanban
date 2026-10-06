@@ -175,6 +175,7 @@ const LATER_COLUMNS: { table: string; column: string; ddl: string; backfill?: st
   { table: "tasks", column: "in_folder", ddl: "in_folder INTEGER NOT NULL DEFAULT 0" },
   { table: "tasks", column: "footprint_json", ddl: "footprint_json TEXT" },
   { table: "tasks", column: "hold_json", ddl: "hold_json TEXT" },
+  { table: "tasks", column: "recovery_json", ddl: "recovery_json TEXT" },
 ];
 
 /**
@@ -258,6 +259,9 @@ export function openDb(file: string): DatabaseSync {
   seed.run("loadUserPlugins", "true");
   seed.run("claudeAutoMemory", "false");
   seed.run("autonomousLive", "true");
+  seed.run("autoRecover", "true");
+  seed.run("autoContinueWhileProgressing", "true");
+  seed.run("debriefOnFinish", "true");
   seed.run("autonomousWorktree", "true");
   seed.run("browserChecks", "true");
   seed.run("chromeInSupervised", "false");

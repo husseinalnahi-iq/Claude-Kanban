@@ -10,6 +10,7 @@ import { buildApp } from "./app.ts";
 import { openBrowser } from "./openBrowser.ts";
 import { Scheduler } from "./engine/scheduler.ts";
 import { ChatService } from "./engine/chat.ts";
+import { RecoveryService } from "./engine/recovery.ts";
 import { acquireInstanceLock } from "./instanceLock.ts";
 
 // Before the database is touched: starting up rewrites the state of everything that was running.
@@ -58,7 +59,9 @@ const webDist = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "web",
 const scheduler = new Scheduler({ repo, bus, runner });
 // The side chat, with its watch on each chat's cache window (D331).
 const chat = new ChatService({ repo, bus, runner, scheduler });
-const app = await buildApp({ repo, bus, runner, scheduler, chat, webDist, logger: process.env.KANBAN_LOG === "1" });
+// Failed tasks get a second look before they wait for you (D411).
+const recovery = new RecoveryService({ repo, bus, runner });
+const app = await buildApp({ repo, bus, runner, scheduler, chat, recovery, webDist, logger: process.env.KANBAN_LOG === "1" });
 await app.listen({ host: HOST, port: PORT });
 console.log(`Claude Kanban server on http://${HOST}:${PORT}  (db: ${DB_PATH})`);
 scheduler.start();

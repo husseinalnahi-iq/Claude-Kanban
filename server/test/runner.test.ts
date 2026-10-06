@@ -15,13 +15,15 @@ const ONE_STAGE: Stage[] = [{ stage: "code", model: "claude-haiku-4-5-20251001",
 type Call = { prompt: string; options: Record<string, any> };
 
 /** Fake SDK: records calls, optionally asks permission for a Write, then returns a result. */
-function fakeQuery(opts: { sessionId?: string; fail?: boolean; askWrite?: boolean; result?: string } = {}) {
+type FakeOpts = { sessionId?: string; fail?: boolean; askWrite?: boolean; result?: string };
+function fakeQuery(base: FakeOpts & { byCall?: (index: number) => FakeOpts | undefined } = {}) {
   const calls: Call[] = [];
   const decisions: any[] = [];
   const fn: QueryFn = (params) => {
     return (async function* () {
       let prompt = "";
       for await (const m of params.prompt) prompt += typeof m.message.content === "string" ? m.message.content : "";
+      const opts = { ...base, ...(base.byCall?.(calls.length) ?? {}) };
       calls.push({ prompt, options: params.options as Record<string, any> });
       const session_id = opts.sessionId ?? "s1";
       yield { type: "system", subtype: "init", session_id } as any;
@@ -150,20 +152,8 @@ test("failure marks task failed; retry resumes the failed stage's session", asyn
   }
 });
 
-test("recover() fails interrupted runs and their tasks", async () => {
-  const s = setup(fakeQuery().fn);
-  try {
-    const task = s.repo.createTask({ project_id: s.project.id, title: "x", mode: "supervised", pipeline: ONE_STAGE });
-    s.repo.updateTask(task.id, { status: "running" });
-    const run = s.repo.createRun({ task_id: task.id, stage: "code", stage_index: 0, model: "m", effort: "low" });
-    s.runner.recover();
-    assert.equal(s.repo.getRun(run.id)!.status, "failed");
-    assert.equal(s.repo.getRun(run.id)!.error, "interrupted");
-    assert.equal(s.repo.getTask(task.id)!.status, "failed");
-  } finally {
-    await s.cleanup();
-  }
-});
+// recover()'s carry-on after an ordinary restart (D411) is covered end-to-end in hardening.test.ts,
+// on a real git repo; it is not repeated here, where a non-git temp dir trips the Windows cleanup flake.
 
 test("a board restart closes every waiting card with a decided event, so no pop-up waits for ever", async () => {
   const s = setup(fakeQuery().fn);
@@ -183,7 +173,55 @@ test("a board restart closes every waiting card with a decided event, so no pop-
   }
 });
 
-test("a review that asks for changes fails the task instead of passing it to Approve", async () => {
+test("a review that asks for changes sends the work back to the code stage's own session with the findings, then reviews again (D410)", async () => {
+  const f = fakeQuery({
+    byCall: (i) => (i === 1 ? { result: "Found a bug in the retry path.\n\nVERDICT: CHANGES_NEEDED — the retry never backs off" } : i === 3 ? { result: "VERDICT: APPROVE" } : { result: "done" }),
+  });
+  const s = setup(f.fn);
+  try {
+    const task = s.repo.createTask({
+      project_id: s.project.id, title: "x", mode: "supervised",
+      pipeline: [{ stage: "code", model: "m", effort: "low" }, { stage: "review", model: "m", effort: "low" }],
+    });
+    s.runner.queueTask(task.id);
+    await until(() => s.repo.getTask(task.id)!.status === "review" && !s.runner.isBusy(task.id));
+    const t = s.repo.getTask(task.id)!;
+    assert.equal(f.calls.length, 4, "code, review, the fix, review again");
+    assert.equal(f.calls[2].options.resume, "s1", "the fix runs in the code stage's own session");
+    assert.match(f.calls[2].prompt, /## The review asked for changes \(fix 1\)/);
+    assert.match(f.calls[2].prompt, /the retry never backs off/);
+    assert.match(f.calls[3].prompt, /# Stage: review/);
+    assert.equal(t.note, null, "the review is satisfied: nothing left to warn about");
+    assert.equal(t.error, null);
+    assert.equal(s.repo.runsForTask(task.id).filter((r) => r.role === "stage").length, 4);
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test("a review still unhappy after two fixes reaches Review with its findings on the card, not failed", async () => {
+  const f = fakeQuery({
+    byCall: (i) => (i % 2 === 1 ? { result: "VERDICT: CHANGES_NEEDED — still missing the how-to" } : { result: "done" }),
+  });
+  const s = setup(f.fn);
+  try {
+    const task = s.repo.createTask({
+      project_id: s.project.id, title: "x", mode: "supervised",
+      pipeline: [{ stage: "code", model: "m", effort: "low" }, { stage: "review", model: "m", effort: "low" }],
+    });
+    s.runner.queueTask(task.id);
+    await until(() => s.repo.getTask(task.id)!.status === "review" && !s.runner.isBusy(task.id), 10_000);
+    const t = s.repo.getTask(task.id)!;
+    assert.equal(f.calls.length, 6, "code, review, fix, review, fix, review");
+    assert.match(t.note ?? "", /still asks for changes after 2 fixes/);
+    assert.match(t.note ?? "", /still missing the how-to/);
+    assert.equal(t.status, "review");
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test("a review alone, with no stage before it to fix things, reaches Review with the findings on the card", async () => {
   const f = fakeQuery({ result: "Found a bug in the retry path.\n\nVERDICT: CHANGES_NEEDED" });
   const s = setup(f.fn);
   try {
@@ -192,12 +230,11 @@ test("a review that asks for changes fails the task instead of passing it to App
       pipeline: [{ stage: "review", model: "m", effort: "low" }],
     });
     s.runner.queueTask(task.id);
-    // "review" is also the status while the review stage runs, so wait for the pipeline itself to end.
     await until(() => ["failed", "review"].includes(s.repo.getTask(task.id)!.status) && !s.runner.isBusy(task.id));
     const t = s.repo.getTask(task.id)!;
-    assert.equal(t.status, "failed");
-    assert.match(t.error ?? "", /Review asked for changes/);
-    assert.equal(s.repo.latestRun(task.id)!.status, "success", "the run itself succeeded");
+    assert.equal(t.status, "review");
+    assert.match(t.note ?? "", /still asks for changes/);
+    assert.equal(f.calls.length, 1);
   } finally {
     await s.cleanup();
   }

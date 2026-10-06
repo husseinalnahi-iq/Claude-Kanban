@@ -40,8 +40,10 @@ export function Button({
 }
 
 export function Chip({ children, className = "", title }: { children: ReactNode; className?: string; title?: string }) {
+  // Small and lower-case on purpose: a card used to carry five or six of these in SHOUTING CAPS before
+  // its title. They are labels, not headlines (D410).
   return (
-    <span title={title} className={`inline-flex items-center gap-1 rounded px-1.5 py-px font-mono text-[10.5px] uppercase tracking-wide border ${className}`}>
+    <span title={title} className={`inline-flex items-center gap-1 rounded border px-1 py-0 font-mono text-[9.5px] lowercase tracking-normal ${className}`}>
       {children}
     </span>
   );
@@ -586,15 +588,18 @@ const STAGE_DOT: Record<StageState, string> = {
 };
 const STAGE_LETTER = { plan: "P", code: "C", review: "R", custom: "·" } as const;
 
-/** A card's stages as dots: which ran, which runs, which failed; the letter says which stage, the word which model. */
-export function StageDots({ card }: { card: Pick<TaskCard, "pipeline" | "stage_states"> }) {
+/**
+ * A card's stages as dots: which ran, which runs, which failed; the letter says which stage, the word
+ * which model. `compact` drops the model name (it is on hover) so a board card is not a row of jargon (D410).
+ */
+export function StageDots({ card, compact }: { card: Pick<TaskCard, "pipeline" | "stage_states">; compact?: boolean }) {
   return (
     <>
       {card.pipeline.map((s, i) => (
         <span key={i} className={`flex items-center gap-1 font-mono text-[10px] ${s.provider ? "text-iris" : "text-ink-400"}`} title={`${stageLabel(s)} · ${s.model}${s.provider ? ` via ${s.provider}` : ""} · ${s.effort} · ${card.stage_states[i] ?? "idle"}`}>
           <span className={`inline-block h-2 w-2 rounded-full ${STAGE_DOT[card.stage_states[i] ?? "idle"]}`} />
           <span className="text-ink-500">{isAnswerStage(s) ? "A" : STAGE_LETTER[s.stage]}</span>
-          {shortModel(s.model).split("-")[0]}
+          {compact ? null : shortModel(s.model).split("-")[0]}
           {s.fast ? <span className="text-amber" title="Fast mode">↯</span> : null}
         </span>
       ))}

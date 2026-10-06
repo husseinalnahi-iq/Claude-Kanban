@@ -169,7 +169,7 @@ test("a project that keeps autonomous in its sandbox sends a chat's lookup to su
 
     // Full access is what a project has until someone says otherwise.
     s.repo.updateProject(s.project.id, { policy: { worktrees: "forbidden", autonomous: "allowed", maxConcurrent: 3 } });
-    const open = JSON.parse(h.createTask({ title: "Latest receipt", spec_md: "x", stages: [{ stage: "answer" }], mode: "autonomous" } as never).content[0].text);
+    const open = JSON.parse(h.createTask({ title: "Newest receipt", spec_md: "x", stages: [{ stage: "answer" }], mode: "autonomous" } as never).content[0].text);
     assert.equal(s.repo.getTask(open.created.id)!.mode, "autonomous", "a lookup needs no worktree, so forbidding them does not stop it");
     assert.match(open.note, /nothing is asked/);
     const change = JSON.parse(h.createTask({ title: "Dark mode", spec_md: "x", mode: "autonomous" } as never).content[0].text);

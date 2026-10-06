@@ -410,7 +410,7 @@ export async function removeWorktree(
     try {
       await git(projectPath, ["worktree", "remove", path]);
     } catch (err) {
-      // On Windows a program whose working folder is the worktree (a dev server, a terminal), or CloudSync
+      // On Windows a program whose working folder is the worktree (a dev server, a terminal), or OneDrive
       // syncing it, can stop git deleting the folder. Once git has let go of the worktree, the folder is
       // retried here for a while; Node's rmSync gives up on the first EPERM by itself.
       if ((await listWorktrees(projectPath)).some((p) => samePath(p, path))) throw err;

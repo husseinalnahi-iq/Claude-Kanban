@@ -99,7 +99,11 @@ const EventView = memo(function EventView({ ev }: { ev: EventRow }) {
   }
   if (ev.type === "debate:decision") return <div className="font-mono text-[11px] text-iris">plan chosen: {p.choice}</div>;
   if (ev.type === "plan:approved") return <div className="font-mono text-[11px] text-iris">plan approved{p.edited ? " (edited by you)" : ""}</div>;
-  if (ev.type === "turns:continued") return <div className="font-mono text-[11px] text-amber">turn limit reached — continued in the same session ({p.n})</div>;
+  if (ev.type === "turns:continued") return <div className="text-[11px] text-ink-400">{p.working ? "Still making changes — carried on in the same session." : `Used its turns for this step — carried on in the same session (${p.n}).`}</div>;
+  if (ev.type === "recovery:retry_scheduled") return <div className="text-[11px] text-slate">{p.reason} — trying again shortly ({p.n} of {p.of}).</div>;
+  if (ev.type === "recovery:decided") return <div className="text-[11px] text-slate">{p.action === "needs_user" ? "Could not recover by itself: " : "Recovering: "}{p.reason}</div>;
+  if (ev.type === "review:changes_requested") return <div className="text-[11px] text-amber">The review asked for changes — fixing them ({p.n}), then reviewing again.</div>;
+  if (ev.type === "cost:auto_granted") return <div className="text-[11px] text-slate">Spent ${Number(p.spent).toFixed(2)} and still progressing — carrying on (the board asks at ${Number(p.hard).toFixed(2)}).</div>;
   if (ev.type === "system:init") {
     return (
       <div className="font-mono text-[11px] text-ink-500">

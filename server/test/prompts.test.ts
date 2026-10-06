@@ -151,7 +151,7 @@ test("the scratchpad Claude Code gives a session can be written, named in full; 
 });
 
 test("autonomous reads: the main checkout's secrets are out of reach, attachments and skills are not (D187)", () => {
-  const repo = "C:\\Users\\me\\CloudSync\\Client Work Folder\\Acme-Ledger";
+  const repo = "C:\\Users\\me\\OneDrive\\Client Work Folder\\Acme-Ledger";
   const cwd = `${repo}\\.kanban\\wt\\t_1`;
   const roots = ["C:\\Users\\me\\.claude-kanban\\attachments\\t_1", "C:\\Users\\me\\.claude\\skills"];
   const read = (tool: string, input: Record<string, unknown>) => readViolation(tool, input, cwd, roots);
@@ -159,7 +159,7 @@ test("autonomous reads: the main checkout's secrets are out of reach, attachment
   assert.match(read("Read", { file_path: `${repo}\\.codex-secrets\\bizapp-api.json` }) ?? "", /refused/);
   assert.match(read("Read", { file_path: "C:\\Users\\me\\.claude-kanban\\secrets.json" }) ?? "", /refused/, "the board's own provider keys");
   assert.match(read("Grep", { pattern: "api_key", path: repo }) ?? "", /refused/);
-  assert.match(read("Glob", { pattern: "/c/Users/me/CloudSync/**/*.json" }) ?? "", /refused/, "an absolute glob is a path");
+  assert.match(read("Glob", { pattern: "/c/Users/me/OneDrive/**/*.json" }) ?? "", /refused/, "an absolute glob is a path");
   assert.equal(read("Glob", { pattern: "**/*.ts" }), null, "a relative glob searches the worktree");
   assert.equal(read("Read", { file_path: "C:\\Users\\me\\.claude-kanban\\attachments\\t_1\\shot.png" }), null, "this task's attachments");
   assert.equal(read("Read", { file_path: "C:\\Users\\me\\.claude\\skills\\bizapp\\SKILL.md" }), null, "skills");
@@ -168,7 +168,7 @@ test("autonomous reads: the main checkout's secrets are out of reach, attachment
 });
 
 test("absolute paths are read the way a shell would, whatever quotes sit elsewhere in the command (D188)", () => {
-  // The command that exposed it: a heredoc whose body the old tokenizer mis-paired, cutting the path at "Client".
+  // The command that exposed it: a heredoc whose body the old tokenizer mis-paired, cutting the path at "Codes".
   const cmd = `cd "/c/Users/me/Client Work Folder/proj/.kanban/wt/t_1" && python - <<'EOF'\nimport json\nc=json.load(open(r"C:\\Users\\me\\Client Work Folder\\proj\\.codex-secrets\\bizapp-api.json"))\nprint("it's here")\nEOF`;
   assert.deepEqual(absolutePaths(cmd), ["/c/Users/me/Client Work Folder/proj/.kanban/wt/t_1", "C:\\Users\\me\\Client Work Folder\\proj\\.codex-secrets\\bizapp-api.json"]);
   assert.deepEqual(absolutePaths("ls /c/tmp/x && type C:\\a\\b.txt"), ["/c/tmp/x", "C:\\a\\b.txt"]);
@@ -225,7 +225,9 @@ test("a rerun after a block is told what stopped it, and a supervised rerun know
   const again = buildStagePrompt({ ...base, priorBlock: { ...priorBlock, mode: "supervised" }, mode: "supervised", branch: null });
   assert.match(again, /Check whether what stopped it has changed/, "no claim of new access when the mode did not change");
   const left = buildStagePrompt({ ...base, mode: "supervised", branch: null, priorBlock: { ...priorBlock, advisory: true } });
-  assert.match(left, /## What the last attempt left for a supervised run\nThe script lives only in live BizApp/, "a suggestion did not stop it");
+  assert.match(left, /## What the last attempt waited for\nThe script lives only in live BizApp/, "a suggestion did not stop it");
+  const unlocked = buildStagePrompt({ ...base, priorBlock: { ...priorBlock, advisory: true, needs_access: { kind: "sign_in", target: "erp.example.com" } } });
+  assert.match(unlocked, /The person has since done this: sign in to erp\.example\.com\. Do that step now/, "an autonomous rerun after the sign-in is told it has it (D410)");
 });
 
 test("a long plan reaches the code stage whole: the steps in its middle are not trimmed", () => {

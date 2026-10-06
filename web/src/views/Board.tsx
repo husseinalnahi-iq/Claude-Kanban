@@ -88,6 +88,7 @@ const Card = memo(function Card({
   watching,
   memory,
   conflictsWith,
+  detail,
 }: {
   card: TaskCard;
   /** Another working card in its own worktree that changes the same files: both can run, landing the second may conflict (D400). */
@@ -104,7 +105,10 @@ const Card = memo(function Card({
   watching?: boolean;
   /** What its coder still remembers, for a card in review or done (D374). */
   memory?: MemoryFacts;
+  /** "compact" (default) shows only what you act on; "full" brings back every tag (D410). */
+  detail?: "compact" | "full";
 }) {
+  const full = detail === "full";
   const draggable = card.status === "backlog" || card.status === "queued";
   const live = ["planning", "running", "approval"].includes(card.status);
   // Shown on the card: alert() is dismissed unseen in embedded browsers (D193).
@@ -150,9 +154,9 @@ const Card = memo(function Card({
         {yours?.chip ? (
           <Chip className="border-rose/60 font-semibold text-rose" title={yours.title}>{yours.chip}</Chip>
         ) : null}
-        <Chip className={PRIORITY_META[card.priority].tone} title={PRIORITY_META[card.priority].title}>{card.priority}</Chip>
-        <Chip className={TYPE_META[card.type].tone}>{TYPE_META[card.type].short}</Chip>
-        {card.labels.slice(0, 2).map((l) => (
+        {full ? <Chip className={PRIORITY_META[card.priority].tone} title={PRIORITY_META[card.priority].title}>{card.priority}</Chip> : null}
+        {full ? <Chip className={TYPE_META[card.type].tone}>{TYPE_META[card.type].short}</Chip> : null}
+        {card.labels.slice(0, full ? 2 : 1).map((l) => (
           <Chip key={l} className="border-ink-700 text-ink-400 normal-case">{l}</Chip>
         ))}
         {waiting?.length ? (
@@ -179,7 +183,7 @@ const Card = memo(function Card({
           <Chip className="border-rose/60 font-semibold text-rose" title={`${card.resolution.error ?? "The conflict could not be resolved safely"} — open the task`}>conflict · needs you</Chip>
         ) : card.conflict_risk && card.status !== "done" ? (
           <Chip className="border-amber/60 text-amber" title={`Would conflict with ${card.conflict_risk.base} in ${card.conflict_risk.files.join(", ")} — open the task to have Claude fix it now`}>will conflict</Chip>
-        ) : conflictsWith ? (
+        ) : conflictsWith && full ? (
           <Chip className="border-slate/50 text-slate" title={`“${conflictsWith.title}” changes the same files (${conflictsWith.files.slice(0, 3).join(", ")}). Both can run in their own copies; the second one approved may need its conflicts resolved.`}>may conflict</Chip>
         ) : null}
         {watching ? (
@@ -202,7 +206,7 @@ const Card = memo(function Card({
             {progress.done}/{progress.total}
           </Chip>
         ) : null}
-        {card.suggestion && (card.suggestion.priority !== card.priority || card.suggestion.type !== card.type) ? (
+        {full && card.suggestion && (card.suggestion.priority !== card.priority || card.suggestion.type !== card.type) ? (
           <Chip
             className="border-cyan/40 text-cyan"
             title={`Claude suggests ${card.suggestion.type} · ${card.suggestion.priority} (${Math.round((card.suggestion.confidence ?? 0) * 100)}% sure) — open the task to accept`}
@@ -211,10 +215,10 @@ const Card = memo(function Card({
           </Chip>
         ) : null}
         <span className="ml-auto flex items-center gap-1">
-          {card.round > 1 ? <Chip className="border-iris/40 text-iris" title={`Round ${card.round}: its coder continued this card ${card.round - 1} time${card.round > 2 ? "s" : ""} with what it remembered`}>R{card.round}</Chip> : null}
-          {memory && memory.memory !== "gone" ? <MemoryDot facts={memory} /> : null}
+          {full && card.round > 1 ? <Chip className="border-iris/40 text-iris" title={`Round ${card.round}: its coder continued this card ${card.round - 1} time${card.round > 2 ? "s" : ""} with what it remembered`}>R{card.round}</Chip> : null}
+          {full && memory && memory.memory !== "gone" ? <MemoryDot facts={memory} /> : null}
           {card.live ? <Chip className="border-rose/50 text-rose" title="Touches a live system: plan approval is on and review runs on the live review model">prod</Chip> : null}
-          <ModeChip mode={card.mode} ownBranch={card.own_branch} lookup={isAnswerPipeline(card.pipeline)} mayAsk={card.may_ask} />
+          {full ? <ModeChip mode={card.mode} ownBranch={card.own_branch} lookup={isAnswerPipeline(card.pipeline)} mayAsk={card.may_ask} /> : null}
         </span>
       </div>
       <div className="text-[12px] font-medium leading-snug text-ink-100">{card.title}</div>
@@ -238,8 +242,15 @@ const Card = memo(function Card({
       {IN_PROGRESS.includes(card.status) || card.status === "failed" ? <ChecklistLine list={card.checklist.slice(card.checklist_from)} live={live} /> : null}
       {stopped && card.status === "failed" ? (
         <div className="mt-1.5 line-clamp-2 text-[11.5px] text-rose">{stopped.reason}</div>
+      ) : card.status === "failed" && card.start_at && card.note ? (
+        // The board is trying again on its own (a connection problem): a calm line, not a red error (D410).
+        <div className="mt-1.5 line-clamp-2 text-[11.5px] text-slate">{card.note}</div>
       ) : card.error && card.status === "failed" ? (
         <div className="mt-1.5 line-clamp-2 font-mono text-[11px] text-rust">{card.error}</div>
+      ) : null}
+      {/* Recovery triage, or a review loop, left a plain note on a card that is not scheduled: show it. */}
+      {card.status === "failed" && !card.start_at && !stopped && card.note && card.note !== "work discarded" ? (
+        <div className="mt-1.5 line-clamp-2 text-[11.5px] text-slate">{card.note}</div>
       ) : null}
       {actionError ? <div className="mt-1.5 line-clamp-3 text-[11.5px] text-rust">{actionError}</div> : null}
       {card.note && card.status === "backlog" ? <div className="mt-1.5 line-clamp-2 text-[11.5px] italic text-ink-400">“{card.note}”</div> : null}
@@ -309,7 +320,7 @@ const Card = memo(function Card({
         {/* The stage chips get the row. The hover actions sit over its right end and do not take space
             while hidden: laid out beside the chips, the invisible buttons squeezed them to one letter. */}
         <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
-          <StageDots card={card} />
+          <StageDots card={card} compact={!full} />
         </div>
         {card.cost_usd > 0 ? <span className="shrink-0 font-mono text-[10.5px] text-ink-400">{cost(card.cost_usd)}</span> : null}
         <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center gap-1.5 pl-3 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 bg-ink-850 group-hover:bg-ink-800">
@@ -362,6 +373,10 @@ export function Board({ project }: { project: ProjectWithGit }) {
   const { columns } = useViewPrefs();
   const [creating, setCreating] = useState<false | "now" | "repeat">(false);
   const [schedulesOpen, setSchedulesOpen] = useState(false);
+  // Compact by default: a card shows only what you act on. "Full" brings back priority, type, mode,
+  // model names and the rest, for when you want them. Remembered on this computer (D410).
+  const [detail, setDetail] = useState<"compact" | "full">(() => (localStorage.getItem("kanban.cardDetail") === "full" ? "full" : "compact"));
+  const setDetailPref = (d: "compact" | "full") => { setDetail(d); try { localStorage.setItem("kanban.cardDetail", d); } catch { /* private window */ } };
   // Tasks whose browser is open now, for the "live" chip.
   const [live, setLive] = useState<Set<string>>(new Set());
   const loadLive = () => void liveTasks().then((ids) => setLive(new Set(ids)), () => {});
@@ -443,6 +458,12 @@ export function Board({ project }: { project: ProjectWithGit }) {
     return m;
   }, [visible]);
   const projectPending = pending.filter((a) => cards.some((c) => c.id === a.task_id));
+  // Everything that waits on you, not only approval pop-ups: a card in review, a question, a cost pause,
+  // a failure all count — the one signal the card itself uses (D410). Approvals break the memo tie.
+  const needsYou = useMemo(
+    () => cards.filter((c) => !c.archived_at && waitsOnYou(c, projectPending.some((a) => a.task_id === c.id && isQuestion(a)))),
+    [cards, projectPending],
+  );
   /** The graph is about relationships, so by default it leaves out tasks that have none. */
   const linked = useMemo(() => {
     const isDep = new Set(cards.flatMap((c) => c.depends_on));
@@ -485,10 +506,17 @@ export function Board({ project }: { project: ProjectWithGit }) {
         </div>
         <div className="ml-auto flex items-center gap-3">
           <SerialSwitch />
-          {projectPending.length ? (
-            <Button variant="outline" className="border-rose/60 text-rose" onClick={() => navigate({ taskId: projectPending[0].task_id })}>
+          <button
+            className="font-mono text-[11px] text-ink-500 hover:text-amber cursor-pointer"
+            title={detail === "compact" ? "Show every tag on a card: priority, type, mode, models…" : "Show only what you act on"}
+            onClick={() => setDetailPref(detail === "compact" ? "full" : "compact")}
+          >
+            cards: {detail}
+          </button>
+          {needsYou.length ? (
+            <Button variant="outline" className="border-rose/60 text-rose" onClick={() => navigate({ taskId: needsYou[0].id })}>
               <span className="pulse-rose inline-block h-2 w-2 rounded-full bg-rose" />
-              {projectPending.length} waiting for you
+              {needsYou.length} need{needsYou.length === 1 ? "s" : ""} you
             </Button>
           ) : null}
           <Button onClick={() => setSchedulesOpen(true)} title="Work set to start later, or on repeat, so it runs while you are away">
@@ -593,6 +621,10 @@ export function Board({ project }: { project: ProjectWithGit }) {
                 <span className={`h-1.5 w-1.5 rounded-full ${meta.dot}`} />
                 <span className={`text-[11.5px] font-semibold uppercase tracking-[0.08em] ${meta.text}`}>{meta.label}</span>
                 <span className="font-mono text-[11px] text-ink-500">{list.length}</span>
+                {(() => {
+                  const n = list.filter((c) => needsYou.some((y) => y.id === c.id)).length;
+                  return n ? <span className="font-mono text-[10.5px] text-rose" title={`${n} here ${n === 1 ? "needs" : "need"} you`}>· {n} need{n === 1 ? "s" : ""} you</span> : null;
+                })()}
                 {status === "backlog" ? (
                   <button className="ml-auto text-ink-400 hover:text-amber cursor-pointer" onClick={() => setCreating("now")} title="New task">+</button>
                 ) : null}
@@ -619,6 +651,7 @@ export function Board({ project }: { project: ProjectWithGit }) {
                     watching={live.has(c.id)}
                     memory={MEMORY_STATUSES.has(c.status) ? memory[c.id] : undefined}
                     conflictsWith={conflicts.get(c.id)}
+                    detail={detail}
                   />
                 ))}
                 {status === "done" && archivedCount ? (

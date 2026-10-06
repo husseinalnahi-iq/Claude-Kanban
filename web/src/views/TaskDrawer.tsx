@@ -784,6 +784,19 @@ function Actions({ d }: { d: TaskDetail }) {
   return (
     <div className="border-b border-ink-800 px-5 py-2.5">
       {dialog.element}
+      {/* Right above Approve, so you see whether it is up to date and resolve a conflict here, not on
+          another tab (D410). The board keeps Review cards current on its own; this is what is left to do. */}
+      {t.status === "review" && !live ? (
+        <div className="mb-2 space-y-2">
+          <ConflictPanel t={t} busy={d.busy} />
+          {d.staleness && d.staleness.behind > 0 && !t.conflict_risk && !t.resolution ? (
+            <div className="flex flex-wrap items-center gap-2 rounded-md border border-slate/40 bg-slate/5 px-3 py-2 text-[11.5px] text-slate">
+              <span className="flex-1">{d.staleness.behind} commit{d.staleness.behind === 1 ? "" : "s"} landed on <span className="font-mono">{d.staleness.base}</span> since this started. Approve brings them in; or update now.</span>
+              <Button size="sm" busy={busy} disabled={d.busy} onClick={() => run(() => api.updateFromBase(t.id))}>Update it</Button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       <div className="flex flex-wrap items-center gap-2">
         {t.status === "backlog" && !live ? (
           <>

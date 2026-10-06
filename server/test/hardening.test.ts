@@ -456,7 +456,7 @@ test("after the board crashes, a stage it cut off carries on in its own session 
   }
 });
 
-test("after an ordinary restart, a cut-off stage still waits for Retry", async () => {
+test("after an ordinary restart too, a cut-off stage carries on in its own session (D411)", async () => {
   const f = fakeQuery({ sessionId: "sess" });
   const s = setup(f.fn);
   try {
@@ -466,9 +466,10 @@ test("after an ordinary restart, a cut-off stage still waits for Retry", async (
     cutOffMidCode(s, task.id);
 
     new TaskRunner({ repo: s.repo, bus: s.bus, queryFn: f.fn }).recover();
-    await new Promise((r) => setTimeout(r, 100));
-    assert.equal(s.repo.getTask(task.id)!.status, "failed");
-    assert.equal(f.calls.length, 2, "nothing started");
+    await until(() => s.repo.getTask(task.id)!.status === "review" && f.calls.length === 3);
+    assert.equal(f.calls[2].options.resume, "sess", "the code stage continued its session");
+    const again = s.repo.stageRuns(task.id).at(-1)!;
+    assert.ok(s.repo.eventsAfter(again.id).some((e) => JSON.stringify(e.payload).includes("The board restarted while this stage ran")), "the card says why, without calling it a crash");
   } finally {
     await s.cleanup();
   }

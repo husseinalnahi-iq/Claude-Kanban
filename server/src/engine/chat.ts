@@ -1,6 +1,6 @@
 import { basename, relative, isAbsolute } from "node:path";
 import { homedir } from "node:os";
-import type { CanUseTool, Options, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { CanUseTool, Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { Repo } from "../repo.ts";
 import type { Bus } from "../bus.ts";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -21,6 +21,7 @@ import { commandOf, explainCommand } from "./explain.ts";
 import { credentialRisk } from "./credentials.ts";
 import { imageMakerLine } from "./images.ts";
 import { CACHE_WARN_MIN, CACHE_WINDOW_MIN, KEEP_ALIVE_LEAD_MIN } from "./cacheWindow.ts";
+import { LEAN } from "./lean.ts";
 
 /** Looking only. Anything else is refused: changing code is what a card is for. */
 export const CHAT_READ_TOOLS = ["Read", "Glob", "Grep", "WebSearch", "WebFetch", "TodoWrite"];
@@ -191,7 +192,7 @@ export function chatPrompt(project: Project, board?: { models: ModelEntry[]; def
     // Only when a picture maker is ready: otherwise the chat would promise pictures no card can make (D303).
     ...(board?.pictures ? [`Task cards can make pictures with the board's picture tool (${board.pictures}): when the user wants an image in their project, a card does it.`] : []),
     "When a card from this chat finishes, fails, has a plan ready or asks something, the board posts it here, and the user's next message starts with a [Board news] note about it: use that rather than looking again.",
-    "Approving, landing or discarding a card's work is the user's own decision, on the board or on the card shown here: say where the button is, never promise to do it.",
+    "Approving or landing a card's work is the user's own decision — but when their message tells you to (\"approve it\", \"merge all three\", \"approve the plan\"), do it with board_approve_task or board_approve_plan and say what landed. Never approve on your own, and discarding is always theirs: point to the button for that.",
     'Each message starts with the user\'s local time in brackets. Scheduled times are ISO 8601 with that offset, or "reset" for when the user\'s Claude usage window resets.',
   ].join("\n");
 }
@@ -205,9 +206,12 @@ function userMessage(text: string): AsyncIterable<SDKUserMessage> {
 /** One update in front of the next message, clipped: the model needs the gist, the chat shows it whole. */
 function newsLine(u: ChatUpdate): string {
   const body = u.text.length > 1500 ? `${u.text.slice(0, 1500)} …` : u.text;
+  // One thing per item, so the chat never asks the user something the card already asks (D410): a
+  // card in review is told how to approve, not asked whether to; a plan likewise.
   const what = {
-    finished: u.status === "done" ? "finished" : "finished and waits for review", failed: "failed", plan: "has a plan waiting for the user's OK", question: "asks",
-    asks: "stopped and waits for the user's answer to",
+    finished: u.status === "done" ? "finished" : "finished and waits for your review — say \"approve it\" here and I will merge it, or press ✓ on the card",
+    failed: "failed", plan: "has a plan ready — say \"approve the plan\" here, or approve it on the card",
+    question: "asks", asks: "stopped and waits for the user's answer to",
   }[u.kind];
   const extra =
     u.kind === "question" ? ` (question_id ${u.question_id}${u.options?.length ? `; options: ${u.options.join(" / ")}` : ""})`
@@ -284,12 +288,63 @@ export class ChatService {
       seen.key = key;
       const kind = this.kindOf(task);
       if (kind) this.postUpdate(chatId, task, kind);
+      // The manager reads the result and says what it means, without being asked (D410).
+      if ((kind === "finished" || kind === "failed") && this.deps.repo.getSettings().debriefOnFinish) {
+        void this.debrief(chatId, task, kind).catch((err) => console.error("Side chat could not debrief a card:", err));
+      }
     }
     for (const q of task.questions) {
       if (q.answer || seen.questions.has(q.id)) continue;
       seen.questions.add(q.id);
       this.postUpdate(chatId, task, "question", q);
     }
+  }
+
+  /**
+   * One short turn from the manager when a card it made finishes or fails: what was done, what is left,
+   * and whether a follow-up is worth making — so the person is told, not left to ask (D410). One cheap
+   * read-only call, once per card (the "debrief" meta marks it done, surviving a restart). The chat is
+   * not resumed and no tools run: it is a plain summary of the card's own result.
+   */
+  private async debrief(chatId: string, task: Task, kind: "finished" | "failed"): Promise<void> {
+    const { repo } = this.deps;
+    if (this.live.has(chatId)) return; // a reply is streaming; its own [Board news] will carry this card
+    if (repo.chatUpdatesFor(chatId, task.id).some((m) => m.meta.debrief)) return;
+    const runs = repo.runsForTask(task.id);
+    const result = kind === "failed" ? task.error ?? "It stopped." : resultText(runs, task.summary) ?? "It finished.";
+    const files = task.files.length ? task.files.slice(0, 20).join(", ") : "(none recorded)";
+    const prompt = [
+      "A card you are managing just " + (kind === "failed" ? "failed" : "finished") + ". In three short lines for the person, plainly:",
+      "1. what it did (or why it failed), 2. what is left or unverified, if anything, 3. whether a follow-up card is worth making and what it would do — or \"nothing more needed\".",
+      "Do not make any card now; just advise. If a follow-up is worth it, end by offering to make it.",
+      `\n## Card\n${task.title}`,
+      `\n## Its spec\n${task.spec_md.slice(0, 2000)}`,
+      `\n## Files it changed\n${files}`,
+      `\n## Its result\n${result.slice(0, 4000)}`,
+    ].join("\n");
+    const options: Options = {
+      model: repo.getChat(chatId)?.model || repo.getSettings().chatModel,
+      cwd: this.deps.repo.getProject(task.project_id)?.path ?? process.cwd(),
+      ...LEAN,
+      permissionMode: "dontAsk",
+      systemPrompt: "",
+      tools: [],
+      maxTurns: 1,
+      maxBudgetUsd: 0.25,
+    };
+    let out = "";
+    let cost = 0;
+    for await (const msg of this.queryFn({ prompt: userMessage(prompt), options })) {
+      if (msg.type === "result") {
+        const r = msg as Extract<SDKMessage, { type: "result" }>;
+        if (r.subtype === "success") out = r.result ?? "";
+        cost = r.total_cost_usd ?? 0;
+      }
+    }
+    const text = out.trim();
+    if (!text || !repo.getChat(chatId)) return;
+    if (cost > 0) repo.updateChat(chatId, { cost_usd: (repo.getChat(chatId)?.cost_usd ?? 0) + cost });
+    this.message({ chat_id: chatId, role: "assistant", text, meta: { debrief: true } });
   }
 
   /**
@@ -589,7 +644,7 @@ export class ChatService {
     const project = this.deps.repo.getProject(chat.project_id);
     if (!project) throw new NotFoundError("This chat's project is gone.");
     // What the chat's cards did since your last message rides in front of this one (D285).
-    const news = this.deps.repo.chatUpdatesSince(id, this.deps.repo.lastChatMessage(id, "user")?.id ?? 0).map((m) => m.meta.update!).filter(Boolean);
+    const news = this.deps.repo.chatUpdatesSince(id, this.deps.repo.lastOwnUserMessage(id)?.id ?? 0).map((m) => m.meta.update!).filter(Boolean);
     // Files attached since your last message go with this one; the board's own messages carry none.
     const files = opts.keepalive || opts.suggest ? [] : this.deps.repo.pendingChatFiles(id);
     const meta: ChatMessage["meta"] = {
@@ -783,10 +838,13 @@ export class ChatService {
           const window = used[chat.model]?.contextWindow || Math.max(0, ...Object.values(used).map((m) => m.contextWindow ?? 0));
           chat = repo.updateChat(chat.id, { cost_usd: (repo.getChat(chat.id)?.cost_usd ?? 0) + cost, ...(window ? { context_window: window } : {}) });
           if (msg.is_error && !ctl.signal.aborted) {
-            // A result can fail with subtype "success": then the error is in `result`, and `errors` is empty.
-            const why = msg.subtype === "success" ? msg.result || "the reply failed" : (msg.errors ?? []).join("; ") || msg.subtype || "the reply failed";
+            // A result can fail with subtype "success": the error is in `result`, and `errors` is empty.
+            // After a connection problem the SDK leaves `result` empty or the literal "success" — don't
+            // print "Something went wrong: success"; say plainly that the reply dropped (D410).
+            const raw = msg.subtype === "success" ? (msg.result ?? "") : (msg.errors ?? []).join("; ") || msg.subtype || "";
+            const why = !raw.trim() || raw.trim().toLowerCase() === "success" ? "" : raw;
             if (lostSession(why)) startFresh();
-            else this.message({ chat_id: chat.id, role: "error", text: `Something went wrong: ${why}` });
+            else this.message({ chat_id: chat.id, role: "error", text: why ? `Something went wrong: ${why}` : "The reply ended early — a connection problem, most likely. Send your message again." });
           }
           // The cards it touched ride on a final line, so they show as chips under the reply.
           if (cards.length) this.message({ chat_id: chat.id, role: "tool", text: cardsLine(cards), meta: { cards, cost_usd: cost } });

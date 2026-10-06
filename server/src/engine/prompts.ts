@@ -1,4 +1,4 @@
-import type { Mode, StageName } from "../types.ts";
+import { accessAsk, type Mode, type NeedsAccess, type StageName } from "../types.ts";
 
 /** Context is a finite budget: keep the head and tail of long text and say what was dropped. */
 export function clamp(text: string, max: number, tailShare = 0.3): string {
@@ -73,7 +73,7 @@ export interface PromptCtx {
   /** Supervised: files already uncommitted in the checkout before this run, not this task's (D204). */
   foreignChanges?: string[];
   /** What stopped the previous attempt, when a stage reported it could not do the work from where it ran. */
-  priorBlock?: { reason: string; needs: "supervised" | "input" | "other"; ask: string | null; mode: Mode; advisory?: boolean } | null;
+  priorBlock?: { reason: string; needs: "supervised" | "input" | "other"; ask: string | null; mode: Mode; advisory?: boolean; needs_access?: NeedsAccess } | null;
   /** Output of the project's verify command when it failed on the previous attempt. */
   verificationFailure?: string | null;
   /** This stage was started on another model, which ran out partway: what the new one needs to know. */
@@ -188,7 +188,8 @@ function sandboxNote(ctx: PromptCtx): string | null {
         : "Do the live steps yourself, following the live-system rules below; do not leave them for a supervised run.") +
       " Let scripts load the key files; never print them." +
       skillsLine(ctx) +
-      " Use `board_report_blocked` with needs \"supervised\" only for access that is still missing."
+      " " +
+      NEEDS_ACCESS
     );
   }
   return (
@@ -203,6 +204,16 @@ function sandboxNote(ctx: PromptCtx): string | null {
       : "Then do everything that can be done inside your folder — the code, the tests, the scripts and the exact commands — and end your summary with a `## Left for a supervised run` list: each step that needs the access, in order, with what it does and how to check it.")
   );
 }
+
+/**
+ * The task is yours to finish (D410). The one thing a run may hand back is access it truly lacks, named
+ * so the card can ask for exactly that and run the stage again once it is there.
+ */
+const NEEDS_ACCESS =
+  "Finish the task end to end; do not leave steps for a later run or for the person. " +
+  "The one exception is access you truly do not have — a site that needs a sign-in you have no cookies for, a key file the project has no copy of, a host you cannot reach: " +
+  "then call `board_report_blocked` with needs \"supervised\" and `needs_access` naming it (the site, the file, the host), carry on with everything else, and say in your summary which step waits for it. " +
+  "The card asks the person for that access and runs this stage again when it arrives.";
 
 /**
  * Anything Claude Code can do, a run here can do (owner, D406): that includes keeping the skills up to
@@ -375,7 +386,8 @@ export function buildStagePrompt(ctx: PromptCtx): string {
     );
   }
   if (ctx.rejectNote?.trim()) {
-    out.push(`\n## Why this was sent back\nA human rejected the previous attempt: ${ctx.rejectNote.trim()}\nAddress this before anything else.`);
+    // A person's note, or the review stage's findings (D410): both come as a whole sentence already.
+    out.push(`\n## Why this was sent back\n${ctx.rejectNote.trim()}\nAddress this before anything else.`);
   }
   if (ctx.priorBlock?.reason.trim()) {
     const b = ctx.priorBlock;
@@ -383,9 +395,12 @@ export function buildStagePrompt(ctx: PromptCtx): string {
       b.mode === "autonomous" && ctx.mode === "supervised"
         ? "It now runs supervised, in the main checkout: you can reach what the sandbox refused, and every write waits for the person's approval — so say what each one is for."
         : "Check whether what stopped it has changed before you start.";
-    // The sandboxed attempt ran to the end; only the part that needed access was left (D382).
-    const head = b.advisory ? "What the last attempt left for a supervised run" : "What stopped the last attempt";
-    out.push(`\n## ${head}\n${b.reason.trim()}${b.ask ? `\nIt asked: ${b.ask}` : ""}\n${now}`);
+    // The earlier attempt ran to the end; only the step that needed access waited (D382, D410).
+    const head = b.advisory ? "What the last attempt waited for" : "What stopped the last attempt";
+    const access = b.advisory && b.needs_access && ctx.mode === "autonomous"
+      ? `The person has since done this: ${accessAsk(b)!.toLowerCase()}. Do that step now, and check the rest still holds.`
+      : now;
+    out.push(`\n## ${head}\n${b.reason.trim()}${b.ask ? `\nIt asked: ${b.ask}` : ""}\n${access}`);
   }
   if (ctx.verificationFailure?.trim()) {
     out.push(
@@ -571,6 +586,23 @@ export function buildRoundPrompt(o: { round: number; request: string; changedByO
       ? `Since your last round, other work changed these files of yours: ${o.changedByOthers.slice(0, 25).map((f) => `\`${f}\``).join(", ")}. Read each again before you change it.`
       : "None of the files you changed were changed by anyone else since, but read a file again before you edit it all the same.",
     "Keep your to-do list for this round only, and end with a short report of what you changed.",
+  ].join("\n");
+}
+
+/**
+ * The review asked for changes: the code stage's own session gets the findings and fixes them (D410).
+ * Short, like a round: the session still knows the files and the spec.
+ */
+export function buildFixPrompt(o: { attempt: number; reason: string; report: string | null }): string {
+  return [
+    `## The review asked for changes (fix ${o.attempt})`,
+    "",
+    "The review stage read your work and did not approve it. Fix what it found, in the same files you worked in; do not start over and do not widen the task.",
+    "",
+    `**Its verdict:** ${o.reason.trim()}`,
+    ...(o.report?.trim() ? ["", "**Its report:**", "", o.report.trim()] : []),
+    "",
+    "Run the checks again, then end with a short report of what you changed in answer to each finding. Review runs again after you.",
   ].join("\n");
 }
 

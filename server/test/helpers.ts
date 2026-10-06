@@ -12,7 +12,8 @@ export type Call = { prompt: string; options: Record<string, any> };
 
 export interface FakeOpts {
   sessionId?: string;
-  fail?: boolean;
+  /** End with a failed result: `true` for "boom", or the error's own words. */
+  fail?: boolean | string;
   /** End with the SDK's turn-cap result (error_max_turns): the session is intact. */
   maxTurns?: boolean;
   askWrite?: boolean;

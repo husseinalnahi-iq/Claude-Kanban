@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { recommendedOption, supervisedFrom, type Run } from "../../../server/src/types.ts";
+import { accessAsk, recommendedOption, supervisedFrom, type Run } from "../../../server/src/types.ts";
 import { api, type TaskDetail } from "../lib/api.ts";
 import { Markdown } from "../lib/markdown.tsx";
 import { Button, ErrorLine, inputCls, useAction } from "./ui.tsx";
@@ -28,6 +28,7 @@ export function BlockedPanel({ d }: { d: TaskDetail }) {
   const { busy, error, run } = useAction();
   const dialog = useAsk();
   const advisory = !!b.advisory;
+  const access = advisory ? accessAsk(b) : null;
   const stage = t.pipeline[b.stage_index]?.stage ?? "stage";
   const report = lastOf(stageRuns(d), (r) => r.stage_index === b.stage_index)?.result_md;
   const hasWork = !!(t.branch || t.worktree_path);
@@ -62,16 +63,21 @@ export function BlockedPanel({ d }: { d: TaskDetail }) {
       <div className="mb-1 flex items-center gap-2">
         <span className={`inline-block h-2 w-2 rounded-full ${advisory ? "bg-amber" : "pulse-rose bg-rose"}`} />
         {advisory ? (
-          <span className="text-[12.5px] font-semibold text-amber">Suggested at stage #{n} · {stage}: part of this needs a supervised run</span>
+          <span className="text-[12.5px] font-semibold text-amber">{access ? `${access} — then it finishes this on its own` : `Suggested at stage #${n} · ${stage}: part of this needs a supervised run`}</span>
         ) : (
           <span className="text-[12.5px] font-semibold text-rose">Blocked at stage #{n} · {stage} — needs you</span>
         )}
       </div>
       <div className="text-[13px] text-ink-100">{b.reason}</div>
       {b.ask ? <div className="mt-1 text-[13px] text-ink-200">{advisory ? <span className="text-amber">It suggests:</span> : <span className="text-rose">It asks:</span>} {b.ask}</div> : null}
-      {advisory ? (
+      {advisory && access ? (
         <div className="mt-1.5 text-[12px] text-ink-400">
-          It did not stop: it carried on with everything its sandbox allows, and its report lists the steps left for a supervised run. Approve the work as it is, or
+          It did everything else and is waiting only on this. {b.needs_access?.kind === "sign_in" ? "Sign in below; the moment you close that window the card runs this step again by itself." : "Give it that, then press Retry. "}
+          You can also approve the work as it is.
+        </div>
+      ) : advisory ? (
+        <div className="mt-1.5 text-[12px] text-ink-400">
+          It did not stop: it carried on with everything its sandbox allows. Approve the work as it is, or
           switch — a supervised run works in your main checkout and asks you before every write.
         </div>
       ) : canSwitch ? (
@@ -88,6 +94,9 @@ export function BlockedPanel({ d }: { d: TaskDetail }) {
         </details>
       ) : null}
       <div className="mt-2.5 flex flex-wrap items-center gap-2">
+        {advisory && b.needs_access?.kind === "sign_in" ? (
+          <Button variant="primary" busy={busy} disabled={d.busy} title="Opens the board's browser at that site; sign in and close the window, and the card picks this step up again" onClick={() => run(() => api.signInSite(b.needs_access!.target))}>Sign in to {b.needs_access.target}</Button>
+        ) : null}
         {canSwitch ? (
           <Button variant={advisory ? "ghost" : "primary"} busy={busy} disabled={d.busy} onClick={() => void switchAndRun()}>Switch to supervised &amp; run from #{from + 1}</Button>
         ) : (

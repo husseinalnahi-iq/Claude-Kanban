@@ -374,11 +374,48 @@ export interface Blocked {
   source: "agent" | "board";
   /** The mode the blocked run had, so a rerun knows whether anything about its access changed. */
   mode: Mode;
+  /**
+   * What access the run was missing, named so the card can ask for exactly that — a sign-in to a site,
+   * a key file, a host — and run the stage again once it is there (D410). Required with needs "supervised"
+   * from an autonomous run; a run that cannot name it is not missing access.
+   */
+  needs_access?: NeedsAccess;
   created_at: string;
+}
+
+export interface NeedsAccess {
+  kind: "sign_in" | "key_file" | "host" | "other";
+  /** The site to sign in to, the key file's name, the host, or a few words. */
+  target: string;
 }
 
 /** The block that stopped the task, if one did: a suggestion the run carried on past is not one (D382). */
 export const stoppedBy = (t: { blocked: Blocked | null }): Blocked | null => (t.blocked && !t.blocked.advisory ? t.blocked : null);
+
+/** The card's "Your turn" words for a run that lacked access: what to give it, in one phrase (D410). */
+export function accessAsk(b: Pick<Blocked, "needs_access" | "reason"> | null | undefined): string | null {
+  const a = b?.needs_access;
+  if (!a) return null;
+  switch (a.kind) {
+    case "sign_in":
+      return `Sign in to ${a.target}`;
+    case "key_file":
+      return `Add the key file ${a.target}`;
+    case "host":
+      return `Allow it to reach ${a.target}`;
+    default:
+      return `Give it ${a.target}`;
+  }
+}
+
+/** Whether a sign-in to `host` is the access this block waited for (the site, or one of its subdomains). */
+export function unlockedBySignIn(b: Pick<Blocked, "needs_access"> | null | undefined, host: string): boolean {
+  const a = b?.needs_access;
+  if (!a || a.kind !== "sign_in") return false;
+  const want = a.target.toLowerCase().replace(/^https?:\/\//, "").split("/")[0]!;
+  const got = host.toLowerCase();
+  return want === got || want.endsWith(`.${got}`) || got.endsWith(`.${want}`);
+}
 
 /**
  * Where a supervised rerun starts after a suggestion (D382). The stage that made it finished, so a plan
@@ -540,6 +577,12 @@ export interface MergePolicy {
   baseBranch: string | null;
   /** Bring the base into the task branch (inside its worktree) before landing it. */
   updateBeforeMerge: boolean;
+  /**
+   * Do that as soon as the base moves, for every card waiting in Review, instead of only at Approve (D413):
+   * the card is always up to date, and a conflict goes to Claude at once (when `onConflict` is "claude")
+   * rather than when someone presses Approve. Off: the card shows how far behind it is and an Update button.
+   */
+  autoUpdateFromBase: boolean;
   strategy: MergeStrategy;
   /** Re-run the project's verify command after that update, before landing. */
   verifyBeforeMerge: boolean;
@@ -561,6 +604,7 @@ export interface MergePolicy {
 export const DEFAULT_MERGE: MergePolicy = {
   baseBranch: null,
   updateBeforeMerge: true,
+  autoUpdateFromBase: true,
   strategy: "merge",
   verifyBeforeMerge: true,
   onConflict: "claude",
@@ -639,6 +683,23 @@ export interface TaskHold {
   landing?: boolean;
 }
 
+/** What the board did by itself about a task's failures (D411). Cleared when the task reaches Review or Done. */
+export interface TaskRecovery {
+  /** Tries after a connection problem on one stage: the stage and how many so far (3 at most). */
+  transient?: { stage: number; n: number };
+  /** Recovery attempts the board's triage chose (a retry of a stage), 2 at most per task. */
+  attempts?: number;
+  /** The last thing recovery did or decided, for the card and the chat's debrief. */
+  last?: { at: string; action: "retry_same" | "retry_from" | "needs_user" | "transient"; reason: string; stage?: number };
+}
+
+/** Tries a stage gets after a connection problem before the person is asked (D411). */
+export const TRANSIENT_RETRIES = 3;
+/** Recovery attempts (a retry chosen by the board's own triage) a task gets before the person is asked (D411). */
+export const RECOVERY_ATTEMPTS = 2;
+/** The wait before each try after a connection problem: half a minute, two minutes, five. */
+export const TRANSIENT_DELAYS_MS = [30_000, 120_000, 300_000];
+
 /** This task's branch would conflict with its base if landed now (D359). */
 export interface ConflictRisk {
   base: string;
@@ -689,6 +750,8 @@ export interface Task {
   footprint: Footprint;
   /** Set while it waits in the queue for an overlapping task (D400). */
   hold: TaskHold | null;
+  /** What the board did on its own about this task's failures: tries after a connection problem, recovery attempts (D411). */
+  recovery: TaskRecovery | null;
   /**
    * "Autonomous + asks me": an autonomous task that may stop on a question card and wait for your
    * answer, instead of only leaving a note with its default (D361). Ignored when the task is supervised.
@@ -908,13 +971,15 @@ export interface ChatMessage {
   role: "user" | "assistant" | "tool" | "error" | "update";
   text: string;
   meta: {
-    cards?: { id: string; title: string; action: "created" | "updated" | "queued" | "scheduled" | "messaged" | "answered" | "stopped" | "retried" | "continued" | "forked" }[];
+    cards?: { id: string; title: string; action: "created" | "updated" | "queued" | "scheduled" | "messaged" | "answered" | "stopped" | "retried" | "continued" | "forked" | "approved" }[];
     cost_usd?: number;
     update?: ChatUpdate;
     /** A user message the board sent by itself to keep the conversation cached (D332), shown as a quiet line. */
     keepalive?: boolean;
     /** A user message the board sent when you pressed ✦ What next? (D338), shown as a quiet line. */
     suggest?: boolean;
+    /** An assistant turn the manager posted on its own when a card finished or failed (D410). */
+    debrief?: boolean;
     /** The files that went with a user message (D334). */
     files?: Pick<ChatFile, "id" | "name" | "media_type" | "bytes">[];
   };
@@ -1182,9 +1247,28 @@ export interface Settings {
   claudeAutoMemory: boolean;
   /**
    * An autonomous task marked live does its live steps itself: its worktree gets the project's gitignored
-   * credential files and its prompts stop leaving those steps for a supervised run. On by default (D385).
+   * credential files and its prompts stop leaving those steps for a supervised run. On by default (D385, D410).
    */
   autonomousLive: boolean;
+  /**
+   * When a task fails for a reason that is not a stop, a block or a usage limit, the board tries to recover
+   * it by itself: a connection problem retries the stage in its own session; anything else gets one cheap
+   * read-only look by the triage model, which may retry a stage; after two attempts the person is asked (D411).
+   */
+  autoRecover: boolean;
+  /**
+   * A stage that reaches its turn limit while still making changes carries on in its session as long as it
+   * does; a task that reaches a cost ceiling while progressing is granted another stage ceiling by the board
+   * itself, up to twice the task ceiling, and only then asks (D412). Off: the limits stop and ask as before.
+   */
+  autoContinueWhileProgressing: boolean;
+  /**
+   * When a card a chat made finishes or fails, the AI Manager posts a short debrief in that chat on its
+   * own — what was done, what is left, whether a follow-up is worth making — so the manager tells you
+   * rather than waiting for you to ask (D410). One cheap call per finish. Off: only the board's own
+   * one-line news is posted.
+   */
+  debriefOnFinish: boolean;
   /**
    * Autonomous tasks work in their own copy of the project (a git worktree). Off: they work in the
    * project folder itself, and the queue keeps tasks that would change the same files apart (D398, D400).

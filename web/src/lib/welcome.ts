@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
  * big enough to deserve a second introduction.
  */
 const KEY = "kanban.welcome";
-const VERSION = 2;
+const VERSION = 3;
 
 function seenVersion(): number {
   try {
