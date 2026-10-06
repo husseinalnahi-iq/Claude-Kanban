@@ -273,6 +273,8 @@ export const api = {
   updateFromBase: (taskId: string) => req<{ pulled: number; base: string }>("POST", `/tasks/${taskId}/update-from-base`),
 
   worktrees: (projectId: string) => req<WorktreeRow[]>("GET", `/worktrees?project=${encodeURIComponent(projectId)}`),
+  startWithWindows: () => req<{ supported: boolean; on: boolean }>("GET", "/start-with-windows"),
+  setStartWithWindows: (on: boolean) => req<{ supported: boolean; on: boolean }>("PUT", "/start-with-windows", { on }),
   pruneWorktrees: (project_id: string) => req<{ removed: string[]; stuck: string[] }>("POST", "/worktrees/prune", { project_id }),
 
   settings: () => req<Settings>("GET", "/settings"),

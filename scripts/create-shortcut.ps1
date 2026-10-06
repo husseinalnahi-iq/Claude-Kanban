@@ -42,6 +42,8 @@ foreach ($path in $targets) {
   $sc.WorkingDirectory = $root
   $sc.IconLocation = "$icon,0"
   $sc.Description = 'Claude Kanban - run Claude sessions from a board'
+  # At sign-in the app comes up quietly by the clock, without its startup screen or a browser (D401).
+  $sc.Arguments = if ($useApp -and $path -eq $startupLink) { '--at-login' } else { '' }
   # The .cmd's window is the server log, so it starts minimised; the app starts normally, or its first
   # window - the startup screen - would open minimised too.
   $sc.WindowStyle = if ($useApp) { 1 } else { 7 }

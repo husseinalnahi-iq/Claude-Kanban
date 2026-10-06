@@ -5,6 +5,8 @@ import type { FastifyInstance } from "fastify";
 import type { AppDeps } from "../app.ts";
 import { pickFolder } from "../folderPicker.ts";
 import { busyItems } from "./busy.ts";
+import { setStartWithWindows, startsWithWindows } from "../startWithWindows.ts";
+import { z } from "zod";
 
 const SERVER_SRC = join(dirname(fileURLToPath(import.meta.url)), "..");
 const STARTED_AT = Date.now();
@@ -19,6 +21,10 @@ function newestChange(dir = SERVER_SRC): number {
 }
 
 export async function systemRoutes(app: FastifyInstance, { repo, runner }: AppDeps) {
+  /** Settings → Start with Windows (D401): read from, and written to, your Startup folder itself. */
+  app.get("/start-with-windows", async () => startsWithWindows());
+  app.put("/start-with-windows", async (req) => setStartWithWindows(z.object({ on: z.boolean() }).parse(req.body).on));
+
   /**
    * Whether this server runs older code than what is on disk. The page is rebuilt from disk, so a server
    * left running across an update serves a page that asks it for things it does not have yet.

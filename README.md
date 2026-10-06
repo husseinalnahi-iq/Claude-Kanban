@@ -85,8 +85,9 @@ opens that page for you if not). A ZIP copy does not update itself — the one-l
   Restart and Quit ask first when a task is working. If the board stops on its own, the icon starts it
   again within seconds and the stage it was running carries on in its session. After 3 stops in 15
   minutes, it waits for you instead.
-- To start it when Windows starts, run this once in PowerShell:
-- To start it when Windows starts, run this once in PowerShell:
+- To start it when Windows starts, tick **Settings → Runs & limits → Start with Windows** (D401). At sign-in it
+  comes up quietly, as the icon by the clock with no window and no browser, so queued and scheduled work
+  carries on after a restart. The same shortcut can be made from PowerShell:
   `powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\Claude Kanban\scripts\create-shortcut.ps1" -Startup`
 - `Start Claude Kanban.cmd` in the folder still starts it the old way, in a window that shows everything
   it prints — handy when something goes wrong. The icon opens `Claude Kanban.exe`, a small program

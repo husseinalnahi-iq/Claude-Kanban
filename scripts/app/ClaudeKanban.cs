@@ -68,7 +68,7 @@ namespace ClaudeKanban
             };
             try
             {
-                app = new App(mutex, flags.Contains("--rebuilt"));
+                app = new App(mutex, flags.Contains("--rebuilt"), flags.Contains("--at-login"));
                 Application.Run(app);
             }
             finally
@@ -150,12 +150,16 @@ namespace ClaudeKanban
         const int CrashLimit = 3;
         // Windows ends the server too when it signs out or shuts down; that is not a crash (D397).
         volatile bool sessionEnding;
+        // Started by Windows at sign-in (D401): it comes up by the clock without a startup screen or a browser,
+        // and shows itself only when something needs you. Cleared once it is up.
+        bool atLogin;
         static readonly TimeSpan CrashWindow = TimeSpan.FromMinutes(15);
 
-        public App(Mutex mutex, bool rebuilt)
+        public App(Mutex mutex, bool rebuilt, bool atLogin)
         {
             this.mutex = mutex;
             this.rebuilt = rebuilt;
+            this.atLogin = atLogin;
             Microsoft.Win32.SystemEvents.SessionEnding += (s, e) => sessionEnding = true;
             // Work finished on other threads comes back through this control, so it needs its handle now.
             var unused = ui.Handle;
@@ -201,7 +205,7 @@ namespace ClaudeKanban
             SetState(State.Starting);
             if (splash == null || splash.IsDisposed) NewSplash();
             splash.Reset();
-            splash.ShowAndActivate();
+            if (!atLogin) splash.ShowAndActivate();
             var worker = new Thread(Steps);
             worker.IsBackground = true;
             worker.Start();
@@ -346,6 +350,13 @@ namespace ClaudeKanban
             if (state != State.Starting || cancelled) return;
             SetState(State.Running);
             Log.Line("Ready on " + Paths.Url);
+            if (atLogin)
+            {
+                // Signing in should not open a browser: the board waits by the clock until you click it.
+                atLogin = false;
+                splash.Hide();
+                return;
+            }
             OpenBoard();
             splash.Finish();
             FirstRunHint();
@@ -354,6 +365,11 @@ namespace ClaudeKanban
         /// <summary>A board started some other way (the .cmd, a terminal) already answers: open that one.</summary>
         void UseRunningBoard(List<string> said)
         {
+            if (atLogin)
+            {
+                Leave();
+                return;
+            }
             OpenBoard();
             string note = said.Count > 0 ? said[said.Count - 1].Trim() : "";
             // "Already running." needs no words. Anything else is why an older version was left alone.
@@ -559,7 +575,9 @@ namespace ClaudeKanban
             }
             try
             {
-                Process.Start(new ProcessStartInfo(Paths.Exe, rebuiltAlready ? "--handoff --rebuilt" : "--handoff") { UseShellExecute = false });
+                // A rebuild at sign-in stays quiet: the new copy is told it is still a sign-in start (D401).
+                string args = (rebuiltAlready ? "--handoff --rebuilt" : "--handoff") + (atLogin ? " --at-login" : "");
+                Process.Start(new ProcessStartInfo(Paths.Exe, args) { UseShellExecute = false });
             }
             catch (Exception e)
             {
@@ -625,6 +643,8 @@ namespace ClaudeKanban
             Ui(() =>
             {
                 if (cancelled || state == State.Leaving) return;
+                // A start at sign-in that fails does need you: from here it shows itself like any other.
+                atLogin = false;
                 StopServer();
                 SetState(State.Failed);
                 if (fresh || splash == null || splash.IsDisposed) NewSplash();

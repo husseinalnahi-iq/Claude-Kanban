@@ -94,6 +94,41 @@ function WorkspaceSettings({ project }: { project: ProjectWithGit }) {
   );
 }
 
+/**
+ * Start with Windows (D401): a shortcut in your Startup folder, read and written right away — Windows,
+ * not the board, holds this setting, so it is not part of Save.
+ */
+function StartWithWindows() {
+  const [state, setState] = useState<{ supported: boolean; on: boolean } | null>(null);
+  const { busy, error, run } = useAction();
+  useEffect(() => void api.startWithWindows().then(setState, () => setState(null)), []);
+  if (!state?.supported) return null;
+  return (
+    <>
+      <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-200">
+        <input
+          type="checkbox"
+          className="mt-1 accent-amber"
+          checked={state.on}
+          disabled={busy}
+          onChange={(e) => {
+            const on = e.target.checked;
+            void run(async () => setState(await api.setStartWithWindows(on)));
+          }}
+        />
+        <span>
+          Start with Windows
+          <span className="block text-[11.5px] text-ink-400">
+            When you sign in to this computer, Claude Kanban starts by itself, quietly: just its icon by the clock, no window
+            and no browser. Queued and scheduled work then carries on after a restart. Takes effect at once.
+          </span>
+        </span>
+      </label>
+      <ErrorLine error={error} />
+    </>
+  );
+}
+
 /** Worktrees on disk, with a prune that refuses anything still holding work. */
 function WorktreeSettings({ project }: { project: ProjectWithGit }) {
   const [rows, setRows] = useState<WorktreeRow[] | null>(null);
@@ -1207,6 +1242,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
               </span>
             </span>
           </label>
+          <StartWithWindows />
           <div className="mt-4 text-[12.5px] text-ink-200">
             When Claude asks you a question mid-task
             <div className="mt-1.5 flex flex-wrap items-center gap-2">
