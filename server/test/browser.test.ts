@@ -312,7 +312,7 @@ test("Claude in Chrome reaches an autonomous run only when the owner chose Chrom
   assert.equal(browserDecision(chromeTool, {}, false, process.cwd(), out, { chrome: true })?.behavior, "ask", "a supervised run still asks every time");
 });
 
-test("a run gets its own copy of the signed-in profile, without caches or locks, and launches from it (D389)", async () => {
+test("a run gets its own copy of the signed-in profile — only its sign-in parts, no caches or locks — and launches from it (D389, D409)", async () => {
   const from = mkdtempSync(join(tmpdir(), "kprof-"));
   const to = join(mkdtempSync(join(tmpdir(), "krun-")), "profile");
   try {
@@ -322,7 +322,19 @@ test("a run gets its own copy of the signed-in profile, without caches or locks,
     writeFileSync(join(from, "Default", "Cache", "data_1"), "big");
     writeFileSync(join(from, "SingletonLock"), "x");
     writeFileSync(join(from, "Local State"), "{}");
+    mkdirSync(join(from, "Default", "IndexedDB", "https_site_0.indexeddb.leveldb"), { recursive: true });
+    writeFileSync(join(from, "Default", "IndexedDB", "https_site_0.indexeddb.leveldb", "000003.log"), "token");
+    mkdirSync(join(from, "Default", "Extensions", "abc"), { recursive: true });
+    writeFileSync(join(from, "Default", "Extensions", "abc", "big.js"), "x");
+    mkdirSync(join(from, "optimization_guide_model_store"), { recursive: true });
+    writeFileSync(join(from, "optimization_guide_model_store", "model.bin"), "x");
+    writeFileSync(join(from, "Default", "Network", "LOCK"), "");
     assert.equal(copyProfile(from, to), true);
+    assert.equal(readFileSync(join(to, "Local State"), "utf8"), "{}", "the key the cookies are encrypted with comes along");
+    assert.equal(readFileSync(join(to, "Default", "IndexedDB", "https_site_0.indexeddb.leveldb", "000003.log"), "utf8"), "token", "so does site storage");
+    assert.equal(existsSync(join(to, "Default", "Extensions")), false, "extensions stay behind");
+    assert.equal(existsSync(join(to, "optimization_guide_model_store")), false, "so do the models Chrome downloads");
+    assert.equal(existsSync(join(to, "Default", "Network", "LOCK")), false, "and a lock inside a copied part");
     assert.equal(readFileSync(join(to, "Default", "Network", "Cookies"), "utf8"), "cookie-db", "the sign-in comes along");
     assert.equal(existsSync(join(to, "Default", "Cache")), false, "caches stay behind");
     assert.equal(existsSync(join(to, "SingletonLock")), false, "so does the lock of a window still open");

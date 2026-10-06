@@ -1,5 +1,5 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
-import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 
@@ -56,34 +56,54 @@ export function browserServer(outputDir: string, browser?: "chrome" | "msedge" |
 export const BOARD_PROFILE = "browser-profile";
 
 /** Caches and locks are left behind: the sign-ins live in the cookie and storage files, not in them. */
-const NOT_COPIED = /^(Cache|Code Cache|GPUCache|GrShaderCache|ShaderCache|DawnCache|DawnGraphiteCache|DawnWebGPUCache|Crashpad|BrowserMetrics|component_crx_cache|optimization_guide_model_store|Safe Browsing|Singleton.*|lockfile|LOCK)$/i;
+/**
+ * What a sign-in lives in: the cookies and site storage of the profile, and `Local State`, which holds
+ * the key Chrome encrypts the cookies with. Everything else in a profile is caches, models and
+ * components Chrome fetches again by itself — 240 MB on the owner's board, copied on every run, which
+ * cost seconds per stage (D409). Only these are copied, so a profile that grows does not slow runs.
+ */
+const SIGN_IN_PARTS: Record<string, true | Record<string, true>> = {
+  "Local State": true,
+  Default: { Network: true, Cookies: true, "Cookies-journal": true, "Local Storage": true, "Session Storage": true, IndexedDB: true, WebStorage: true, Preferences: true, "Secure Preferences": true },
+};
+/** Open in the sign-in window right now, or a lock: never copied, even inside a part that is. */
+const NOT_COPIED = /^(Singleton.*|lockfile|LOCK)$/i;
 
 /**
- * A run's own copy of the saved profile, so runs never fight over one folder's lock and nothing a run
- * does is saved back. A file the sign-in window still holds open is skipped; returns false when
- * there is no profile yet, or nothing could be copied.
+ * A run's own copy of the signed-in parts of the saved profile, so runs never fight over one folder's
+ * lock and nothing a run does is saved back. A file the sign-in window still holds open is skipped;
+ * returns false when there is no profile yet, or nothing could be copied.
  */
 export function copyProfile(from: string, to: string): boolean {
   if (!existsSync(from)) return false;
   let copied = 0;
-  const walk = (src: string, dest: string) => {
+  const copyAll = (src: string, dest: string) => {
     mkdirSync(dest, { recursive: true });
     for (const e of readdirSync(src, { withFileTypes: true })) {
       if (NOT_COPIED.test(e.name)) continue;
-      const a = join(src, e.name);
-      const b = join(dest, e.name);
-      try {
-        if (e.isDirectory()) walk(a, b);
-        else if (e.isFile()) {
-          copyFileSync(a, b);
-          copied++;
-        }
-      } catch {
-        // open in the sign-in window: the run goes without that file
-      }
+      copyOne(join(src, e.name), join(dest, e.name), e.isDirectory(), e.isFile(), true);
     }
   };
-  walk(from, to);
+  const copyOne = (a: string, b: string, dir: boolean, file: boolean, all: boolean | Record<string, true>) => {
+    try {
+      if (dir && all === true) copyAll(a, b);
+      else if (dir && typeof all === "object") copySome(a, b, all);
+      else if (file) {
+        mkdirSync(dirname(b), { recursive: true });
+        copyFileSync(a, b);
+        copied++;
+      }
+    } catch {
+      // open in the sign-in window: the run goes without that file
+    }
+  };
+  const copySome = (src: string, dest: string, parts: Record<string, true | Record<string, true>>) => {
+    for (const e of readdirSync(src, { withFileTypes: true })) {
+      const part = parts[e.name];
+      if (part && !NOT_COPIED.test(e.name)) copyOne(join(src, e.name), join(dest, e.name), e.isDirectory(), e.isFile(), part);
+    }
+  };
+  copySome(from, to, SIGN_IN_PARTS);
   return copied > 0;
 }
 
