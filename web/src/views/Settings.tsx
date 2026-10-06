@@ -574,7 +574,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [delegateTimeout, setDelegateTimeout] = useState(30);
   const [debate, setDebate] = useState<SettingsShape["debate"]>({ enabled: false, critic: { provider: "anthropic", model: "claude-sonnet-5-5", effort: "medium" }, mode: "once", rounds: 3 });
-  const [maxTaskCost, setMaxTaskCost] = useState(20);
+  const [maxTaskCost, setMaxTaskCost] = useState(60);
   const [maxRepeats, setMaxRepeats] = useState(8);
   const [retention, setRetention] = useState(30);
   const [blocked, setBlocked] = useState("");

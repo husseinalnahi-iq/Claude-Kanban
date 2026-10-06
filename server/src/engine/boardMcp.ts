@@ -322,7 +322,7 @@ export function createBoardServer(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtask
         "Report that a note in this project's memory is wrong or out of date — for example the code now does it differently. The note leaves later prompts until the user checks it. Only for a note you have evidence against, not one you merely did not need.",
         { note: z.string().min(12).max(400), reason: z.string().min(8).max(400) }, async (a) => h.flagMemory(a)),
       tool("board_ask",
-        "Ask the person a question that is theirs to decide — a business rule, a trade-off, the reason behind a request — when you can carry on with a sensible default meanwhile. It is shown on the card with your default; it does not stop the run. Use it instead of leaving a question only in your report. If you cannot go on without the answer, use board_report_blocked with needs \"input\" instead.",
+        "Ask the person a question that is theirs to decide — a business rule, a trade-off, the reason behind a request — when you can carry on with a sensible default meanwhile. It is shown on the card with your default; it does not stop the run. Use it instead of leaving a question only in your report — and once it is on the card, your report lists it among what was done as the choice you took, not again as something the person still has to decide. If you cannot go on without the answer, use board_report_blocked with needs \"input\" instead.",
         {
           question: z.string().min(8).describe("The question, answerable without reading your transcript."),
           options: z.array(z.string()).max(6).optional().describe("Choices, when it is one of a few."),

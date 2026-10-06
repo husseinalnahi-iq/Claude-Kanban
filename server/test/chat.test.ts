@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
@@ -32,7 +33,12 @@ function replying(sessionId = "chat-s1") {
       for await (const m of params.prompt) prompt += String(m.message.content);
       calls.push({ prompt, options: params.options });
       yield { type: "system", subtype: "init", session_id: sessionId } as any;
-      denied.push(await params.options.canUseTool!("Write", { file_path: "x" }, { signal: new AbortController().signal, toolUseID: "t", requestId: "r" } as any));
+      const ask = (tool: string, input: Record<string, unknown>) => params.options.canUseTool!(tool, input, { signal: new AbortController().signal, toolUseID: "t", requestId: "r" } as any);
+      denied.push(await ask("Write", { file_path: "x" }));
+      denied.push(await ask("Edit", { file_path: join(params.options.cwd!, "src", "db.ts"), old_string: "a", new_string: "b" }));
+      denied.push(await ask("Edit", { file_path: join(homedir(), ".claude", "skills", "erp", "SKILL.md"), old_string: "a", new_string: "b" }));
+      denied.push(await ask("Write", { file_path: join(params.options.cwd!, ".claude", "skills", "mine", "SKILL.md"), content: "x" }));
+      denied.push(await ask("Read", { file_path: join(homedir(), ".claude", "skills", "erp", "SKILL.md") }));
       yield { type: "stream_event", session_id: sessionId, event: { type: "content_block_delta", delta: { type: "text_delta", text: "The board " } } } as any;
       yield { type: "stream_event", session_id: sessionId, event: { type: "content_block_delta", delta: { type: "text_delta", text: "stores tasks." } } } as any;
       yield { type: "assistant", session_id: sessionId, message: { content: [{ type: "tool_use", name: "Read", input: { file_path: `${params.options.cwd}/src/db.ts` } }] } } as any;
@@ -70,8 +76,9 @@ test("a chat reply streams, is stored with its tool lines, costs what it cost, a
     assert.equal(opts.cwd, s.project.path);
     assert.equal(opts.includePartialMessages, true);
     assert.deepEqual(opts.settingSources, ["user", "project"], "your connectors and skills by default (D381)");
-    for (const t of ["Edit", "Write", "AskUserQuestion"]) assert.ok(CHAT_DISALLOWED.includes(t) && opts.disallowedTools.includes(t), `${t} is not offered`);
-    assert.equal(q.denied[0].behavior, "deny", "and refused if tried anyway");
+    assert.ok(CHAT_DISALLOWED.includes("AskUserQuestion") && opts.disallowedTools.includes("AskUserQuestion"), "a question is not offered");
+    assert.deepEqual(q.denied.map((d: any) => d.behavior), ["deny", "deny", "allow", "allow", "allow"], "it changes a skill (yours or the project's) and reads one, but no other file (D406)");
+    assert.match(q.denied[1].message, /only a skill can be changed/);
     assert.ok(!opts.disallowedTools.includes("Bash"), "the shell is offered, for read-only commands (D350)");
     assert.equal(opts.hooks.PreToolUse.length, 1, "and a settings file's allow rule cannot take a command past canUseTool");
     assert.equal(opts.resume, undefined);
@@ -841,4 +848,10 @@ test("an \"Autonomous + asks me\" card from a chat puts its question in the chat
   } finally {
     await s.cleanup();
   }
+});
+
+test("a skill the chat changed is named in its tool line, not just as SKILL.md", () => {
+  const skill = join(homedir(), ".claude", "skills", "erp", "SKILL.md");
+  assert.equal(describeTool("Edit", { file_path: skill }, "/p"), "changed the skill file erp/SKILL.md");
+  assert.equal(describeTool("Write", { file_path: join("/p", ".claude", "skills", "mine", "SKILL.md") }, "/p"), "wrote the skill file mine/SKILL.md");
 });

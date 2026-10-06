@@ -98,6 +98,58 @@ test("autonomous gate: bypasses found in review are refused", () => {
   assert.equal(autonomousGate("AskUserQuestion", {}, cwd).behavior, "deny");
 });
 
+test("the review of an autonomous live task is told its keys are in its folder, and nobody else is (D404)", () => {
+  const review = buildStagePrompt({ ...base, stage: "review", live: true, liveAllowed: true });
+  assert.match(review, /key files that git leaves out \(such as \.env\) were copied into your folder/);
+  assert.match(review, /never print them, and do not look for keys anywhere else/);
+  assert.doesNotMatch(buildStagePrompt({ ...base, stage: "review", live: true }), /were copied into your folder/, "a sandboxed live review has no keys");
+  assert.doesNotMatch(buildStagePrompt({ ...base, stage: "review", mode: "supervised", branch: null, live: true, liveAllowed: true }), /were copied into your folder/);
+});
+
+test("a `..` that lands inside the worktree after its `cd` is allowed; one that leaves, or follows a `cd` the board cannot follow, is not (D404)", () => {
+  const cwd = "C:\\work\\proj\\.kanban\\wt\\t_1";
+  const ok = (command: string, tool = "Bash") => autonomousGate(tool, { command }, cwd).behavior === "allow";
+  // The commands a live run was refused four times in one stage, all inside the worktree.
+  assert.equal(ok("cd scripts/direct_expense && python ../../tools/check.py"), true);
+  assert.equal(ok("cd scripts && ls .."), true);
+  assert.equal(ok("cat src/../README.md"), true);
+  assert.equal(ok("cd a/b && cd .. && cat ../x.txt"), true, "each cd is followed");
+  assert.equal(ok("cd a && python run.py --out=../y.json"), true, "an option's value is a path too");
+
+  assert.equal(ok("cat ../secrets.json"), false);
+  assert.equal(ok("cat ./../../../.env"), false);
+  assert.equal(ok("cat src/../../x"), false);
+  assert.equal(ok("cd scripts && cat ../../x"), false, "two up from scripts is outside");
+  assert.equal(ok("cd a && cd .. && cd .. && ls"), false);
+  assert.equal(ok("python run.py --out=../y.json"), false);
+  assert.equal(ok("cd scripts; cat ../x"), false, "after ; the cat also runs when the cd failed");
+  assert.equal(ok("cd scripts || cat ../x"), false);
+  assert.equal(ok("ls | cd scripts && cat ../x"), false, "a cd in a pipe may or may not move, depending on the shell");
+  assert.equal(ok("(cd scripts) && cat ../x"), false);
+  assert.equal(ok("cd - && cat ../x"), false);
+  assert.equal(ok('cd a && cat "$D/../x"'), false, "a variable could be anywhere");
+  assert.equal(ok("cd a && cat a,../x"), false, "a list is not a path");
+  assert.equal(ok('cd a && cat "../my x"'), false, "a space a program could split on");
+  assert.equal(ok('cd a && bash -c "cat ../x"'), false, "a script handed to another program keeps the old rule");
+  assert.equal(ok("cd a && python - <<'EOF'\nopen('../x')\nEOF"), false, "text fed to a program is not followed");
+  assert.equal(ok("Set-Location scripts; Get-Content ../x", "PowerShell"), false);
+});
+
+test("the scratchpad Claude Code gives a session can be written, named in full; nowhere else outside the worktree can (D404)", () => {
+  const cwd = "C:\\work\\proj\\.kanban\\wt\\t_1";
+  const pad = "C:\\Temp\\claude\\C--work-proj--kanban-wt-t-1";
+  const ok = (tool: string, input: Record<string, unknown>) => autonomousGate(tool, input, cwd, [pad], { scratch: [pad] }).behavior === "allow";
+  // The writes runs were refused, word for word apart from the folder.
+  assert.equal(ok("Write", { file_path: `${pad}\\b5892fef\\scratchpad\\verify.py` }), true);
+  assert.equal(ok("Bash", { command: `python "${pad}\\b5892fef\\scratchpad\\erp.py"` }), true);
+  assert.equal(ok("Bash", { command: "python /c/Temp/claude/C--work-proj--kanban-wt-t-1/s/scratchpad/erp.py > /c/Temp/claude/C--work-proj--kanban-wt-t-1/s/out.txt" }), true);
+
+  assert.equal(ok("Write", { file_path: "C:\\Temp\\claude\\C--work-proj--kanban-wt-t-2\\x.py" }), false, "another task's scratchpad");
+  assert.equal(ok("Write", { file_path: "C:\\Temp\\x.py" }), false);
+  assert.equal(ok("Write", { file_path: "..\\C--work-proj--kanban-wt-t-1\\x.py" }), false, "a relative path is measured from the worktree, never from the scratchpad");
+  assert.equal(autonomousGate("Write", { file_path: `${pad}\\x.py` }, cwd).behavior, "deny", "without the scratchpad given, nothing changes");
+});
+
 test("autonomous reads: the main checkout's secrets are out of reach, attachments and skills are not (D187)", () => {
   const repo = "C:\\Users\\me\\CloudSync\\Client Work Folder\\Acme-Ledger";
   const cwd = `${repo}\\.kanban\\wt\\t_1`;
@@ -266,4 +318,20 @@ test("an autonomous run may read what Claude Code saved for its own sessions, an
   assert.equal(read(String.raw`C:\Users\me\.claude\projects\C--work-proj--kanban-wt-t-1\s1\tool-results\r1.txt`), "allow", "a long tool result");
   assert.equal(read(String.raw`C:\Users\me\AppData\Local\Temp\claude\C--work-proj--kanban-wt-t-2\s9\tasks\b1.output`), "deny", "another task's sessions stay closed");
   assert.equal(read(String.raw`C:\Users\me\.claude\projects\C--work-proj\memory\notes.md`), "deny", "so does the project's own folder");
+});
+
+test("questions already on the card reach the stage as choices taken, so its report does not ask them again", () => {
+  const p = buildStagePrompt({
+    ...base,
+    stage: "review",
+    cardQuestions: [
+      { text: "Any pending order, or only ones they sent?", default: "Any pending order", answer: null },
+      { text: "Keep the old field?", default: "Keep it", answer: "Drop it" },
+    ],
+  });
+  assert.match(p, /## Questions already on the card/);
+  assert.match(p, /Any pending order, or only ones they sent\? → not answered yet; carried on with: Any pending order/);
+  assert.match(p, /Keep the old field\? → answered: Drop it/);
+  assert.match(p, /never again as something the person still has to decide/);
+  assert.doesNotMatch(buildStagePrompt(base), /## Questions already on the card/);
 });

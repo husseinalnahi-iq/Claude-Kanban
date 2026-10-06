@@ -275,7 +275,7 @@ export function openDb(file: string): DatabaseSync {
   seed.run("browserCheckModel", "stage");
   seed.run("autoUpdateEngine", "true");
   seed.run("liveView", "true");
-  seed.run("maxCostPerTaskUsd", "20");
+  seed.run("maxCostPerTaskUsd", "60");
   seed.run("maxRepeatedToolCalls", "8");
   seed.run("eventRetentionDays", "30");
   seed.run("blockedCommands", JSON.stringify(DEFAULT_BLOCKED_COMMANDS));
@@ -290,6 +290,12 @@ export function openDb(file: string): DatabaseSync {
     raise.run("20", "maxCostPerStageUsd", "5");
     raise.run("20", "maxCostPerTaskUsd", "15");
     seed.run("ceilingsRaisedD402", "1");
+  }
+  // Then the owner chose $60 a task (three stages at $20): a board still at $15 or the $20 of above moves.
+  if (!db.prepare("SELECT 1 FROM settings WHERE key = 'taskCeiling60D402'").get()) {
+    const raise = db.prepare("UPDATE settings SET value = '60' WHERE key = 'maxCostPerTaskUsd' AND value IN ('15', '20')");
+    raise.run();
+    seed.run("taskCeiling60D402", "1");
   }
   seed.run("maxSubagentDepth", "2");
   seed.run("maxConcurrentSubagents", "5");

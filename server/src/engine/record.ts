@@ -71,7 +71,14 @@ export function recordLines(e: EventRow): string[] {
  * written into project memory as the outcome — so it is only the fallback.
  */
 export function outcomeLine(runs: Pick<Run, "stage" | "role" | "status" | "result_md">[], summary: string | null | undefined): string | null {
-  const first = (s: string | null | undefined) => s?.split(/\r?\n/).map((l) => l.replace(/^#+\s*/, "").trim()).find(Boolean) ?? null;
+  // A report written to a template opens with a model suggestion ("🎛️ Suggested: stay on Opus…") and
+  // a headline: three tasks' memory said only which model to use. Its TL;DR is the outcome, when it has one.
+  const first = (s: string | null | undefined) => {
+    const lines = s?.split(/\r?\n/).map((l) => l.replace(/^#+\s*/, "").trim()).filter(Boolean) ?? [];
+    const tldr = lines.map((l) => l.replace(/^\**TL;DR:?\**:?\s*/i, "")).find((l, i) => l !== lines[i] && l.trim());
+    if (tldr) return tldr.trim();
+    return lines.find((l) => !/^(?:🎛️?\s*)?\**(?:suggested|switch to)\b/iu.test(l))?.replace(/^🏁\s*/u, "") ?? null;
+  };
   const ok = runs.filter((x) => x.role === "stage" && x.status === "success" && x.result_md?.trim());
   const work = ok.filter((x) => x.stage !== "plan" && x.stage !== "review");
   return first(work.at(-1)?.result_md) ?? first(ok.at(-1)?.result_md) ?? (summary?.trim() || null);

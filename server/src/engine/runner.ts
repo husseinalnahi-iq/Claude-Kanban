@@ -1020,6 +1020,7 @@ export class TaskRunner {
         }
         // Before any outcome is published: whoever acts on "review" must find the list already there.
         await this.recordTouched(taskId);
+        await this.pruneTouched(taskId);
         // "Blocked" is not a pass: the stage keeps its report, but it is not counted as done, so the
         // next stage never runs on it and Retry starts here again (D184).
         if (isBlocked) {
@@ -1390,6 +1391,7 @@ export class TaskRunner {
       previousStage: stageIndex > 0 ? task.pipeline[stageIndex - 1]?.stage ?? null : null,
       live: task.live,
       liveAllowed: this.liveAllowed(task),
+      skillsDir: task.mode === "autonomous" ? join(homedir(), ".claude", "skills") : null,
       inFolder: worksInFolder(task),
       // Narrowed to "a picture maker is ready" in stagePromptFor, which can ask Codex (D303).
       imageTool: settings.imageProvider !== "off" && stage.stage !== "plan" && stage.stage !== "review",
@@ -1398,6 +1400,7 @@ export class TaskRunner {
       earlierResults,
       skills: task.skills,
       messages,
+      cardQuestions: task.questions.map((q) => ({ text: q.text, default: q.default ?? null, answer: q.answer ?? null })),
       rejectNote: this.sentBack.get(task.id) ?? null,
       priorBlock: this.priorBlocks.get(task.id) ?? null,
       foreignChanges: sharesProjectFolder(task) ? task.checkout?.dirtyAtStart ?? [] : [],
@@ -1480,6 +1483,32 @@ export class TaskRunner {
       this.setTask(taskId, { checkout: { ...task.checkout, touched: touched.slice(0, 200) }, footprint: { ...task.footprint, touched: all } });
     } catch (err) {
       this.log(taskId, `[board] could not read the checkout's status: ${String(err)}\n`);
+    }
+  }
+
+  /**
+   * What the card says the task touched, without the helpers it wrote and deleted again: a worktree
+   * task keeps what its branch really changes, a folder task what still exists or was there before it.
+   * Three cards on 2026-10-06 listed seven `_tmp_wd/*.py` long gone, and other cards took turns over them.
+   */
+  private async pruneTouched(taskId: string): Promise<void> {
+    const task = this.repo.getTask(taskId);
+    const project = task ? this.repo.getProject(task.project_id) : null;
+    if (!task || !project || !task.footprint.touched.length) return;
+    try {
+      let keep: (f: string) => boolean;
+      if (task.branch && task.base_sha) {
+        const changed = new Set((await this.git.diffTask(project.path, task.base_sha, task.branch)).map((d) => d.file));
+        keep = (f) => changed.has(f);
+      } else if (worksInFolder(task)) {
+        const kept = keptFiles(this.copiesDir(taskId));
+        // "new": it made the file; gone again, nothing of it is left to land or to undo.
+        keep = (f) => (!!kept[f] && kept[f] !== "new") || existsSync(join(project.path, f));
+      } else return;
+      const touched = task.footprint.touched.filter(keep);
+      if (touched.length !== task.footprint.touched.length) this.setTask(taskId, { footprint: { ...task.footprint, touched } });
+    } catch {
+      // a list a little too long only makes another card wait its turn
     }
   }
 
@@ -1622,6 +1651,14 @@ export class TaskRunner {
       join(settings.stateDir, "attachments", task.id), browserDir, join(homedir(), ".claude", "skills"), join(homedir(), ".claude", "plugins"),
       ...claudeSessionRoots(a.cwd),
     ];
+    // Claude Code tells every session to keep its temporary files in a scratchpad under this folder, and
+    // runs did, and were refused (3 times in one day). It is this worktree's alone and outside git, so a
+    // helper script there is no riskier than one in the worktree, and never lands by mistake (D404).
+    const scratch = [claudeSessionRoots(a.cwd)[1]];
+    // "Anything Claude Code can do we should also be able to do here" (owner, D406): projects tell a run
+    // to update the skill that describes what it changed. Refused, two cards on one day left that step
+    // "for a supervised run", and one was stopped outright after 5 tries.
+    scratch.push(join(homedir(), ".claude", "skills"));
     // An autonomous run that keeps hitting the sandbox is stopped and marked blocked, not left to
     // hunt for a way round it (D186).
     let refusals = 0;
@@ -1739,7 +1776,7 @@ export class TaskRunner {
       }
       const keys = printsKeys(toolName, input);
       if (keys) return { behavior: "deny", message: keys };
-      const decision = autonomousGate(toolName, input, a.cwd, readRoots, { markitdown: settings.markitdownInTasks, folder: inFolder });
+      const decision = autonomousGate(toolName, input, a.cwd, readRoots, { markitdown: settings.markitdownInTasks, folder: inFolder, scratch });
       // A question nobody can answer is not the sandbox saying no: it gets its own message, uncounted.
       if (decision.behavior === "deny" && toolName !== "AskUserQuestion") return refuse(decision.message);
       return decision;
@@ -1774,7 +1811,7 @@ export class TaskRunner {
             const browser = browserDecision(name, input, true, a.cwd, browserDir, browserReach);
             if (browser?.behavior === "allow") return {};
             if (browser?.behavior === "deny") return deny(refuse(browser.message).message);
-            const decision = autonomousGate(name, input, a.cwd, readRoots, { markitdown: settings.markitdownInTasks, folder: inFolder });
+            const decision = autonomousGate(name, input, a.cwd, readRoots, { markitdown: settings.markitdownInTasks, folder: inFolder, scratch });
             if (decision.behavior === "deny") return deny(refuse(decision.message).message);
             const written = PATH_KEYS[name] ? input[PATH_KEYS[name]] : undefined;
             if (typeof written === "string") {
@@ -2186,6 +2223,18 @@ export class TaskRunner {
    * "passed before another task landed" is not the same as "passes now". Only then is the branch
    * merged, which by that point cannot conflict.
    */
+  /**
+   * The project's union-merged files, put where git reads them before anything merges or previews a
+   * merge (D404). Never in the way: a repository git cannot write to merges as it always did.
+   */
+  private async mergeAttributes(project: Project): Promise<void> {
+    try {
+      await this.git.syncUnionFiles?.(project.path, project.merge.unionFiles ?? []);
+    } catch {
+      // the merge itself will say what is wrong with the repository
+    }
+  }
+
   private async landBranch(project: Project, task: Task): Promise<"landed" | "resolving"> {
     const policy = project.merge;
     const branch = task.branch!;
@@ -2196,6 +2245,7 @@ export class TaskRunner {
     this.merging.set(project.id, new Promise<void>((r) => (release = r)));
     await previous;
     try {
+      await this.mergeAttributes(project);
       // Landing while the checkout has uncommitted work risks entangling it in a merge commit.
       if (await this.git.isDirty(project.path)) {
         throw new ConflictError(
@@ -2217,7 +2267,10 @@ export class TaskRunner {
             this.beginResolution(task, base, true);
             return "resolving";
           }
-          throw new ConflictError(`${note} Open the task's worktree at ${task.worktree_path} and resolve it, or use Follow-up to redo the work on the current code.`);
+          // Kept on the card, not only in the error: it is what shows Fix now. Without it the card had
+          // no way forward but a worktree path to resolve by hand — Approve just failed again and again.
+          this.setTask(task.id, { conflict_risk: { base, files: update.conflicts, checked_at: nowIso() } });
+          throw new ConflictError(`${note} Press Fix now to have Claude combine both changes in this task's own copy, then approve again.`);
         }
         // Re-verify against the combined result: passing before another task landed proves nothing.
         if (update.pulled > 0 && policy.verifyBeforeMerge) {
@@ -2293,6 +2346,7 @@ export class TaskRunner {
     let why = "";
     try {
       await this.git.commitAll(wt, `kanban: ${task.title}`);
+      await this.mergeAttributes(project);
       pre = await this.git.headSha(wt);
       if (!pre) throw new Error("the task's branch has no commit to start from");
       const baseSha = await this.git.revParse(project.path, r.base);
@@ -2517,6 +2571,7 @@ export class TaskRunner {
       if (!["review", "failed", "backlog"].includes(task.status)) throw new ConflictError("Wait for the task to finish before resolving its conflict.");
       const base = project.merge.baseBranch?.trim() || (await this.git.currentBranch(project.path));
       await this.git.commitAll(task.worktree_path, `kanban: ${task.title}`);
+      await this.mergeAttributes(project);
       const preview = await this.git.previewMerge(task.worktree_path, "HEAD", base);
       if (preview.clean) {
         // Nothing to resolve after all (the base moved again): bring it in now, it is cheap and safe.
@@ -2541,6 +2596,7 @@ export class TaskRunner {
     } catch {
       return;
     }
+    await this.mergeAttributes(project);
     const tasks = this.repo.listTasks({ project_id: projectId }).filter((t) => t.branch && t.worktree_path && t.status !== "done" && (!onlyTaskId || t.id === onlyTaskId));
     for (const t of tasks) {
       if (t.resolution && ["resolving", "checking", "reviewing"].includes(t.resolution.state)) continue;
@@ -3044,6 +3100,39 @@ export class TaskRunner {
   }
 
   private usageTimer: NodeJS.Timeout | null = null;
+  private baseTimer: NodeJS.Timeout | null = null;
+  /** projectId → the base commit its cards' conflict warnings were last worked out against. */
+  private baseSeen = new Map<string, string>();
+
+  /**
+   * The base also moves without the board: your own commit, a pull. The warnings were only worked out
+   * again after a board landing, so cards in Review kept saying nothing until Approve failed on them.
+   * One rev-parse per project with open branches; the merge preview runs only when the base moved.
+   */
+  async checkBasesMoved(): Promise<void> {
+    for (const p of this.repo.listProjects()) {
+      if (!existsSync(p.path)) continue;
+      if (!this.repo.listTasks({ project_id: p.id }).some((t) => t.branch && t.worktree_path && t.status !== "done")) continue;
+      try {
+        const base = p.merge.baseBranch?.trim() || (await this.git.currentBranch(p.path));
+        const sha = await this.git.revParse(p.path, base);
+        if (!sha || this.baseSeen.get(p.id) === sha) continue;
+        this.baseSeen.set(p.id, sha);
+        await tracked(p.path, this.refreshConflictRisk(p.id));
+      } catch {
+        // a repository git cannot read right now is looked at again on the next tick
+      }
+    }
+  }
+
+  /** Server only, not tests. */
+  watchBases(everyMs = 30_000): void {
+    if (this.baseTimer) return;
+    const tick = () => void this.checkBasesMoved().catch(() => undefined);
+    tick();
+    this.baseTimer = setInterval(tick, everyMs);
+    this.baseTimer.unref();
+  }
 
   /** Keeps the meter current: now, then every few minutes. Free — see readUsage. Server only, not tests. */
   pollUsage(everyMs = 5 * 60_000): void {
@@ -3963,6 +4052,7 @@ export class TaskRunner {
       // No busy check here: `hold` made it on the way in, and from inside the hold it is always true.
       const base = project.merge.baseBranch?.trim() || (await this.git.currentBranch(project.path));
       await this.git.commitAll(task.worktree_path, `kanban: work in progress on ${task.title}`);
+      await this.mergeAttributes(project);
       const res = await this.git.updateFromBase(task.worktree_path, base, project.merge.strategy === "rebase" ? "rebase" : "merge");
       if (!res.ok) throw new ConflictError(`"${base}" conflicts with this task in: ${res.conflicts.join(", ")}. The worktree is unchanged.`);
       if (res.pulled) this.setTask(taskId, { note: `Updated from "${base}" (${res.pulled} commit${res.pulled === 1 ? "" : "s"}).` });

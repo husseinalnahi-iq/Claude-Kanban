@@ -125,10 +125,8 @@ function schemaFor(labelVocabulary: string[]) {
       minItems: 1,
       maxItems: 3,
       description:
-        "The stages this task actually needs, in order, each with the cheapest model tier that can do it well. " +
-        "Most work does NOT need a plan stage or the strong tier: a one-file change is one `code` stage on `cheap` or `balanced`. " +
-        "Reserve `strong` for work that is genuinely hard to get right — tricky logic, a design with real trade-offs, something touching many files at once. " +
-        "Reserve `plan` for work where deciding the approach is the hard part, and `review` for work where a mistake would be expensive or hard to spot.",
+        "The stages this task needs, in order. The usual pipeline is `plan` on `strong` at `high`, `code` on `strong` at `medium` (`high` when the logic is tricky, or it touches money or a live system), and `review` on `balanced` at `high`. " +
+        "A small, clearly specified change may leave out `plan` or `review`. `cheap` only for purely mechanical work (a rename, a copy change).",
       items: {
         type: "object",
         additionalProperties: false,
@@ -136,7 +134,7 @@ function schemaFor(labelVocabulary: string[]) {
         properties: {
           stage: { type: "string", enum: ["plan", "code", "review"] },
           tier: { type: "string", enum: ["cheap", "balanced", "strong"], description: "cheap = small fast model; balanced = the everyday model; strong = the most capable and most expensive." },
-          effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max"], description: "How long it may think. `low` for mechanical work in a one-stage change. A pipeline with a `plan` stage runs every stage at `high` or above: `high` as the rule, `xhigh` or `max` for a stage that is genuinely hard or risky." },
+          effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max"], description: "How long it may think. `high` for plan and review, `medium` or `high` for code, `low` only for mechanical work. `xhigh` and `max` are rare: only when the request asks for them or one stage is exceptionally hard; lean away from them." },
         },
       },
     },
@@ -192,8 +190,8 @@ Rules:
 - Default to ONE task. Each subtask re-sends the system prompt, the skills and the context, and runs its own plan/code/review stages: three subtasks cost roughly three times one task. Splitting is only worth that when the parts can genuinely be built and verified separately, or when they must be owned by different sessions because they touch different files.
 - If the whole change could be described in one sentence, or it lives in a single file, do not split it: return no subtasks.
 - Split only into parts that can be built and verified separately, and give each the files it will touch. Two subtasks that edit the same file must depend on each other — parallel sessions editing one file overwrite each other.
-- Choose the pipeline honestly. The strong tier and high effort cost several times what the cheap tier costs, and most tasks do not need them; a rename, a copy change, a config tweak or a small bug fix is one \`code\` stage on \`cheap\` or \`balanced\` at \`low\` effort. Spending more than the work needs is a defect, not caution.
-- Once a task needs a \`plan\` stage, every stage runs at \`high\` effort or above: \`high\` as the rule, \`xhigh\` or \`max\` for the stage that is genuinely hard (subtle logic, money, many systems that must agree). Say in \`pipeline_reason\` which stage you raised and why.
+- Choose the pipeline from the board's usual one: \`plan\` on \`strong\` at \`high\`, \`code\` on \`strong\` at \`medium\` (or \`high\` when the logic is tricky, or it touches money or a live system), \`review\` on \`balanced\` at \`high\`. Leave out \`plan\` or \`review\` for a small, clearly specified change; use \`cheap\` only for purely mechanical work.
+- \`xhigh\` and \`max\` are rare. Use them only when the request asks for them, or when one stage is exceptionally hard (money moving across several systems that must agree), and say in \`pipeline_reason\` which stage and why. When in doubt, \`high\`.
 - Size is not the only measure: a change that touches a live or production system, accounting or money, or is hard to reverse gets \`strong\` on its code stage however small it looks. A wrong ledger costs more than the tokens. Only reading one to report a value is not that: size a lookup by how hard it is to find.
 - Priority is a suggestion for the human: p0 only for "production is broken or everything is blocked". Most things are p2.
 - Be honest in \`confidence\`. A vague one-line request rarely deserves more than 0.5.`;
@@ -302,14 +300,15 @@ export async function triageTask(input: TriageInput, queryFn: QueryFn = query as
     .slice(0, 3)
     .map((x) => ({
       stage: String(x.stage) as StageName,
-      tier: TIERS.includes(x.tier as Tier) ? (x.tier as Tier) : "balanced",
-      effort: EFFORTS.includes(x.effort as Effort) ? (x.effort as Effort) : "medium",
+      // Missing or unknown: the board's usual stage (D407) — plan and code strong, review balanced.
+      tier: TIERS.includes(x.tier as Tier) ? (x.tier as Tier) : String(x.stage) === "review" ? "balanced" : "strong",
+      effort: EFFORTS.includes(x.effort as Effort) ? (x.effort as Effort) : String(x.stage) === "code" ? "medium" : "high",
     }))
     // Whatever the model said: live-system work is never sized down on its code stage (D191).
     .map((x) => (liveChanges && x.stage === "code" ? { ...x, tier: "strong" as Tier, effort: atLeast(x.effort, "high") } : x));
-  // Work worth planning is worth thinking through at every step: high is the floor there, and the
-  // user raises or lowers it on the setup card before anything runs (D366).
-  if (stages.some((x) => x.stage === "plan")) stages.forEach((x) => (x.effort = atLeast(x.effort, "high")));
+  // Work worth planning gets a plan and a review that think hard, and a code stage at medium or above:
+  // the owner's usual pipeline (D407, amends D366). The setup card can still raise or lower any of them.
+  if (stages.some((x) => x.stage === "plan")) stages.forEach((x) => (x.effort = atLeast(x.effort, x.stage === "code" ? "medium" : "high")));
   // A pipeline with no code stage would never change anything, whatever the model said.
   // The model's reason was written for the tier it picked; say when the board overrode it, so the
   // card does not read "balanced tier" next to a strong model.

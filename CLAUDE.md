@@ -47,6 +47,8 @@ task streams its page" — re-run it alone before chasing it.
   read-only and free (D370, D375).
 - `server/scripts/rounds-check.ts`: real Haiku runs (cents) that check a round continues its coder's session
   in the recreated folder and hits the cache, and that a fork gets a session of its own (D375, D376).
+- `server/scripts/measure-plan-handoff.ts`: what a code stage reads again that its plan stage read, against
+  what continuing the plan's session would cost — read-only and free; it decided D408 (stay separate).
 
 ## How it fits together
 

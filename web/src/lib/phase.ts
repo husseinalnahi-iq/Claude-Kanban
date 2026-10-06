@@ -19,6 +19,11 @@ export function phase(card: TaskCard, asking?: boolean): { text: string; tone: s
       : { text: `needs you · ${who}`, tone: "border-rose/60 text-rose", title: `${who} ran out of credit — open the task to switch provider, or top it up and try again` };
   }
   if (card.status === "paused") return { text: "paused · limit", tone: "border-iris/50 text-iris", title: "Paused by your Claude usage limit; it carries on by itself" };
+  // Approve met a conflict: Claude is combining it with what landed meanwhile, and it lands by itself
+  // after. "coding" here read as the work being redone after you approved it.
+  if (card.resolution && ["resolving", "checking", "reviewing"].includes(card.resolution.state)) {
+    return { text: "merging", tone: "border-moss/60 text-moss", title: `You approved it. It conflicted with what landed on ${card.resolution.base} meanwhile, so Claude is combining the two — it lands by itself when that passes` };
+  }
   if (card.status === "planning") return { text: "planning", tone: "border-cyan/50 text-cyan", title: "The plan stage is running" };
   const i = card.stage_states.indexOf("running");
   const stage = i >= 0 ? card.pipeline[i]?.stage : undefined;
@@ -30,26 +35,30 @@ export function phase(card: TaskCard, asking?: boolean): { text: string; tone: s
  * Whether a card waits on you, for its pulse (D383). `chip` is the word to add when nothing else on the
  * card already says so; null means another chip or panel on it says it, and a second one would only crowd it.
  */
-export function waitsOnYou(card: TaskCard, asking?: boolean): { chip: string | null; title: string } | null {
+export function waitsOnYou(card: TaskCard, asking?: boolean): { chip: string | null; title: string; action: string } | null {
   if (card.archived_at) return null;
-  const said = (title: string) => ({ chip: null, title });
-  if (card.questions?.some((q) => !q.answer)) return said("Claude asked you something — open the task to answer");
-  if (card.status === "approval") return said(phase(card, asking).title);
-  if (card.status === "paused" && (card.pause_reason === "cost" || (card.pause_reason === "provider" && !card.resume_at))) return said(phase(card).title);
-  if (card.status === "backlog" && card.setup_pending) return said("Check its mode and models, then press Start");
+  // `action` is the card's "your turn" line: chips alone were too quiet to tell a plan waiting for you
+  // from one still being written.
+  const said = (title: string, action: string) => ({ chip: null, title, action });
+  const open = card.questions?.filter((q) => !q.answer).length ?? 0;
+  if (card.status === "approval" && card.plan_gate && !asking) return said(phase(card, asking).title, "Approve the plan");
+  if (open) return said("Claude asked you something — open the task to answer", `Answer ${open} question${open === 1 ? "" : "s"}`);
+  if (card.status === "approval") return said(phase(card, asking).title, asking ? "Answer its question" : "Allow or deny a step");
+  if (card.status === "paused" && (card.pause_reason === "cost" || (card.pause_reason === "provider" && !card.resume_at))) return said(phase(card).title, card.pause_reason === "cost" ? "Continue or stop — cost limit" : "Switch provider or top up");
+  if (card.status === "backlog" && card.setup_pending) return said("Check its mode and models, then press Start", "Check setup, then Start");
   if (card.status === "review") {
-    if (card.resolution?.state === "failed") return said("The conflict could not be resolved safely — open the task");
+    if (card.resolution?.state === "failed") return said("The conflict could not be resolved safely — open the task", "Fix the conflict");
     // Claude is still at work on it: the review stage, or combining it with what landed meanwhile.
     if (card.resolution && ["resolving", "checking", "reviewing"].includes(card.resolution.state)) return null;
     if (card.stage_states.includes("running")) return null;
-    if (card.blocked?.advisory && card.mode === "autonomous") return said("Ready for your review; some live steps were left for a supervised run");
-    return { chip: "your review", title: "Every stage finished — open it to approve, send it back or discard it" };
+    if (card.blocked?.advisory && card.mode === "autonomous") return said("Ready for your review; some live steps were left for a supervised run", "Review it — live steps left");
+    return said("Every stage finished — open it to approve, send it back or discard it", "Review and approve");
   }
   if (card.status === "failed") {
     // Stopped on purpose, or set to try again by itself: nothing to decide.
     if (card.error === "stopped by user" || card.start_at) return null;
-    if (stoppedBy(card)) return said("It was blocked — open the task for what it needs");
-    return { chip: "needs you", title: "It failed — open it to retry, change it or drop it" };
+    if (stoppedBy(card)) return said("It was blocked — open the task for what it needs", "See what it needs");
+    return said("It failed — open it to retry, change it or drop it", "Retry, change or drop it");
   }
   return null;
 }

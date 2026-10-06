@@ -7,11 +7,11 @@ import { openDb } from "../src/db.ts";
 import { Repo } from "../src/repo.ts";
 import { removeTemp } from "./helpers.ts";
 
-test("a new board allows 500 turns and $20 per stage and per task (D402)", () => {
+test("a new board allows 500 turns and $20 per stage, and $60 per task (D402)", () => {
   const s = new Repo(openDb(":memory:")).getSettings();
   assert.equal(s.maxTurnsPerStage, 500);
   assert.equal(s.maxCostPerStageUsd, 20);
-  assert.equal(s.maxCostPerTaskUsd, 20);
+  assert.equal(s.maxCostPerTaskUsd, 60);
 });
 
 test("a board still on the old ceilings takes the new ones once, and a ceiling someone chose stays (D402)", async () => {
@@ -24,7 +24,7 @@ test("a board still on the old ceilings takes the new ones once, and a ceiling s
     set.run("60", "maxTurnsPerStage");
     set.run("5", "maxCostPerStageUsd");
     set.run("40", "maxCostPerTaskUsd");
-    old.prepare("DELETE FROM settings WHERE key = 'ceilingsRaisedD402'").run();
+    old.prepare("DELETE FROM settings WHERE key IN ('ceilingsRaisedD402', 'taskCeiling60D402')").run();
     old.close();
 
     const upgraded = new Repo(openDb(file));

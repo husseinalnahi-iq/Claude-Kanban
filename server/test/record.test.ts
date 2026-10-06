@@ -67,3 +67,11 @@ test("a task's outcome is what its work stage reported, not a progress line left
   assert.equal(outcomeLine([run("code", "x", "failed")], "Working on it"), "Working on it", "nothing finished: the summary is all there is");
   assert.equal(outcomeLine([], null), null);
 });
+
+test("a report written to a template gives its TL;DR as the outcome, never its model suggestion (D404)", () => {
+  const run = (result: string) => ({ stage: "code" as never, role: "stage" as const, status: "success" as never, result_md: result });
+  const report = "🎛️ Suggested: stay on **Opus 5.5** + **High** — live writes.\n\n## 🏁 Supplier field editable — ✅ done\n\n**TL;DR:** The drop list can now be changed on existing suppliers. Nothing is needed from you.\n\n### ✅ Done";
+  assert.equal(outcomeLine([run(report)], null), "The drop list can now be changed on existing suppliers. Nothing is needed from you.");
+  assert.equal(outcomeLine([run("🎛️ Suggested: stay on Opus.\n## 🏁 Supplier field editable — ✅ done\nmore")], null), "Supplier field editable — ✅ done", "no TL;DR: the headline");
+  assert.equal(outcomeLine([run("**Switch to** Sonnet 5 + Low.\nRenamed the files.")], null), "Renamed the files.");
+});

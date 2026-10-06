@@ -551,6 +551,11 @@ export interface MergePolicy {
   autoLandResolved: boolean;
   /** Who double-checks a resolution. null: the model that wrote the task (D357). */
   resolveReviewer: { provider: string; model: string; effort: Effort } | null;
+  /**
+   * Files every task only adds to — a decisions log, a changelog. Merged by keeping both sides' new
+   * lines (git's union merge), so two tasks that each added an entry never conflict over it (D404).
+   */
+  unionFiles: string[];
 }
 
 export const DEFAULT_MERGE: MergePolicy = {
@@ -561,6 +566,7 @@ export const DEFAULT_MERGE: MergePolicy = {
   onConflict: "claude",
   autoLandResolved: true,
   resolveReviewer: null,
+  unionFiles: [],
 };
 
 /** One check the board ran on a conflict resolution (D355). */

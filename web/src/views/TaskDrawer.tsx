@@ -655,7 +655,7 @@ function RoundsPanel({ d }: { d: TaskDetail }) {
   return (
     <div className="border-b border-ink-800 px-5 py-3">
       <div className="flex items-center gap-2 text-[12px]">
-        <span className="font-medium text-ink-100">What it remembers</span>
+        <span className="font-medium text-ink-100">Anything more on this?</span>
         {memory.memory === "warm" && memory.warmUntil ? (
           <span className="h-1.5 w-24 overflow-hidden rounded-full bg-ink-800" title={memoryLine(memory)}>
             <span className="block h-full rounded-full bg-moss transition-[width] duration-500" style={{ width: `${Math.min(100, (100 * leftMin) / MEMORY_WARM_MIN)}%` }} />
@@ -684,33 +684,33 @@ function RoundsPanel({ d }: { d: TaskDetail }) {
             className={`${inputCls} min-h-[56px] text-[12.5px]`}
             value={ask}
             onChange={(e) => setAsk(e.target.value)}
-            placeholder={`What should round ${next} do? Its coder continues with what it remembers.`}
+            placeholder="What else should it do? It picks up where it left off, with everything it already knows about this work."
           />
           <div className="flex flex-wrap items-center gap-2">
             <Button
               size="sm"
               variant="primary"
               disabled={busy || !ask.trim()}
-              title={`Its coder continues in its own session: ${price(memory.continueUsd, memory.continueWeight)}, against ${price(memory.freshUsd, memory.freshWeight)} for a new card finding the same files`}
+              title={`Round ${next} of this same card: its coder carries on in its own session, ${price(memory.continueUsd, memory.continueWeight)}, against ${price(memory.freshUsd, memory.freshWeight)} for a new card finding the same files. It gets its own steps, changes and Approve.`}
               onClick={() => run(async () => {
                 await api.startRound(t.id, { request: ask.trim(), review });
                 setAsk("");
               })}
             >
-              Start round {next}
+              Continue on this card
             </Button>
             <Button
               size="sm"
               variant="outline"
               disabled={busy || !ask.trim()}
-              title="A new card that starts with a copy of this card's memory, for new work beside it. This card stays as it is."
+              title="For separate work beside this one: a new card that starts with a copy of what this card knows. This card stays as it is."
               onClick={() => run(async () => {
                 const created = await api.forkTask(t.id, { request: ask.trim(), review });
                 setAsk("");
                 navigate({ taskId: created.id });
               })}
             >
-              Branch a new card
+              As a new card
             </Button>
             {hasReview ? (
               <label className="flex cursor-pointer items-center gap-1.5 text-[11.5px] text-ink-300" title="A fresh review of this round's changes after the coder; worth it for new work, not for a small change">
@@ -719,7 +719,7 @@ function RoundsPanel({ d }: { d: TaskDetail }) {
               </label>
             ) : null}
             <span className="text-[11px] text-ink-500">
-              round {price(memory.continueUsd, memory.continueWeight)} · new card {price(memory.freshUsd, memory.freshWeight)}
+              this card {price(memory.continueUsd, memory.continueWeight)} · new card {price(memory.freshUsd, memory.freshWeight)}
             </span>
           </div>
           <ErrorLine error={error} />
@@ -738,6 +738,10 @@ function Actions({ d }: { d: TaskDetail }) {
   // A task in the project folder has work to discard once it has written something (D398).
   const hasWork = !!(t.branch || t.worktree_path || (t.in_folder && t.footprint.touched.length));
   const inFolder = t.in_folder && !t.branch;
+  // A done card that still remembers offers "Anything more on this?" above, which covers a follow-up
+  // with its memory; a third button doing nearly the same read as a different thing (D406).
+  const memory = useTaskMemory(t.id, `${t.status}:${t.updated_at}:${d.runs.length}`);
+  const offersMore = t.status === "done" && !!memory && memory.memory !== "gone";
   const { projects } = useAppData();
   const isGit = projects.find((p) => p.id === t.project_id)?.isGit ?? true;
   const live = d.busy;
@@ -846,7 +850,7 @@ function Actions({ d }: { d: TaskDetail }) {
           </div>
         ) : null}
         {t.status === "failed" && !live && !stoppedBy(t) ? <Button variant="ghost" busy={busy} onClick={() => run(() => api.reject(t.id, null))}>Back to backlog</Button> : null}
-        {["done", "review"].includes(t.status) && !live ? (
+        {["done", "review"].includes(t.status) && !live && !offersMore ? (
           <Button busy={busy} title="Start a fresh task that carries this one's outcome — better than reopening an old session days later" onClick={() => void followUp()}>
             ↪ Follow-up task
           </Button>
@@ -972,7 +976,7 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
                   {d.task.live ? <Chip className="border-rose/50 text-rose" title="Touches a live system: plan approval is on and review runs on the live review model">prod</Chip> : null}
                   <Chip className={PRIORITY_META[d.task.priority].tone} title={PRIORITY_META[d.task.priority].title}>{d.task.priority}</Chip>
                   <Chip className={TYPE_META[d.task.type].tone}>{TYPE_META[d.task.type].short}</Chip>
-                  <span className="font-mono text-[10.5px] text-ink-500">{d.task.id}</span>
+                  <CopyId id={d.task.id} />
                   <button
                     className={`ml-auto cursor-pointer rounded border px-1.5 py-px font-mono text-[11px] transition-colors ${
                       showCost ? "border-amber/60 text-amber" : "border-transparent text-ink-400 hover:border-ink-600 hover:text-ink-200"
@@ -1064,5 +1068,34 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
         )}
       </aside>
     </div>
+  );
+}
+
+/** The task id, with a copy button: it is what you paste into a chat or a terminal to point at this card. */
+function CopyId({ id }: { id: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className="group/id flex cursor-pointer items-center gap-1 font-mono text-[10.5px] text-ink-500 hover:text-ink-200"
+      title={copied ? "Copied" : "Copy the task ID"}
+      onClick={(e) => {
+        e.stopPropagation();
+        void navigator.clipboard?.writeText(id).then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        });
+      }}
+    >
+      {id}
+      {copied ? (
+        <span className="text-moss">✓ copied</span>
+      ) : (
+        <svg aria-hidden viewBox="0 0 16 16" className="h-3 w-3 opacity-60 group-hover/id:opacity-100" fill="none" stroke="currentColor" strokeWidth="1.5">
+          <rect x="5" y="5" width="8" height="9" rx="1.5" />
+          <path d="M3 11V3.5A1.5 1.5 0 0 1 4.5 2H10" />
+        </svg>
+      )}
+    </button>
   );
 }

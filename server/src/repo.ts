@@ -597,7 +597,7 @@ export class Repo {
       autoUpdateEngine: (m.get("autoUpdateEngine") ?? "true") !== "false",
       lastModelMove: json<Settings["lastModelMove"]>(m.get("lastModelMove"), null),
       liveView: (m.get("liveView") ?? "true") !== "false",
-      maxCostPerTaskUsd: Number(m.get("maxCostPerTaskUsd") ?? 20),
+      maxCostPerTaskUsd: Number(m.get("maxCostPerTaskUsd") ?? 60),
       maxRepeatedToolCalls: Number(m.get("maxRepeatedToolCalls") ?? 8),
       eventRetentionDays: Number(m.get("eventRetentionDays") ?? 30),
       blockedCommands: json(m.get("blockedCommands"), DEFAULT_BLOCKED_COMMANDS),

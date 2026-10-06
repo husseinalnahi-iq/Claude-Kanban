@@ -24,6 +24,9 @@ export function GitSettings({ project }: { project: ProjectWithGit }) {
   // change, and a new object with the same values used to wipe choices made here and not yet saved.
   useEffect(() => setM(project.merge), [project.id, JSON.stringify(project.merge)]); // eslint-disable-line react-hooks/exhaustive-deps
   const set = (patch: Partial<MergePolicy>) => setM({ ...m, ...patch });
+  // Its own text while typing: rebuilding it from the list would eat the line break just typed.
+  const [unionText, setUnionText] = useState((project.merge.unionFiles ?? []).join("\n"));
+  useEffect(() => setUnionText((project.merge.unionFiles ?? []).join("\n")), [project.id, JSON.stringify(project.merge.unionFiles ?? [])]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <section className="space-y-5">
@@ -126,6 +129,21 @@ export function GitSettings({ project }: { project: ProjectWithGit }) {
                 </label>
               ))}
             </div>
+          </Field>
+
+          <Field
+            label="Files every task only adds to"
+            hint="One per line, as the project names them — a decisions log, a changelog, a task list. When two tasks each added an entry, both entries are kept, so they never conflict over it. Only for files that are added to: a line both tasks changed would be kept twice."
+          >
+            <textarea
+              className={`${inputCls} min-h-[72px] font-mono text-[12px]`}
+              placeholder={"DECISIONS.md\nCHANGELOG.md"}
+              value={unionText}
+              onChange={(e) => {
+                setUnionText(e.target.value);
+                set({ unionFiles: e.target.value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean) });
+              }}
+            />
           </Field>
 
           {m.onConflict === "claude" ? (

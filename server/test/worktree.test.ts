@@ -5,7 +5,7 @@ import { removeTemp } from "./helpers.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
-import { addWorktree, commitAll, diffTask, mergeTask, removeWorktree, listWorktrees, isGitRepo, currentBranch } from "../src/git/worktree.ts";
+import { addWorktree, commitAll, diffTask, mergeTask, removeWorktree, listWorktrees, isGitRepo, currentBranch, syncUnionFiles } from "../src/git/worktree.ts";
 
 function git(cwd: string, ...args: string[]) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -154,6 +154,41 @@ test("removing a worktree takes the copied key files with it (D396)", async () =
     const wt = await worktreeWithKeys(repo, "t_keys1");
     await removeWorktree(repo, "t_keys1", { deleteBranch: "force" });
     assert.equal(existsSync(wt.path), false, "the folder is gone, keys and all");
+  } finally {
+    await removeTemp(repo);
+  }
+});
+
+test("the board keeps its own block in the repository's attributes and leaves everyone else's lines alone (D404)", async () => {
+  const repo = makeRepo();
+  try {
+    const file = join(repo, ".git", "info", "attributes");
+    mkdirSync(join(repo, ".git", "info"), { recursive: true });
+    writeFileSync(file, "*.png binary\n");
+    await syncUnionFiles(repo, ["DECISIONS.md", "docs/my log.md"]);
+    assert.match(readFileSync(file, "utf8"), /^\*\.png binary\n# --- Claude Kanban[^\n]*\nDECISIONS\.md merge=union\n"docs\/my log\.md" merge=union\n# --- end Claude Kanban ---\n$/);
+    await syncUnionFiles(repo, ["CHANGELOG.md"]);
+    assert.doesNotMatch(readFileSync(file, "utf8"), /DECISIONS/, "the block is replaced, not added to");
+    await syncUnionFiles(repo, []);
+    assert.equal(readFileSync(file, "utf8"), "*.png binary\n", "an empty list takes the block away");
+  } finally {
+    await removeTemp(repo);
+  }
+});
+
+test("a tracked .env.example is not taken for a key: the merged branch still goes and its last commit changes nothing", async () => {
+  const repo = makeRepo();
+  try {
+    writeFileSync(join(repo, ".env.example"), "KEY=\n");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-q", "-m", "example settings");
+    const wt = await worktreeWithKeys(repo, "t_keys3");
+    writeFileSync(join(wt.path, "game.js"), "play()\n");
+    await commitAll(wt.path, "kanban: game");
+    await mergeTask(repo, wt.branch, "Merge kanban/t_keys3");
+    await removeWorktree(repo, "t_keys3", { deleteBranch: "safe" });
+    assert.equal(git(repo, "branch", "--format=%(refname:short)"), "main", "git counts the branch as merged and deletes it");
+    assert.equal(readFileSync(join(repo, ".env.example"), "utf8"), "KEY=\n");
   } finally {
     await removeTemp(repo);
   }

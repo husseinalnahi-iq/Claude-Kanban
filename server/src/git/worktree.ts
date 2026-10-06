@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import type { DiffFile, MergeStrategy } from "../types.ts";
 import { removeKeyCopies } from "./bootstrap.ts";
@@ -202,6 +202,11 @@ export async function commitOnly(projectPath: string, files: string[], message: 
     if (existsSync(join(gitDir, marker))) throw new GitError(`Your checkout is in the middle of ${what}. Finish or abort it, then approve again.`, null, "", "");
   }
   if ((await currentBranch(projectPath)) === "HEAD") throw new GitError("Your checkout is not on a branch (detached HEAD). Check out a branch, then approve again.", null, "", "");
+  // A helper the task wrote and deleted again is neither on disk nor known to git, and naming it made
+  // `git add` fail the whole Approve ("pathspec did not match"). A tracked file it deleted still counts.
+  const known = new Set((await git(projectPath, ["ls-files", "--", ...files])).split(/\r?\n/).filter(Boolean));
+  files = files.filter((f) => known.has(f.replace(/\\/g, "/")) || existsSync(join(projectPath, f)));
+  if (!files.length) return null;
   await git(projectPath, ["add", "-A", "--", ...files]);
   if (!(await git(projectPath, ["diff", "--cached", "--name-only", "--", ...files])).trim()) return null;
   await git(projectPath, ["commit", "-q", "--no-verify", "--only", "-m", message, "--", ...files]);
@@ -258,6 +263,31 @@ export interface UpdateResult {
  * the checkout you are sitting in is never touched. On a conflict the merge/rebase is aborted and the
  * conflicting files are reported; the worktree is left exactly as it was.
  */
+const UNION_START = "# --- Claude Kanban: files merged by keeping both sides (Settings → Git & merging) ---";
+const UNION_END = "# --- end Claude Kanban ---";
+
+/**
+ * Makes git merge these files by keeping both sides' new lines (D404). Written to the repository's own
+ * `info/attributes` — never committed, shared by every worktree, and read by `merge-tree` too, so the
+ * conflict warning agrees with the merge. Only the board's marked block is touched; lines anyone else
+ * wrote stay as they are. An empty list removes the block.
+ */
+export async function syncUnionFiles(projectPath: string, files: string[]): Promise<void> {
+  const file = join(await gitPath(projectPath, "--git-common-dir"), "info", "attributes");
+  const before = existsSync(file) ? readFileSync(file, "utf8") : "";
+  const lines = before.split(/\r?\n/);
+  const a = lines.indexOf(UNION_START);
+  const b = lines.indexOf(UNION_END, a);
+  const others = a >= 0 && b > a ? [...lines.slice(0, a), ...lines.slice(b + 1)] : lines;
+  const kept = others.join("\n").replace(/\n+$/, "");
+  // A path with a space is written in quotes, which git reads as one pattern.
+  const block = files.length ? [UNION_START, ...files.map((f) => `${/\s/.test(f) ? `"${f}"` : f} merge=union`), UNION_END].join("\n") : "";
+  const after = [kept, block].filter(Boolean).join("\n") + (kept || block ? "\n" : "");
+  if (after === before) return;
+  mkdirSync(join(file, ".."), { recursive: true });
+  writeFileSync(file, after);
+}
+
 export async function updateFromBase(worktreePath: string, base: string, how: "merge" | "rebase"): Promise<UpdateResult> {
   const branch = (await git(worktreePath, ["rev-parse", "--abbrev-ref", "HEAD"])).trim();
   const behind = Number((await git(worktreePath, ["rev-list", "--count", `${branch}..${base}`])).trim()) || 0;

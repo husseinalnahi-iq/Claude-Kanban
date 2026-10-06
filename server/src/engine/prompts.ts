@@ -52,6 +52,8 @@ export interface PromptCtx {
   live?: boolean;
   /** An autonomous live task that may reach the live system itself (Settings: autonomousLive, D385). */
   liveAllowed?: boolean;
+  /** An autonomous run may also edit the skills Claude loads, here (D406). */
+  skillsDir?: string | null;
   /** An autonomous task working in the project folder itself, not a worktree (D398). */
   inFolder?: boolean;
   /** Settings → Images is on: the run has `generate_image` (D262). */
@@ -64,6 +66,8 @@ export interface PromptCtx {
   earlierResults?: { stage: StageName; result: string }[];
   skills: string[];
   messages: { from: string; body: string }[];
+  /** The board_ask questions already on the card, with their default and any answer: a report repeats none of them as an open ask. */
+  cardQuestions?: { text: string; default: string | null; answer: string | null }[];
   /** Why a human sent this task back to Backlog, if they did. */
   rejectNote?: string | null;
   /** Supervised: files already uncommitted in the checkout before this run, not this task's (D204). */
@@ -182,11 +186,15 @@ function sandboxNote(ctx: PromptCtx): string | null {
       (ctx.stage === "plan"
         ? "Plan the live steps as steps of this task, not as work for a later supervised run."
         : "Do the live steps yourself, following the live-system rules below; do not leave them for a supervised run.") +
-      " Let scripts load the key files; never print them. Use `board_report_blocked` with needs \"supervised\" only for access that is still missing."
+      " Let scripts load the key files; never print them." +
+      skillsLine(ctx) +
+      " Use `board_report_blocked` with needs \"supervised\" only for access that is still missing."
     );
   }
   return (
-    `This run is sandboxed: it can only reach files inside ${where}, and no live system that needs credentials from outside it. ` +
+    `This run is sandboxed: it can only reach files inside ${where}, and no live system that needs credentials from outside it.` +
+    skillsLine(ctx) +
+    " " +
     "If part of the task needs more than that — a live database, ERP or other production system, credentials, files in the main checkout, a website that needs signing in — " +
     "call `board_report_blocked` with needs \"supervised\" once, saying exactly what access you need and for which steps. It puts a suggestion on the card and does not stop the run. " +
     "Do not look for a way round the sandbox. " +
@@ -196,11 +204,34 @@ function sandboxNote(ctx: PromptCtx): string | null {
   );
 }
 
+/**
+ * Anything Claude Code can do, a run here can do (owner, D406): that includes keeping the skills up to
+ * date, which projects ask for after a change. Not on the branch, so the report has to name them.
+ */
+function skillsLine(ctx: PromptCtx): string {
+  if (!ctx.skillsDir || ctx.stage === "review") return "";
+  return ` The skills Claude loads are in ${ctx.skillsDir} and you may edit them: when the task or the project asks for a skill to be updated, do it there yourself, with its absolute path. They are not part of your branch, so name each skill file you changed in your report.`;
+}
+
 /** A sandboxed run leaves the live steps for a supervised one; review must not fail it for that alone (D382). */
 const LEFT_FOR_SUPERVISED =
   "This run was sandboxed. Steps that need a live system, credentials or files outside the task's folder, listed under `## Left for a supervised run`, are not defects of this run: " +
   "mark each ⏸ left for a supervised run, check that it is listed with what it does and how to check it, and judge everything else. " +
   "Do not answer `CHANGES_NEEDED` or `BLOCKED` for those steps alone — the card already suggests the supervised run.";
+
+/**
+ * Review of an autonomous live task reads the live system back, and was never told where the keys
+ * are: one reviewer spent five turns looking for them and was refused once going outside (D404).
+ */
+function liveReviewNote(ctx: PromptCtx): string | null {
+  if (ctx.mode !== "autonomous" || !ctx.liveAllowed || (ctx.capabilities ?? "sdk") !== "sdk") return null;
+  return (
+    (ctx.inFolder
+      ? "The project's key files that git leaves out (such as .env) are in this folder, "
+      : "The project's key files that git leaves out (such as .env) were copied into your folder, ") +
+    "so read the live system back with the project's own scripts or the helpers the code stage wrote. Let scripts load the key files; never print them, and do not look for keys anywhere else."
+  );
+}
 
 /** A plan the stage must work to: the one just before it, or (for review) any earlier one. */
 const hasPlan = (ctx: PromptCtx) => ctx.previousStage === "plan" || (ctx.earlierResults ?? []).some((e) => e.stage === "plan");
@@ -287,6 +318,7 @@ function stageInstructions(ctx: PromptCtx): string {
         ...(plan ? [REVIEW_PLAN] : []),
         "Fix only clear defects; do not expand scope. A previous stage that says it was blocked or only partly done has not delivered: never approve it.",
         ...(ctx.mode === "autonomous" && !ctx.liveAllowed ? [LEFT_FOR_SUPERVISED] : []),
+        ...(liveReviewNote(ctx) ? [liveReviewNote(ctx)!] : []),
         VERDICTS,
       ].join("\n");
     }
@@ -404,6 +436,13 @@ export function buildStagePrompt(ctx: PromptCtx): string {
     const shown = ctx.messages.slice(-LIMITS.messages);
     out.push(`\n## Messages for this task\n${shown.map((m) => `- from ${m.from}: ${clamp(m.body, LIMITS.messageBody)}`).join("\n")}`);
   }
+  if (ctx.cardQuestions?.length) {
+    // A question already on the card is seen there, answered there, and its answer reaches the next
+    // stage as a message: listed again under the report's asks, it reads as a second question after the
+    // person has answered, beside an Approve button that says the opposite.
+    const lines = ctx.cardQuestions.map((q) => `- ${clamp(q.text, LIMITS.messageBody)} → ${q.answer ? `answered: ${q.answer}` : `not answered yet; carried on with: ${q.default ?? "your own default"}`}`);
+    out.push(`\n## Questions already on the card\n${lines.join("\n")}\nThe person sees and answers these on the card. In your report list each once among what was done, as the choice taken (the answer, or the default) — never again as something the person still has to decide.`);
+  }
   if (ctx.images?.length) {
     // Images arrive already described by the cheap vision model, and text files carry their own first
     // few KB, so this stage spends none of its own (often far more expensive) tokens on either. The
@@ -448,6 +487,7 @@ export function buildStagePrompt(ctx: PromptCtx): string {
     out.push(
       `\n## Working directory\nYou are in a git worktree on branch \`${ctx.branch}\`. Edit files freely inside it. ` +
         "Do not commit, push, switch branches, or touch files outside it — the board commits your changes after this stage. " +
+        (ctx.skillsDir && ctx.mode === "autonomous" && ctx.stage !== "review" ? "(the skills folder named above is the one exception.) " : "") +
         "If the task needs anything outside it, report that with `board_report_blocked` instead of working round it.",
     );
   }

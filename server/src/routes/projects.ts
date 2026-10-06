@@ -50,6 +50,11 @@ export const mergeSchema = z.object({
   // Optional so a board page from before these existed can still save; a missing one reads as the default.
   autoLandResolved: z.boolean().optional(),
   resolveReviewer: z.object({ provider: z.string().min(1), model: z.string().trim().min(1), effort: z.enum(EFFORTS as [Effort, ...Effort[]]) }).nullable().optional(),
+  // A path in the repository, never a way out of it: no line breaks (one line per file) and no `..`.
+  unionFiles: z
+    .array(z.string().trim().min(1).max(300).regex(/^[^\r\n"]+$/).refine((p) => !/(^|[\\/])\.\.([\\/]|$)/.test(p), "a path inside the project"))
+    .max(50)
+    .optional(),
 });
 
 const createSchema = z.object({

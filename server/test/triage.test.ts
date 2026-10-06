@@ -249,7 +249,8 @@ test("the board sizes the pipeline itself, maps tiers to real models, and never 
   );
   assert.deepEqual(res!.sizing!.stages, [{ stage: "code", tier: "cheap", effort: "low" }]);
   assert.match(res!.sizing!.reason, /find-and-replace/);
-  assert.match(calls[0].prompt, /Spending more than the work needs is a defect/, "the prompt makes it account for cost");
+  assert.match(calls[0].prompt, /`plan` on `strong` at `high`, `code` on `strong` at `medium`/, "the prompt leans on the owner's usual pipeline (D407)");
+  assert.match(calls[0].prompt, /`xhigh` and `max` are rare/, "and away from the top efforts");
   assert.match(JSON.stringify(calls[0].options), /why that effort/, "the reason shown to the person covers the effort it picked, not only the model");
 
   const tiers = {
@@ -259,6 +260,22 @@ test("the board sizes the pipeline itself, maps tiers to real models, and never 
   };
   assert.deepEqual(sizedPipeline(res!.sizing, tiers), [{ stage: "code", model: "claude-haiku-4-5-20251001", effort: "low" }]);
   assert.equal(sizedPipeline(null, tiers), null);
+});
+
+test("with a plan, plan and review think at high or more and code at medium or more; a stage left vague gets the usual model (D407)", async () => {
+  const res = await triageTask(
+    { title: "x", spec_md: "", projectName: "d", mode: "classify", cwd: ".", model: "m" },
+    fakeStructured({
+      title: "x", type: "feature", priority: "p2", labels: [], spec_md: "", questions: [], confidence: 0.9, split_reason: "", subtasks: [],
+      pipeline: [{ stage: "plan", tier: "strong", effort: "low" }, { stage: "code", tier: "strong", effort: "low" }, { stage: "review" }],
+      pipeline_reason: "",
+    }),
+  );
+  assert.deepEqual(res!.sizing!.stages, [
+    { stage: "plan", tier: "strong", effort: "high" },
+    { stage: "code", tier: "strong", effort: "medium" },
+    { stage: "review", tier: "balanced", effort: "high" },
+  ]);
 });
 
 test("a sized pipeline with no code stage is discarded — it would never change anything", async () => {

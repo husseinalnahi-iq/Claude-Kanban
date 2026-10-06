@@ -219,6 +219,11 @@ const Card = memo(function Card({
       </div>
       <div className="text-[12px] font-medium leading-snug text-ink-100">{card.title}</div>
       {card.summary ? <div className="mt-1.5 line-clamp-2 text-[11px] leading-snug text-ink-300">{card.summary}</div> : null}
+      {yours ? (
+        <div className="mt-1.5 flex items-center gap-1.5 rounded-md border border-rose/50 bg-rose/10 px-2 py-1 text-[11.5px] font-semibold text-rose" title={yours.title}>
+          <span className="pulse-rose h-1.5 w-1.5 shrink-0 rounded-full bg-rose" /> Your turn: {yours.action}
+        </div>
+      ) : null}
       {/* Queued before what it needs was done: it starts by itself once that is (D289). */}
       {waiting?.length && (card.status === "queued" || card.status === "backlog") ? (
         <div className={`mt-1.5 line-clamp-2 text-[11.5px] ${waiting.some((w) => w.status === "failed") ? "text-rust" : card.status === "queued" ? "text-slate" : "text-ink-400"}`}>

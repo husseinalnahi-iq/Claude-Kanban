@@ -200,6 +200,65 @@ test("a conflict the board foresees is shown on the card, and Fix now resolves i
   }
 });
 
+test("when the project says ask, a conflicting Approve leaves the card warning about it with Fix now", async () => {
+  const a = actor({ resolve: () => BOTH });
+  const s = await scene(a.fn, { onConflict: "ask" });
+  try {
+    const mainBefore = git(s.dir, "rev-parse", "HEAD");
+    await assert.rejects(s.runner.approveTask(s.task.id), /conflicts with this task in: app\.ts[\s\S]*Fix now/);
+    const t = s.get();
+    assert.equal(t.status, "review");
+    assert.deepEqual(t.conflict_risk?.files, ["app.ts"], "the card shows the conflict, and with it Fix now");
+    assert.equal(t.conflict_risk?.base, "main");
+    assert.equal(git(s.dir, "rev-parse", "HEAD"), mainBefore, "nothing landed");
+    assert.equal(a.resolverCalls().length, 0, "Claude was not given it: the project asked to be asked");
+
+    await s.runner.resolveConflict(s.task.id);
+    await until(() => settled(s.get()));
+    await s.runner.approveTask(s.task.id);
+    assert.equal(s.get().status, "done", "Fix now, then Approve, lands it");
+    assert.equal(read(s.dir, "app.ts"), BOTH);
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test("a commit made outside the board brings up the conflict warning before anyone approves", async () => {
+  const a = actor({ resolve: () => BOTH });
+  const s = await scene(a.fn);
+  try {
+    await s.runner.checkBasesMoved();
+    assert.deepEqual(s.get().conflict_risk?.files, ["app.ts"], "the base it had not seen yet is looked at");
+
+    s.repo.updateTask(s.task.id, { conflict_risk: null });
+    await s.runner.checkBasesMoved();
+    assert.equal(s.get().conflict_risk, null, "an unchanged base is not worked out again");
+
+    writeFileSync(join(s.dir, "notes.txt"), "your own edit\n");
+    git(s.dir, "commit", "-q", "-am", "your own commit");
+    await s.runner.checkBasesMoved();
+    assert.deepEqual(s.get().conflict_risk?.files, ["app.ts"], "a commit of your own on main is noticed");
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test("a file the project merges by keeping both sides lands with no conflict, no warning and no Claude (D404)", async () => {
+  const a = actor({ resolve: () => BOTH });
+  const s = await scene(a.fn, { unionFiles: ["app.ts"] });
+  try {
+    await s.runner.refreshConflictRisk(s.project.id);
+    assert.equal(s.get().conflict_risk, null, "the warning agrees with the merge");
+    const t = await s.runner.approveTask(s.task.id);
+    assert.equal(t.status, "done");
+    assert.equal(read(s.dir, "app.ts"), BOTH, "both tasks' new lines are on main");
+    assert.equal(a.resolverCalls().length, 0);
+    assert.equal(git(s.dir, "status", "--porcelain"), "");
+  } finally {
+    await s.cleanup();
+  }
+});
+
 test("the project's verify command must pass on the combined code", async () => {
   const a = actor({ resolve: () => OURS, review: () => "VERDICT: BOTH KEPT" }); // a reviewer that misses it
   const s = await scene(a.fn);

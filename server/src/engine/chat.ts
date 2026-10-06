@@ -1,4 +1,5 @@
 import { basename, relative, isAbsolute } from "node:path";
+import { homedir } from "node:os";
 import type { CanUseTool, Options, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { Repo } from "../repo.ts";
 import type { Bus } from "../bus.ts";
@@ -28,13 +29,20 @@ export const CHAT_READ_TOOLS = ["Read", "Glob", "Grep", "WebSearch", "WebFetch",
  * that can only read passes (`isReadOnlyShell`, the supervised rule, D350): `git log` answers "what
  * changed last" here in a second instead of on a 20-cent card.
  */
-export const CHAT_DISALLOWED = ["Edit", "Write", "MultiEdit", "NotebookEdit", "BashOutput", "KillShell", "Task", "Agent", "AskUserQuestion"];
+export const CHAT_DISALLOWED = ["NotebookEdit", "BashOutput", "KillShell", "Task", "Agent", "AskUserQuestion"];
 /** Said to the model when a command is not read-only: a card, not an apology (D283). */
 export const CHAT_COMMAND_REFUSED =
   "Only a command that can only read runs from the chat (git log, git status, git diff, ls, grep…). This one could change something or run a program, so it is a card's job: create one with board_create_task (an answer card for a lookup) and tell the user what it will do. Do not tell them what you cannot do.";
 export const CHAT_COMMANDS_OFF =
   "Commands do not run from this chat (Settings → Runs & limits has read-only commands without a card switched off): create a card with board_create_task (an answer card for a lookup) and tell the user what it will do. Do not tell them what you cannot do.";
 const NEW_CHAT = "New chat";
+/** The file tools: in the chat they may change a skill and nothing else (D406). */
+const CHAT_EDIT_TOOLS = ["Edit", "Write", "MultiEdit"];
+/** The folders of skills the chat may read and change: yours, and the project's own (D406). */
+export const chatSkillRoots = (projectPath: string) => [join(homedir(), ".claude", "skills"), join(projectPath, ".claude", "skills")];
+/** Said when the chat tries to change any other file: that stays a card's job. */
+const CHAT_EDIT_REFUSED =
+  "From the chat only a skill can be changed (in ~/.claude/skills or the project's .claude/skills). Any other file is a card's job: create one with board_create_task and tell the user what it will do. Do not tell them what you cannot do.";
 /** What one reply may cost: enough for a long, careful answer. */
 const CHAT_CEILING_USD = 1.5;
 /** The context bar moves while a reply reads files; pushing it to every open page once a second is enough. */
@@ -68,6 +76,14 @@ export function describeTool(name: string, input: Record<string, unknown>, cwd: 
     case "WebSearch": return `searched the web for ${q(input.query)}`;
     case "WebFetch": return `opened ${String(input.url ?? "a page")}`;
     case "TodoWrite": return "made a plan";
+    // From the chat only a skill can be changed (D406): name the skill, not just "SKILL.md".
+    case "Edit":
+    case "MultiEdit":
+    case "Write": {
+      const file = String(input.file_path ?? "").replace(/\\/g, "/");
+      const skill = /\.claude\/skills\/(.+)$/.exec(file)?.[1];
+      return `${name === "Write" ? "wrote" : "changed"} ${skill ? `the skill file ${skill}` : path(input.file_path)}`;
+    }
     case "Bash":
     case "PowerShell": {
       // The same plain-words table as a card's Commands tab (D336), when it knows the command.
@@ -144,11 +160,12 @@ export function chatPrompt(project: Project, board?: { models: ModelEntry[]; def
     `You are the side chat of Claude Kanban, talking with the user about the project "${project.name}" (${project.path}).`,
     "Many users are not programmers: answer plainly and briefly, and explain any technical word you have to use.",
     // In a real chat "I can't query BizApp from this chat…" opened the reply to "get me the latest PO" (D283).
-    "You read the project's files, its git history and the web yourself, and you can run a command that only reads, inside the project folder: git log, git status, git diff, git show, git blame, ls, grep, wc and the like. Everything else — a command that changes something or runs a program (a script, tests, a build, npm), looking something up in a live system (an ERP, a database, an API), changing a file — is done by a task card on the board, and its result comes back into this chat. Never tell the user what you cannot do from here, never mention your own tools or their limits (\"I can't run…\", \"I can only read…\"), and never ask the user to run something themselves: say what you will do (\"I'll make a card that looks it up\") and do it.",
+    "You read the project's files, its git history and the web yourself, and you can run a command that only reads, inside the project folder: git log, git status, git diff, git show, git blame, ls, grep, wc and the like. Everything else — a command that changes something or runs a program (a script, tests, a build, npm), looking something up in a live system (an ERP, a database, an API), changing a file other than a skill — is done by a task card on the board, and its result comes back into this chat. Never tell the user what you cannot do from here, never mention your own tools or their limits (\"I can't run…\", \"I can only read…\"), and never ask the user to run something themselves: say what you will do (\"I'll make a card that looks it up\") and do it.",
     // Only when the chat was given them: otherwise it would promise tools it does not have (D335).
     ...(board?.tools
       ? ["You also have the user's own skills, MCP servers and connectors. Use them to look things up and to work with their systems when they can do the job from here; a command that changes or runs something, and changing a file, are still a card's job."]
       : []),
+    `Skills are the one kind of file you change yourself: when the user asks to update, fix or create a skill, edit it in place with its absolute path — theirs are in ${join(homedir(), ".claude", "skills")}, the project's in ${join(project.path, ".claude", "skills")} — and say which files you changed.`,
     "Files the user attaches are listed in front of their message with their paths: open an image, a PDF or a text file with Read. A spreadsheet or a Word file needs a card (MarkItDown reads them): make an answer card and say so.",
     "Take the cheapest route that gets what the user wants:",
     "1. When the project's files, its git history (a read-only command) or the web answer it fully, answer yourself. No card. If part of the answer needs a command that changes or runs something (a script, tests, a query) or a live system, do not give half an answer: make the answer card.",
@@ -602,7 +619,8 @@ export class ChatService {
     const { repo, bus } = this.deps;
     const cards: Card[] = [];
     // Its own files may be read too (D334): they sit in the state dir, outside the project.
-    const fileRoots = this.deps.repo.listChatFiles(chat.id).length ? [this.filesDir(chat.id)] : [];
+    const skillRoots = chatSkillRoots(project.path);
+    const fileRoots = [...(this.deps.repo.listChatFiles(chat.id).length ? [this.filesDir(chat.id)] : []), ...skillRoots];
     const settings = repo.getSettings();
     const canUseTool: CanUseTool = async (name, input) => {
       // A page or file the chat reads could tell it to fetch your keys and send them somewhere; nobody
@@ -614,6 +632,14 @@ export class ChatService {
         return { behavior: "deny", message: "That file holds passwords or keys, and the side chat does not open those. Tell the user, and carry on without it." };
       }
       if (name.startsWith("mcp__board__") || CHAT_READ_TOOLS.includes(name)) return { behavior: "allow", updatedInput: input };
+      // "Editing the skills by task or chat should be allowed, anything Claude Code can do we should also
+      // be able to do here" (owner, D406). Only a skill, named by its absolute path: every other change
+      // is still a card, which someone approves.
+      if (CHAT_EDIT_TOOLS.includes(name)) {
+        const file = String((input as { file_path?: unknown }).file_path ?? "");
+        const isSkill = isAbsolute(file) && skillRoots.some((root) => !readViolation("Read", { file_path: file }, root));
+        return isSkill ? { behavior: "allow", updatedInput: input } : { behavior: "deny", message: CHAT_EDIT_REFUSED };
+      }
       // A command that can only read runs here, under the supervised rule and its setting (D350): the
       // rule keeps it inside the project and away from credential files, like the chat's own reads.
       if (name === "Bash" || name === "PowerShell") {

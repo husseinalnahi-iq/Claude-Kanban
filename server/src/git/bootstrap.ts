@@ -29,6 +29,15 @@ export function readWorktreeInclude(projectPath: string, extra: string[] = []): 
   return [...new Set([...fromFile, ...extra.map((e) => e.trim()).filter(Boolean)])];
 }
 
+/** Every file git tracks in the folder, lower-cased with forward slashes; empty when git cannot say. */
+function trackedFiles(folder: string): Promise<Set<string>> {
+  return new Promise((res) => {
+    execFile("git", ["ls-files", "-z"], { cwd: folder, windowsHide: true, maxBuffer: 256 * 1024 * 1024 }, (err, stdout) => {
+      res(err ? new Set() : new Set(String(stdout).split("\0").filter(Boolean).map((f) => f.toLowerCase())));
+    });
+  });
+}
+
 function isIgnored(projectPath: string, relPath: string): Promise<boolean> {
   return new Promise((res) => {
     execFile("git", ["check-ignore", "-q", "--", relPath], { cwd: projectPath, windowsHide: true }, (err) => {
@@ -49,12 +58,20 @@ export const LIVE_KEY_PATTERNS = [".env", ".env.*", ".*secret*/**", "*secret*.js
  * cannot be removed must not keep copies of your keys (D396). Returns how many were removed.
  */
 export async function removeKeyCopies(worktreePath: string): Promise<number> {
+  // Only what seedWorktree could have put there: files git does not track. Deleting a tracked
+  // `.env.example` too made the snapshot taken next commit its deletion on the branch, so git then
+  // refused to delete a branch it had just merged ("not fully merged").
+  const tracked = await trackedFiles(worktreePath);
   let removed = 0;
   for (const pattern of LIVE_KEY_PATTERNS) {
     try {
       for await (const m of glob(pattern, { cwd: worktreePath })) {
         const p = resolve(worktreePath, String(m));
-        if (relative(worktreePath, p).startsWith("..")) continue;
+        const rel = relative(worktreePath, p);
+        const key = rel.replace(/\\/g, "/").toLowerCase();
+        if (rel.startsWith("..") || !existsSync(p) || tracked.has(key)) continue;
+        // A matched folder (`.secrets/`) goes whole only when git tracks nothing inside it.
+        if (statSync(p).isDirectory() && [...tracked].some((f) => f.startsWith(`${key}/`))) continue;
         rmSync(p, { recursive: true, force: true });
         removed++;
       }

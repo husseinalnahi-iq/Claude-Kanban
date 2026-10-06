@@ -350,7 +350,20 @@ To keep night work moving instead, Settings → Runs & limits → *When Claude a
 Claude decide after 15 minutes to 4 hours; it says what it chose in its summary.
 
 An **autonomous** task never stops to ask — nobody is watching it. It puts the question on the card
-with the answer it is going with, and carries on; answer it there and the next stage gets your answer.
+with the answer it is going with, and carries on; answer it there and the next stage gets your answer. Its report lists that question among what was done, as the choice it took, not again as something you still have to decide.
+
+Tasks and the side chat can update the skills Claude loads (`~/.claude/skills`, and the chat also the
+project's `.claude/skills`), the way Claude Code can, so a task finishes end to end instead of leaving that
+step for a supervised run. A task's report names each skill file it changed: those edits are not part of its
+branch, so Discard does not undo them. Any other file is still changed only by a card.
+
+On a finished card, **Anything more on this?** takes one more request: **Continue on this card** picks up
+where its coder left off, with what it already knows (cheapest); **As a new card** is for separate work
+beside it, starting with a copy of that knowledge. The task ID at the top of a card has a copy button.
+
+Any card that waits on you glows rose and says what for in one line: **Your turn: approve the plan**,
+**answer 1 question**, **review and approve**, and so on. A card you approved that meets a conflict with
+what landed meanwhile goes back to In Progress as **merging** while Claude combines the two, and lands by itself.
 
 **Autonomous + asks me** is the third choice under *Run mode* (on the New task form, in a task's *Mode*,
 on a card's setup, in Settings and on the switch under any chat — the same switch everywhere). Picked, it
@@ -1014,14 +1027,23 @@ the session that wrote the task, in the task's own worktree — your checkout is
 5. **It lands by itself** once everything passes — you already pressed Approve. *Wait for me to approve
    again* in Settings → *Git & merging* keeps it in Review with a report of what was kept from each side.
 
-The board also looks ahead. When a task lands, and when one reaches Review, it asks git (without
+The board also looks ahead. When a task lands, when one reaches Review, and when the base moves
+without it (a commit of your own, a pull — checked every 30 seconds), it asks git (without
 touching any folder) whether the other open tasks would now conflict. Those cards show **will
 conflict**, and the task's panel has **Fix now**, which resolves it the same way but never lands it —
 nobody has approved that task yet. This needs git 2.38 or newer; Setup checks it.
 
-Set *Stop and tell me* to have none of this: the files are named and nothing is merged. A failed merge
+Set *Stop and tell me* to have none of this: the files are named, nothing is merged, and the card
+keeps **Fix now** for when you want Claude to combine them after all. A failed merge
 is always undone with `git merge --abort`, never `reset --hard`; if that abort fails, the board says so
 and stops rather than guessing.
+
+**Files every task only adds to** — a decisions log, a changelog, a running context file — can be listed
+in Settings → *Git & merging*. Git then merges them by keeping both sides' new lines (its `union` merge),
+so two tasks that each added an entry never conflict over it, and no card warns about it. The board
+writes the list into the repository's own `.git/info/attributes`, in a marked block of its own, which is
+never committed and leaves any lines of yours alone. Only list files that are added to: a line that
+both tasks changed would be kept twice.
 
 A task open for a while shows **"N commits landed on main since this started"** with an *Update it*
 button, so it can catch up while that is still cheap.
@@ -1175,12 +1197,16 @@ What stops an unattended run from doing damage, in Settings → *Runs & limits*:
   board itself stops whatever a stage leaves running on its reserved port.
 - **The autonomous sandbox** — an autonomous run reads, writes and runs commands only inside its own
   worktree (plus its task's attachments and your skills), so the gitignored `.env` and API keys of your
-  main checkout are out of its reach. Every refusal tells it to report **blocked** instead of looking for
-  a way round; after five, the board stops the stage and marks it blocked itself. A command is read
-  the way its shell would read it (bash, PowerShell and cmd each quote differently), including what
-  it pipes to, runs inside `$(…)`, or hands to another shell as a string; `..` anywhere in a path and
-  every spelling of the home folder count as leaving. A line the board cannot read with confidence,
-  an open quote say, is refused rather than guessed at.
+  main checkout are out of its reach. It may also write to the scratchpad Claude Code gives each session
+  for temporary files, which belongs to that worktree alone and sits outside git. Every refusal tells it
+  to report **blocked** instead of looking for a way round; after five, the board stops the stage and
+  marks it blocked itself. A command is read the way its shell would read it (bash, PowerShell and cmd
+  each quote differently), including what it pipes to, runs inside `$(…)`, or hands to another shell as
+  a string. A `..` path is judged by where it lands, following any `cd x &&` before it in the same
+  command (`cd scripts && python ../tool.py` stays inside); after a `cd` it cannot follow, inside a
+  script handed to another program, or in a list or variable, `..` counts as leaving, and so does every
+  spelling of the home folder. A line the board cannot read with confidence, an open quote say, is
+  refused rather than guessed at.
 - **Blocked is not done** — a stage that reports it cannot do the task stops the pipeline there: no
   "success", no next stage, no Approve. Review judges the result against what you asked, item by item.
 - **Questions on the card** — a stage that needs your decision but can carry on puts the question on
@@ -1199,7 +1225,7 @@ What stops an unattended run from doing damage, in Settings → *Runs & limits*:
   anything that could write asks, or in the chat becomes a card.
 - **A shared checkout** — a supervised run notes what was already uncommitted when it started, leaves
   it alone, and lists the files it changed, so you commit only this task's work.
-- **A per-task cost ceiling** on top of the per-stage one: $20 each by default, with 500 turns per stage (D402). Reaching
+- **A per-task cost ceiling** on top of the per-stage one: $60 a task and $20 a stage by default, with 500 turns per stage (D402). Reaching
   either ceiling **pauses the task and asks you** — *Continue* lets it spend one more stage's worth in the
   same session; *Stop* keeps what it did. Nothing is thrown away for money.
 - **Loop detection** — a stage repeating the same tool call is stopped and the reason recorded.

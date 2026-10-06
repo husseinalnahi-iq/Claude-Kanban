@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Options } from "@anthropic-ai/claude-agent-sdk";
 import { openDb } from "../src/db.ts";
@@ -32,7 +32,7 @@ function projectWithKeys(): string {
   return dir;
 }
 
-type Seen = { cwd: string; envCopied: boolean; erpCopied: boolean; catKeys: unknown };
+type Seen = { cwd: string; envCopied: boolean; erpCopied: boolean; catKeys: unknown; editSkill: unknown };
 
 async function runLiveTask(settings: Record<string, unknown>): Promise<{ seen: Seen; prompt: string }> {
   const dir = projectWithKeys();
@@ -47,7 +47,8 @@ async function runLiveTask(settings: Record<string, unknown>): Promise<{ seen: S
       const cwd = String(o.cwd);
       const hook = o.hooks!.PreToolUse![0].hooks[0];
       const catKeys = await hook({ tool_name: "Bash", tool_input: { command: "cat .codex-secrets/erp.json" } } as never, undefined, { signal: new AbortController().signal });
-      seen = { cwd, envCopied: existsSync(join(cwd, ".env")), erpCopied: existsSync(join(cwd, ".codex-secrets", "erp.json")), catKeys };
+      const editSkill = await hook({ tool_name: "Edit", tool_input: { file_path: join(homedir(), ".claude", "skills", "erp-workflows", "SKILL.md"), old_string: "a", new_string: "b" } } as never, undefined, { signal: new AbortController().signal });
+      seen = { editSkill, cwd, envCopied: existsSync(join(cwd, ".env")), erpCopied: existsSync(join(cwd, ".codex-secrets", "erp.json")), catKeys };
       yield { type: "system", subtype: "init", session_id: "s1" } as never;
       yield { type: "result", subtype: "success", is_error: false, result: "ok", total_cost_usd: 0, session_id: "s1", modelUsage: {} } as never;
     })();
@@ -80,6 +81,21 @@ test("an autonomous live task gets the project's keys in its folder and is told 
   const deny = (seen.catKeys as { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string } }).hookSpecificOutput;
   assert.equal(deny?.permissionDecision, "deny", "showing a key file is refused");
   assert.match(deny?.permissionDecisionReason ?? "", /transcript/);
+});
+
+const decision = (r: unknown) => (r as { hookSpecificOutput?: { permissionDecision?: string } }).hookSpecificOutput?.permissionDecision;
+
+test("an autonomous live task may update the skills Claude loads, and is told where they are (D406)", async () => {
+  const { seen, prompt } = await runLiveTask({});
+  assert.notEqual(decision(seen.editSkill), "deny", "editing a skill file is not refused");
+  assert.match(prompt, /The skills Claude loads are in .*.claude.skills and you may edit them/);
+  assert.match(prompt, /the skills folder named above is the one exception/);
+});
+
+test("an autonomous task without live access may update the skills Claude loads too", async () => {
+  const { seen, prompt } = await runLiveTask({ autonomousLive: false });
+  assert.notEqual(decision(seen.editSkill), "deny");
+  assert.match(prompt, /The skills Claude loads are in .*.claude.skills and you may edit them/);
 });
 
 test("with the setting off, an autonomous live task gets no keys and leaves live steps for a supervised run", async () => {

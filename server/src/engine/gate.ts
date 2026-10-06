@@ -114,6 +114,15 @@ function inside(cwd: string, p: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !P.isAbsolute(rel));
 }
 
+/**
+ * In one of the scratch folders, named in full. Only an absolute path counts: `inside` resolves a
+ * relative one against the folder, so `../<scratch's own name>/x` would pass while it really lands
+ * beside the worktree.
+ */
+function inScratch(scratch: string[], p: string): boolean {
+  return scratch.some((r) => pathsFor(r).isAbsolute(p) && inside(r, p));
+}
+
 /** "/c/Users/x" (Git Bash) → "C:\Users\x" when the folder is a Windows one; other paths unchanged. */
 function normalizeShellPath(p: string, windows = true): string {
   if (!windows) return p;
@@ -668,28 +677,55 @@ const CD_PROGRAMS = new Set(["cd", "chdir", "pushd", "set-location", "sl", "push
 const DELIMITER_PROGRAMS = new Set(["cut", "tr", "paste", "column", "sort", "awk", "gawk", "sed", "grep", "egrep", "fgrep", "rg", "jq", "echo", "printf"]);
 
 /** Where `cd` and its cousins would go, when that is not somewhere the board can see is inside. */
-function cdViolation(words: string[], cwd: string): string | null {
+function cdTarget(words: string[]): { program: string; target: string | undefined } | null {
   const start = commandStarts(words).at(-1) ?? 0;
   const program = programOf(words[start] ?? "");
   if (!CD_PROGRAMS.has(program)) return null;
   const rest = words.slice(start + 1);
-  const target = rest.find((w, i) => (w === "-" || !w.startsWith("-")) && !(/^\/[a-z]$/i.test(w) && i < rest.length - 1));
+  return { program, target: rest.find((w, i) => (w === "-" || !w.startsWith("-")) && !(/^\/[a-z]$/i.test(w) && i < rest.length - 1)) };
+}
+
+/**
+ * Where `cd` and its cousins would go, when that is not somewhere the board can see is inside. `from`:
+ * the folder an earlier `cd` in the same command moved to, so `cd scripts && cd ..` stays inside.
+ */
+function cdViolation(words: string[], cwd: string, from: string = cwd): string | null {
+  const cd = cdTarget(words);
+  if (!cd) return null;
+  const { program, target } = cd;
   if (target === undefined) return program === "cd" || program === "set-location" || program === "sl" ? "it changes to your home directory" : null;
   if (target === "-") return null;
   // `cd "$dir"` could be anywhere. The folder it is already in is the one exception.
   if (/[$`]|%\w+%/.test(target) && !/^(\$pwd|\$\{pwd\}|\$\(pwd\)|\$env:pwd)([\\/]|$)/i.test(target)) {
     return `it changes folder to \`${target}\`, and the board cannot tell where that is`;
   }
-  return inside(cwd, normalizeShellPath(target, isWindowsPath(cwd))) ? null : `it changes folder to ${target}, outside the worktree`;
+  const to = pathsFor(cwd).resolve(from, normalizeShellPath(target, isWindowsPath(cwd)));
+  return inside(cwd, to) ? null : `it changes folder to ${target}, outside the worktree`;
+}
+
+/**
+ * The folder the next command runs in. Only `cd x && …` is followed: after `;` the next command also
+ * runs when the `cd` failed, and in a pipe or a bracket bash and PowerShell disagree on whether it
+ * moved at all. Any other `cd`, and `popd`, makes the folder unknown — a later `..` is then refused.
+ */
+function folderAfter(words: string[], here: string | null, c: ShellCommand, next: ShellCommand | undefined, cwd: string, windows: boolean): string | null {
+  const cd = cdTarget(words);
+  if (!cd) return /^(popd|pop-location)$/.test(programOf(words[0] ?? "")) ? null : here;
+  const followed = !c.sub && (c.op === "" || HARD_SEPARATORS.has(c.op)) && (!next || next.op === "&&");
+  if (!followed || here === null || cd.target === undefined || cd.target === "-" || /[$`%]/.test(cd.target)) return null;
+  return pathsFor(cwd).resolve(here, normalizeShellPath(cd.target, windows));
 }
 
 /**
  * The first path in a command that leaves the folder, or null. `strict` is for commands that run with
  * no card at all: there every leading `/` or `\` is a path unless it is plainly something else.
  */
-function outsidePath(c: Pick<ShellCommand, "words" | "redirect" | "heredocs">, cwd: string, strict: boolean): string | null {
+function outsidePath(c: Pick<ShellCommand, "words" | "redirect" | "heredocs">, cwd: string, strict: boolean, scratch: string[] = []): string | null {
   const windows = isWindowsPath(cwd);
-  const escapes = (p: string) => !SYSTEM_PATH.test(p.replace(/\\/g, "/")) && !inside(cwd, normalizeShellPath(p, windows));
+  const escapes = (p: string) => {
+    const q = normalizeShellPath(p, windows);
+    return !SYSTEM_PATH.test(p.replace(/\\/g, "/")) && !inside(cwd, q) && !inScratch(scratch, q);
+  };
   const text = textArgs(c.words, "paths");
   const program = programOf(c.words[commandStarts(c.words).at(-1) ?? 0] ?? "");
   for (let k = 0; k < c.words.length; k++) {
@@ -744,19 +780,45 @@ const MAX_NESTING = 3;
  * Returns why a shell command is not allowed in an autonomous worktree, or null when it is fine.
  * `folder`: the task works in the project folder itself (D398) — git only looks, and .git and .kanban are off limits.
  */
-export function shellViolation(cmd: string, cwd: string, shell: ShellFlavour = "bash", folder = false): string | null {
-  return violationIn(cmd, cwd, shell, 0, folder);
+export function shellViolation(cmd: string, cwd: string, shell: ShellFlavour = "bash", folder = false, scratch: string[] = []): string | null {
+  return violationIn(cmd, cwd, shell, 0, folder, scratch);
 }
 
-function violationIn(cmd: string, cwd: string, shell: ShellFlavour, depth: number, folder = false): string | null {
+const CLIMBS_OUT = "it walks out of the worktree with `..`";
+
+/**
+ * A word that is a path and nothing else: no list, variable, brace expansion or space a program could
+ * split differently, and no leading `-` (an option with its value glued on, `-o../x`).
+ */
+const PLAIN_PATH = /^(?:[A-Za-z]:)?(?!-)[\w.*?+@\-\\/]+$/;
+
+/**
+ * Where a `..` path really lands. Every `..` used to be refused, and runs kept tripping on
+ * `cd scripts/x && python ../../tool.py`, which never leaves the worktree: 4 such refusals in one live
+ * stage on 2026-10-06, one short of the board stopping it (D404). `here` is where the command stands
+ * after the `cd`s before it; null once that cannot be known. The shell's own folder may be deeper than
+ * the worktree's root but never above it, and a path judged from higher up is judged more strictly.
+ */
+function climbViolation(word: string, here: string | null, cwd: string, windows: boolean): string | null {
+  if (!TRAVERSAL.test(word)) return null;
+  const keyed = /^(--?[\w-]+|[A-Za-z_]\w*)=/.exec(word);
+  const value = keyed ? word.slice(keyed[0].length) : word;
+  if (here === null || !PLAIN_PATH.test(value) || TRAVERSAL.test(keyed ? keyed[0] : "")) return CLIMBS_OUT;
+  const P = pathsFor(cwd);
+  return inside(cwd, P.resolve(here, normalizeShellPath(value, windows))) ? null : CLIMBS_OUT;
+}
+
+function violationIn(cmd: string, cwd: string, shell: ShellFlavour, depth: number, folder = false, scratch: string[] = []): string | null {
   if (depth > MAX_NESTING) return "it wraps one command inside another too many times for the board to check";
   if (folder && BOARD_FOLDERS.test(cmd)) return "it reaches into .git or .kanban, which hold your repository's history and other tasks' copies";
-  if (TRAVERSAL.test(cmd)) return "it walks out of the worktree with `..`";
+  const climbs = TRAVERSAL.test(cmd);
+  // Inside a script given to another program the board cannot follow its folder: any `..` stays refused.
+  if (climbs && depth > 0) return CLIMBS_OUT;
   if (HOME_REF.test(cmd)) return "it references your home directory";
   const windows = isWindowsPath(cwd);
   for (const c of absolutePaths(cmd)) {
     const p = normalizeShellPath(c, windows);
-    if (!inside(cwd, p)) return `it touches ${p}, outside the worktree`;
+    if (!inside(cwd, p) && !inScratch(scratch, p)) return `it touches ${p}, outside the worktree`;
   }
   const lex = lexShell(cmd, shell);
   if (lex.unsure) return `the board cannot read it safely (${lex.unsure}), and an unattended run does not get the benefit of the doubt`;
@@ -764,7 +826,12 @@ function violationIn(cmd: string, cwd: string, shell: ShellFlavour, depth: numbe
   // that path. Seen stopping a live task five refusals in (D390); anything else stays unknown.
   const known = new Map<string, string>();
   const expand = (w: string) => w.replace(/\$\{(\w+)\}|\$(\w+)/g, (m, a: string | undefined, b: string | undefined) => known.get((a ?? b)!) ?? m);
-  for (const c of lex.cmds) {
+  if (climbs) {
+    // A `..` the board never sees as a word (inside text fed to a program) cannot be judged.
+    if (lex.cmds.some((c) => c.heredocs.some((h) => TRAVERSAL.test(h))) || !lex.cmds.some((c) => c.words.some((w) => TRAVERSAL.test(w)))) return CLIMBS_OUT;
+  }
+  let here: string | null = pathsFor(cwd).resolve(cwd);
+  for (const [i, c] of lex.cmds.entries()) {
     if (c.words.length && c.words.every((w) => /^[A-Za-z_]\w*=/.test(w))) {
       for (const w of c.words) {
         const eq = w.indexOf("=");
@@ -773,16 +840,24 @@ function violationIn(cmd: string, cwd: string, shell: ShellFlavour, depth: numbe
         else known.set(w.slice(0, eq), value);
       }
     }
-    const away = cdViolation(c.words.map(expand), cwd);
+    if (climbs) {
+      for (const w of c.words) {
+        const why = /[$`%]/.test(w) && TRAVERSAL.test(w) ? CLIMBS_OUT : climbViolation(w, here, cwd, windows);
+        if (why) return why;
+      }
+    }
+    const words = c.words.map(expand);
+    const away = cdViolation(words, cwd, here ?? undefined);
     if (away) return away;
-    const out = outsidePath(c, cwd, false);
+    here = folderAfter(words, here, c, lex.cmds[i + 1], cwd, windows);
+    const out = outsidePath(c, cwd, false, scratch);
     if (out) return `it touches ${out}, outside the worktree`;
     const git = gitViolation(c.words, folder);
     if (git) return git;
     const inner = innerScripts(c);
     if (inner.opaque) return `it runs ${inner.opaque}, which the board cannot read`;
     for (const s of inner.scripts) {
-      const why = violationIn(s.text, cwd, s.flavour, depth + 1, folder);
+      const why = violationIn(s.text, cwd, s.flavour, depth + 1, folder, scratch);
       if (why) return why;
     }
   }
@@ -1256,8 +1331,18 @@ export function isReadOnlyShell(cmd: string, cwd: string): boolean {
   return true;
 }
 
-/** Permission gate for autonomous runs (no human watching). See docs/DECISIONS.md D6/D19. */
-export function autonomousGate(toolName: string, input: Record<string, unknown>, cwd: string, readRoots: string[] = [], opts: { markitdown?: boolean; folder?: boolean } = {}): GateResult {
+/**
+ * Permission gate for autonomous runs (no human watching). See docs/DECISIONS.md D6/D19.
+ * `scratch`: folders a run may also write to — the scratch space Claude Code itself tells the session
+ * to use for temporary files, which is this worktree's alone and outside git (D404).
+ */
+export function autonomousGate(
+  toolName: string,
+  input: Record<string, unknown>,
+  cwd: string,
+  readRoots: string[] = [],
+  opts: { markitdown?: boolean; folder?: boolean; scratch?: string[] } = {},
+): GateResult {
   if (!opts.folder) return worktreeGate(toolName, input, cwd, readRoots, opts);
   // In the project folder (D398): the same walls, worded for the folder, plus its .git and the board's
   // .kanban (other tasks' copies) are off limits, and git only looks.
@@ -1275,13 +1360,14 @@ export function autonomousGate(toolName: string, input: Record<string, unknown>,
     }
   }
   if (SHELL_TOOLS.has(toolName)) {
-    const why = shellViolation(String(input.command ?? ""), cwd, toolName === "PowerShell" ? "powershell" : "bash", true);
+    const why = shellViolation(String(input.command ?? ""), cwd, toolName === "PowerShell" ? "powershell" : "bash", true, opts.scratch);
     if (why) return { behavior: "deny", message: `Refused because ${why}. Autonomous runs stay inside ${cwd}.`.replace(/the worktree/g, "the project folder") };
   }
   return decision;
 }
 
-function worktreeGate(toolName: string, input: Record<string, unknown>, cwd: string, readRoots: string[], opts: { markitdown?: boolean }): GateResult {
+function worktreeGate(toolName: string, input: Record<string, unknown>, cwd: string, readRoots: string[], opts: { markitdown?: boolean; scratch?: string[] }): GateResult {
+  const scratch = opts.scratch ?? [];
   if (opts.markitdown && toolName === MARKITDOWN_TOOL) {
     const read = markitdownRead(input, cwd, readRoots);
     return read.ok ? { behavior: "allow", updatedInput: input } : { behavior: "deny", message: read.message };
@@ -1298,12 +1384,12 @@ function worktreeGate(toolName: string, input: Record<string, unknown>, cwd: str
   const key = PATH_KEYS[toolName];
   if (key) {
     const p = input[key];
-    if (typeof p === "string" && !inside(cwd, p)) {
+    if (typeof p === "string" && !inside(cwd, p) && !inScratch(scratch, p)) {
       return { behavior: "deny", message: `Autonomous runs may only write inside the task worktree (${cwd}); refused ${p}.` };
     }
   }
   if (SHELL_TOOLS.has(toolName)) {
-    const why = shellViolation(String(input.command ?? ""), cwd, toolName === "PowerShell" ? "powershell" : "bash");
+    const why = shellViolation(String(input.command ?? ""), cwd, toolName === "PowerShell" ? "powershell" : "bash", false, scratch);
     if (why) {
       return { behavior: "deny", message: `Refused because ${why}. Autonomous runs stay inside ${cwd}; the board handles branches, merges and cleanup.` };
     }

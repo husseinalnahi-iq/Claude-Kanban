@@ -42,6 +42,8 @@ delete process.env.KANBAN_AFTER_CRASH;
 runner.recover({ afterCrash });
 // Your usage changes whenever you use Claude anywhere, not only when the board runs something.
 runner.pollUsage();
+// A commit of your own moves the base too: cards in Review say they would conflict before you approve.
+runner.watchBases();
 
 // Transcripts are the one table that grows without bound. Runs, costs and results are kept forever;
 // only the message-by-message detail of old finished runs is dropped.

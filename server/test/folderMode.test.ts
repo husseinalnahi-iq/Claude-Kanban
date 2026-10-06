@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Options } from "@anthropic-ai/claude-agent-sdk";
@@ -36,7 +36,7 @@ function gitProject(): string {
 
 type Hook = (input: unknown, id: undefined, o: { signal: AbortSignal }) => Promise<{ hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string } }>;
 /** One step of a fake stage: ask the gate, and when it allows a write, make it the way Claude Code would. */
-type Step = { tool: string; input: Record<string, unknown>; write?: { file: string; text: string } };
+type Step = { tool: string; input: Record<string, unknown>; write?: { file: string; text: string }; remove?: string };
 
 interface Harness {
   repo: Repo;
@@ -65,6 +65,7 @@ function harness(dir: string, steps: Step[] = [], settings: Record<string, unkno
         const decision = out.hookSpecificOutput?.permissionDecision;
         decisions.push(decision === "deny" ? `deny: ${out.hookSpecificOutput?.permissionDecisionReason}` : "allow");
         if (decision !== "deny" && s.write) writeFileSync(join(cwd, s.write.file), s.write.text);
+        if (decision !== "deny" && s.remove) rmSync(join(cwd, s.remove));
       }
       yield { type: "system", subtype: "init", session_id: "s1" } as never;
       yield { type: "result", subtype: "success", is_error: false, result: "ok", total_cost_usd: 0, session_id: "s1", modelUsage: {} } as never;
@@ -174,6 +175,24 @@ test("Approve commits exactly the task's files on your branch and leaves your ow
     assert.deepEqual(gitIn(dir, "show", "--name-only", "--pretty=format:%s", "HEAD").split("\n").filter(Boolean), ["Change the readme", "README.md", "new.txt"]);
     assert.equal(gitIn(dir, "status", "--porcelain"), "M notes.md", "your own change is still yours, uncommitted");
     assert.equal(done.landed_sha, gitIn(dir, "rev-parse", "HEAD"));
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("a helper the task wrote and deleted again is dropped from its files, and Approve commits the rest", async () => {
+  const dir = gitProject();
+  const h = harness(dir, [
+    edit("README.md", "base\nfrom the task\n"),
+    edit("tmp_helper.py", "print('look')\n"),
+    { tool: "Bash", input: { command: "rm tmp_helper.py" }, remove: "tmp_helper.py" },
+  ]);
+  try {
+    const t = await runToReview(h);
+    assert.deepEqual(t.footprint.touched, ["README.md"], "the card does not list a file that is gone");
+    const done = await h.runner.approveTask(t.id);
+    assert.equal(done.status, "done", "naming the vanished helper used to fail git add, and the whole Approve");
+    assert.deepEqual(gitIn(dir, "show", "--name-only", "--pretty=format:%s", "HEAD").split("\n").filter(Boolean), ["Change the readme", "README.md"]);
   } finally {
     await h.cleanup();
   }
