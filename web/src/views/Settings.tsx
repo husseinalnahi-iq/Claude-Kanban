@@ -541,7 +541,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [serial, setSerial] = useState(false);
   const [forced, setForced] = useState(3);
   const [defMax, setDefMax] = useState(3);
-  const [maxTurns, setMaxTurns] = useState(60);
+  const [maxTurns, setMaxTurns] = useState(500);
   const [autoContinue, setAutoContinue] = useState(2);
   const [planApproval, setPlanApproval] = useState(false);
   const [runStyle, setRunStyle] = useState<RunStyle>("ask");
@@ -549,7 +549,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [liveReviewModel, setLiveReviewModel] = useState("claude-opus-5-5");
   const [followLatest, setFollowLatest] = useState(true);
   const [autoEngine, setAutoEngine] = useState(true);
-  const [maxCost, setMaxCost] = useState(5);
+  const [maxCost, setMaxCost] = useState(20);
   const [subDepth, setSubDepth] = useState(2);
   const [subMax, setSubMax] = useState(5);
   const [cacheable, setCacheable] = useState(true);
@@ -574,7 +574,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [delegateTimeout, setDelegateTimeout] = useState(30);
   const [debate, setDebate] = useState<SettingsShape["debate"]>({ enabled: false, critic: { provider: "anthropic", model: "claude-sonnet-5-5", effort: "medium" }, mode: "once", rounds: 3 });
-  const [maxTaskCost, setMaxTaskCost] = useState(15);
+  const [maxTaskCost, setMaxTaskCost] = useState(20);
   const [maxRepeats, setMaxRepeats] = useState(8);
   const [retention, setRetention] = useState(30);
   const [blocked, setBlocked] = useState("");
@@ -1150,7 +1150,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
 
         <Section title="Run ceilings" hint="Applied to every stage so a looping or runaway session stops by itself.">
           <div className="grid gap-3 md:grid-cols-2">
-            <Field label="Max turns per stage"><input type="number" min={1} max={500} className={`${inputCls} font-mono`} value={maxTurns} onChange={(e) => setMaxTurns(Number(e.target.value) || 1)} /></Field>
+            <Field label="Max turns per stage"><input type="number" min={1} max={2000} className={`${inputCls} font-mono`} value={maxTurns} onChange={(e) => setMaxTurns(Number(e.target.value) || 1)} /></Field>
             <Field label="Continue after the turn limit" hint="A stage that uses all its turns carries on in the same session this many times (nothing is lost) before it fails. 0 = fail straight away."><input type="number" min={0} max={5} className={`${inputCls} font-mono`} value={autoContinue} onChange={(e) => setAutoContinue(Math.max(0, Math.min(5, Number(e.target.value) || 0)))} /></Field>
             <Field label="Max cost per stage (USD)"><input type="number" min={0.05} max={100} step={0.25} className={`${inputCls} font-mono`} value={maxCost} onChange={(e) => setMaxCost(Number(e.target.value) || 0.05)} /></Field>
             <Field label="Delegated stage timeout (minutes)" hint="Wall-clock ceiling for a stage on a text-only or CLI provider, which the board cannot meter mid-run."><input type="number" min={1} max={240} className={`${inputCls} font-mono`} value={delegateTimeout} onChange={(e) => setDelegateTimeout(Number(e.target.value) || 1)} /></Field>

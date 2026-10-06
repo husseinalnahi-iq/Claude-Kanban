@@ -31,6 +31,7 @@ test("onboarding fields round-trip: task tag, project answers, checklist setting
 });
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { removeTemp } from "./helpers.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { probeFolder } from "../src/engine/onboarding.ts";
@@ -128,7 +129,8 @@ test("bootstrap and /init are tagged tasks; bootstrap refuses a folder with code
     assert.equal(created3.onboardingTask, null);
   } finally {
     await app.close();
-    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+    // The /init card runs in the folder without git (D399): wait for that work before deleting it (D394).
+    for (const d of dirs) await removeTemp(d);
   }
 });
 

@@ -1199,7 +1199,7 @@ What stops an unattended run from doing damage, in Settings → *Runs & limits*:
   anything that could write asks, or in the chat becomes a card.
 - **A shared checkout** — a supervised run notes what was already uncommitted when it started, leaves
   it alone, and lists the files it changed, so you commit only this task's work.
-- **A per-task cost ceiling** on top of the per-stage one. Three stages at $5 was already $15. Reaching
+- **A per-task cost ceiling** on top of the per-stage one: $20 each by default, with 500 turns per stage (D402). Reaching
   either ceiling **pauses the task and asks you** — *Continue* lets it spend one more stage's worth in the
   same session; *Stop* keeps what it did. Nothing is thrown away for money.
 - **Loop detection** — a stage repeating the same tool call is stopped and the reason recorded.

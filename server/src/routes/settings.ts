@@ -61,7 +61,7 @@ const patchSchema = z.object({
   maxForcedParallel: z.number().int().min(1).max(8).optional(),
   defaultMaxConcurrent: z.number().int().min(1).max(8).optional(),
   disabledSkills: z.array(z.string()).optional(),
-  maxTurnsPerStage: z.number().int().min(1).max(500).optional(),
+  maxTurnsPerStage: z.number().int().min(1).max(2000).optional(),
   maxCostPerStageUsd: z.number().min(0.05).max(100).optional(),
   maxSubagentDepth: z.number().int().min(1).max(5).optional(),
   maxConcurrentSubagents: z.number().int().min(1).max(20).optional(),

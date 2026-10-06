@@ -275,13 +275,22 @@ export function openDb(file: string): DatabaseSync {
   seed.run("browserCheckModel", "stage");
   seed.run("autoUpdateEngine", "true");
   seed.run("liveView", "true");
-  seed.run("maxCostPerTaskUsd", "15");
+  seed.run("maxCostPerTaskUsd", "20");
   seed.run("maxRepeatedToolCalls", "8");
   seed.run("eventRetentionDays", "30");
   seed.run("blockedCommands", JSON.stringify(DEFAULT_BLOCKED_COMMANDS));
   seed.run("disabledSkills", "[]");
-  seed.run("maxTurnsPerStage", "60");
-  seed.run("maxCostPerStageUsd", "5");
+  seed.run("maxTurnsPerStage", "500");
+  seed.run("maxCostPerStageUsd", "20");
+  // D402: the run ceilings went up. A board still on the old defaults takes the new ones, once; a value
+  // someone chose is left as it is, and so is anything changed after this ran.
+  if (!db.prepare("SELECT 1 FROM settings WHERE key = 'ceilingsRaisedD402'").get()) {
+    const raise = db.prepare("UPDATE settings SET value = ? WHERE key = ? AND value = ?");
+    raise.run("500", "maxTurnsPerStage", "60");
+    raise.run("20", "maxCostPerStageUsd", "5");
+    raise.run("20", "maxCostPerTaskUsd", "15");
+    seed.run("ceilingsRaisedD402", "1");
+  }
   seed.run("maxSubagentDepth", "2");
   seed.run("maxConcurrentSubagents", "5");
   seed.run("cacheableSystemPrompt", "true");
