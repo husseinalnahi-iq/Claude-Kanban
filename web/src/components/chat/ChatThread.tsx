@@ -14,6 +14,7 @@ import { PaperclipIcon, RunStyleSwitch } from "../ui.tsx";
 import { autonomousBlocked } from "../forms.tsx";
 import { ChatBoard, ChatCards, ChatTray, ChatUpdateRow } from "./ChatCard.tsx";
 import { CacheStrip } from "./CacheStrip.tsx";
+import { toBase64 } from "../../lib/files.ts";
 
 const STARTERS = [
   "What does this project do, in plain words?",
@@ -75,16 +76,6 @@ function FileChips({ files, onRemove }: { files: (Pick<ChatFile, "id" | "name" |
       )}
     </div>
   );
-}
-
-/** File → base64 without the `data:…;base64,` prefix, which is what the upload route expects. */
-function toBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onerror = () => reject(new Error(`Could not read ${file.name}`));
-    r.onload = () => resolve(String(r.result).split(",")[1] ?? "");
-    r.readAsDataURL(file);
-  });
 }
 
 /**

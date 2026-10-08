@@ -330,8 +330,8 @@ export async function taskRoutes(app: FastifyInstance, { repo, bus, runner }: Ap
     }
   });
   app.post("/tasks/:id/message", async (req) => {
-    const body = z.object({ body: z.string().trim().min(1) }).parse(req.body);
-    return runner.chat(idOf(req), body.body);
+    const body = z.object({ body: z.string().trim().min(1), attachment_ids: z.array(z.string()).max(10).optional() }).parse(req.body);
+    return runner.chat(idOf(req), body.body, body.attachment_ids);
   });
   app.get("/tasks/:id/diff", async (req) => runner.diff(idOf(req)));
   // What the board knows about each card's memory, for the web to draw with memoryFacts as the cache cools (D374).
@@ -360,14 +360,14 @@ export async function taskRoutes(app: FastifyInstance, { repo, bus, runner }: Ap
 
   // A follow-up round on a done card: its coder continues with what it remembers (D375).
   app.post("/tasks/:id/rounds", async (req) => {
-    const body = z.object({ request: z.string().trim().min(1), review: z.boolean().optional(), force: z.boolean().optional() }).parse(req.body ?? {});
-    return runner.startRound(idOf(req), body.request, { review: body.review, force: body.force });
+    const body = z.object({ request: z.string().trim().min(1), review: z.boolean().optional(), force: z.boolean().optional(), attachment_ids: z.array(z.string()).max(10).optional() }).parse(req.body ?? {});
+    return runner.startRound(idOf(req), body.request, { review: body.review, force: body.force, attachmentIds: body.attachment_ids });
   });
   app.get("/tasks/:id/rounds", async (req) => repo.roundsFor(idOf(req)));
   app.get("/tasks/:id/memory", async (req) => runner.memoryInput(idOf(req)));
   // A new card that starts with a copy of this card's coder memory (D376).
   app.post("/tasks/:id/fork", async (req) => {
-    const body = z.object({ title: z.string().trim().default(""), request: z.string().trim().min(1), review: z.boolean().optional(), force: z.boolean().optional() }).parse(req.body ?? {});
-    return runner.forkTask(idOf(req), body);
+    const body = z.object({ title: z.string().trim().default(""), request: z.string().trim().min(1), review: z.boolean().optional(), force: z.boolean().optional(), attachment_ids: z.array(z.string()).max(10).optional() }).parse(req.body ?? {});
+    return runner.forkTask(idOf(req), { ...body, attachmentIds: body.attachment_ids });
   });
 }

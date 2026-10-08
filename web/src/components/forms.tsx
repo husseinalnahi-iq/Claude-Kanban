@@ -6,6 +6,8 @@ import type { StageStat } from "../../../server/src/routes/analytics.ts";
 import { useAppData } from "../lib/store.tsx";
 import { navigate } from "../lib/router.ts";
 import { Button, ErrorLine, Field, inputCls, Modal, useAction, ModeHelp, RunStyleSwitch } from "./ui.tsx";
+import { AttachButton, FileChips, onPasteFiles } from "./AttachFiles.tsx";
+import { fileName, toBase64 } from "../lib/files.ts";
 import { PipelineEditor, pipelineLine } from "./PipelineEditor.tsx";
 import { modelLabel } from "../lib/format.ts";
 import { SafetyOptions } from "./SafetyOptions.tsx";
@@ -62,6 +64,9 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
   const noBranch = branchBlocked(project);
   const [planApproval, setPlanApproval] = useState<boolean | null>(null);
   const [after, setAfter] = useState<string[]>([]);
+  // Kept here until the card exists, then saved to its Files before it starts: its first stage sees them (D424).
+  const [files, setFiles] = useState<File[]>([]);
+  const addFiles = (list: File[]) => setFiles((prev) => [...prev, ...list]);
   const { busy, error, run } = useAction();
   const invalid = whenInvalid(when);
   // "Quick change": the same pipeline without its plan stage. A one-file fix taken through plan → code →
@@ -84,6 +89,14 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
         return;
       }
       const t = await api.createTask({ project_id: project.id, title, spec_md: spec, mode, may_ask, pipeline, parent_id: parentId ?? null, milestone_id: milestoneId ?? null, live, plan_approval: planApproval, own_branch: mode === "supervised" && ownBranch, depends_on: after });
+      try {
+        for (const f of files) await api.addAttachment(t.id, { name: fileName(f), media_type: f.type, data: await toBase64(f) });
+      } catch (e) {
+        // The card exists, so creating again would make a second one: open it, where Files can take the rest.
+        onClose();
+        navigate({ taskId: t.id });
+        throw e;
+      }
       const startAt = startAtOf(when);
       if (startAt) {
         // A start time means "not now": the scheduler queues it when the time comes, so Create & queue
@@ -117,7 +130,16 @@ export function NewTaskForm({ project, parentId, milestoneId, initialWhen, onClo
           <input className={inputCls} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Add hello.md with three lines" autoFocus />
         </Field>
         <Field label="Spec (markdown)">
-          <textarea className={`${inputCls} min-h-[120px] font-mono text-[12.5px]`} value={spec} onChange={(e) => setSpec(e.target.value)} placeholder="What done looks like, constraints, files…" />
+          <textarea className={`${inputCls} min-h-[120px] font-mono text-[12.5px]`} value={spec} onChange={(e) => setSpec(e.target.value)} onPaste={when.kind !== "repeat" ? onPasteFiles(addFiles) : undefined} placeholder="What done looks like, constraints, files… (paste a screenshot or file to attach it)" />
+          {when.kind !== "repeat" ? (
+            <div className="mt-1.5 flex items-start gap-2">
+              <AttachButton onFiles={addFiles} />
+              <div className="min-w-0 flex-1">
+                {files.length ? null : <div className="pt-1.5 text-[11.5px] text-ink-400">Attach screenshots, sheets or documents: the task gets them before it starts.</div>}
+                <FileChips files={files.map((f, i) => ({ key: String(i), name: fileName(f) }))} onRemove={(key) => setFiles((prev) => prev.filter((_, i) => String(i) !== key))} />
+              </div>
+            </div>
+          ) : null}
         </Field>
         {when.kind !== "repeat" ? (
           <Field label="Starts after (optional)" hint={after.length ? "It waits for these to be done, then starts by itself — and is told what they did. Create & queue now: it waits in Queued." : "Chain it after other tasks: pick the ones that must be done first."}>

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { handsOffGate, isTrusted, trustRules } from "../src/engine/gate.ts";
 import { chatBoardHandlers } from "../src/engine/chatBoard.ts";
 import { answerStage } from "../src/engine/answer.ts";
-import { PolicyError, type QueryFn } from "../src/engine/runner.ts";
+import { PolicyError, forceAsk, type QueryFn } from "../src/engine/runner.ts";
 import type { Stage } from "../src/types.ts";
 import { setup, until, type Call } from "./helpers.ts";
 
@@ -177,4 +177,15 @@ test("a project that keeps autonomous in its sandbox sends a chat's lookup to su
   } finally {
     await s.cleanup();
   }
+});
+
+test("a supervised run is refused, not asked, when a call would print a credentials file (D426)", async () => {
+  const hook = forceAsk(true, CWD)[0].hooks[0];
+  const decide = async (tool_name: string, tool_input: object) =>
+    ((await hook({ tool_name, tool_input } as never, undefined, { signal: new AbortController().signal })) as { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string } }).hookSpecificOutput;
+  const printed = await decide("Bash", { command: 'cd "C:/work/proj" && cat .codex-secrets/bizapp-api.json && python -c "print(1)"' });
+  assert.equal(printed?.permissionDecision, "deny");
+  assert.match(printed!.permissionDecisionReason!, /\.codex-secrets\/bizapp-api\.json.*load the file itself/);
+  assert.equal((await decide("Read", { file_path: "C:/work/proj/.env" }))?.permissionDecision, "deny", "a Read would otherwise go through unasked");
+  assert.equal((await decide("Bash", { command: "python scripts/move.py --keys .codex-secrets/bizapp-api.json" }))?.permissionDecision, "ask", "a script that loads it still asks as usual");
 });

@@ -10,6 +10,7 @@ import { Repo } from "../src/repo.ts";
 import { Bus } from "../src/bus.ts";
 import { TaskRunner, type QueryFn } from "../src/engine/runner.ts";
 import { worktreePathFor } from "../src/git/worktree.ts";
+import { saveAttachment } from "../src/routes/attachments.ts";
 import { chatBoardHandlers } from "../src/engine/chatBoard.ts";
 import { chatPrompt } from "../src/engine/chat.ts";
 import type { Stage } from "../src/types.ts";
@@ -314,5 +315,28 @@ test("the chat saves a lesson the user asked it to remember, and later cards sta
     assert.match(chatPrompt({ id: "p", name: "p", path: "/p" } as never), /save it with board_remember/);
   } finally {
     await s.cleanup();
+  }
+});
+
+test("files sent with a round reach its prompt by path, and a fork gets its own copies it can open (D424)", async () => {
+  const w = writer([{ file: "page.html", session: "s-coder" }, { file: "style.css", session: "s-coder" }, { file: "contact.html", session: "s-fork" }]);
+  const b = board(w.fn);
+  try {
+    const first = await doneCard(b);
+    const shot = saveAttachment(b.repo, { task_id: first.id, source: "user", name: "shot.png", data: Buffer.from("png"), note: null });
+    await b.runner.startRound(first.id, "Match this screenshot", { attachmentIds: [shot.id] });
+    await until(() => b.repo.getTask(first.id)!.status === "review" && !b.runner.isBusy(first.id));
+    assert.ok(w.calls[1]!.prompt.includes(`- shot.png: ${shot.path}`));
+    assert.equal(b.repo.roundsFor(first.id).at(-1)!.request, "Match this screenshot", "the round's list keeps the request short");
+    await b.runner.approveTask(first.id);
+
+    const fork = await b.runner.forkTask(first.id, { title: "Contact page", request: "Same look as this", attachmentIds: [shot.id] });
+    await until(() => b.repo.getTask(fork.id)!.status === "review" && !b.runner.isBusy(fork.id));
+    const copy = b.repo.listAttachments(fork.id).find((a) => a.name === "shot.png");
+    assert.ok(copy, "the new card has its own copy");
+    assert.notEqual(copy!.path, shot.path);
+    assert.ok(w.calls[2]!.prompt.includes(`- shot.png: ${copy!.path}`), "and is pointed at the copy its sandbox may read");
+  } finally {
+    await b.cleanup();
   }
 });

@@ -5,6 +5,7 @@ import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { AUTO_BLOCK_AFTER, verdictOf, type QueryFn } from "../src/engine/runner.ts";
 import { boardHandlers } from "../src/engine/boardMcp.ts";
+import { chatBoardHandlers } from "../src/engine/chatBoard.ts";
 import { stoppedBy, supervisedFrom, type Stage } from "../src/types.ts";
 import { setup, until, type Call } from "./helpers.ts";
 
@@ -137,7 +138,7 @@ test("an autonomous stage that keeps hitting the sandbox is stopped and marked b
     () => "should not matter",
     async (_i, o) => {
       for (let n = 0; n < AUTO_BLOCK_AFTER + 2 && !o.abortController.signal.aborted; n++) {
-        const d = await o.canUseTool("Bash", { command: `type "C:\\elsewhere\\secret-${n}.json"` }, { signal: new AbortController().signal, toolUseID: `t${n}` });
+        const d = await o.canUseTool("Bash", { command: `type "C:\\elsewhere\\data-${n}.json"` }, { signal: new AbortController().signal, toolUseID: `t${n}` });
         replies.push(d.message ?? "");
       }
     },
@@ -229,7 +230,7 @@ test("an autonomous run that lacks access names it, carries on to review, and th
   }
 });
 
-test("a review that still blocks after a suggestion stops the task and asks for the supervised run", async () => {
+test("a review that still blocks after a sign-in suggestion stops the task, keeps asking for that sign-in, and signing in reruns the review (D422)", async () => {
   const f = scripted(
     (i) => (i === 2 ? "VERDICT: BLOCKED — nothing can be checked without the live system" : "ok"),
     async (i, _o, board) => {
@@ -247,6 +248,15 @@ test("a review that still blocks after a suggestion stops the task and asks for 
     const t = s.repo.getTask(task.id)!;
     assert.equal(stoppedBy(t)?.stage_index, 2);
     assert.equal(t.blocked?.needs, "supervised", "the way on is the supervised run it already suggested");
+    assert.deepEqual(t.blocked?.needs_access, { kind: "sign_in", target: "erp.example.com" }, "the stop still names the sign-in, so the card can ask for it");
+
+    // Signing in wakes it: the review that stopped for the sign-in runs again, not the code stage.
+    const sent = s.runner.resumeAfterSignIn("erp.example.com");
+    assert.equal(sent.length, 1);
+    await until(() => f.calls.length > 3, 10_000);
+    assert.match(f.calls[3].prompt, /# Stage: review/);
+    assert.match(f.calls[3].prompt, /The person has since done this: sign in to erp\.example\.com/);
+    await until(() => !s.runner.isBusy(task.id));
   } finally {
     await s.runner.discardTask(s.repo.listTasks({ project_id: s.project.id })[0].id).catch(() => undefined);
     await s.cleanup();
@@ -267,7 +277,7 @@ test("Switch to supervised on a stopped task: drops the worktree, re-runs from t
     async (i, o) => {
       // The board's own stop: a stage that kept trying to read the main checkout from its worktree.
       for (let n = 0; i === 1 && n < AUTO_BLOCK_AFTER && !o.abortController.signal.aborted; n++) {
-        await o.canUseTool("Read", { file_path: join(f.holder.ctx!.dir, `secret-${n}.json`) }, { signal: new AbortController().signal, toolUseID: `t${n}` });
+        await o.canUseTool("Read", { file_path: join(f.holder.ctx!.dir, `data-${n}.json`) }, { signal: new AbortController().signal, toolUseID: `t${n}` });
       }
     },
   );
@@ -315,6 +325,46 @@ test("a Reject's reason reaches the next run, and Discard keeps it (D196)", asyn
     assert.equal(s.repo.getTask(task.id)!.note, null, "the card's note clears on queue, as before");
     await until(() => s.repo.getTask(task.id)!.status === "review");
     assert.match(f.calls[1].prompt, /## Why this was sent back\nA person rejected the previous attempt: The how-to steps are missing\./);
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test("with Chrome as the fallback, the first sign-in page opens Chrome to the run; only a second one asks the person (D423)", async () => {
+  const s = setup((() => (async function* () {})()) as unknown as QueryFn);
+  try {
+    const task = s.repo.createTask({ project_id: s.project.id, title: "x", mode: "autonomous", pipeline: PLAN_CODE_REVIEW });
+    let opened = 0;
+    const h = boardHandlers(s.repo, s.bus, { taskId: task.id, runId: "r_x", openChrome: () => opened++ });
+    assert.match(JSON.stringify(h.needsSignIn("ERP.example.com")), /Claude in Chrome/);
+    assert.equal(opened, 1);
+    assert.equal(s.repo.getTask(task.id)!.blocked, null, "Chrome may do it: nothing to ask the person yet");
+    h.needsSignIn("erp.example.com");
+    assert.equal(opened, 1, "Chrome is not opened twice for one site");
+    assert.deepEqual(s.repo.getTask(task.id)!.blocked?.needs_access, { kind: "sign_in", target: "erp.example.com" }, "Chrome could not either: the card asks for the sign-in");
+
+    // Without the fallback the first call asks, as before.
+    const other = s.repo.createTask({ project_id: s.project.id, title: "y", mode: "autonomous", pipeline: PLAN_CODE_REVIEW });
+    boardHandlers(s.repo, s.bus, { taskId: other.id, runId: "r_y" }).needsSignIn("erp.example.com");
+    assert.equal(s.repo.getTask(other.id)!.blocked?.needs_access?.target, "erp.example.com");
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test("told which browser a card should use, the AI Manager sets it on that card and leaves Settings alone (D423)", async () => {
+  const s = setup((() => (async function* () {})()) as unknown as QueryFn);
+  try {
+    const h = chatBoardHandlers({ repo: s.repo, bus: s.bus, runner: s.runner }, s.project.id, null, () => {});
+    const task = s.repo.createTask({ project_id: s.project.id, title: "x", mode: "autonomous", pipeline: PLAN_CODE_REVIEW });
+    assert.match(JSON.stringify(h.setTaskBrowser({ task_id: task.id, browser: "chrome" })), /Settings are unchanged/);
+    assert.equal(s.repo.getTask(task.id)!.browser, "chrome");
+    assert.equal(s.repo.getSettings().taskBrowser, "board");
+    h.setTaskBrowser({ task_id: task.id, browser: "default" });
+    assert.equal(s.repo.getTask(task.id)!.browser, null, "back to Settings");
+
+    const made = JSON.parse(h.createTask({ title: "Check the page", spec_md: "x", browser: "chrome" } as never).content[0].text);
+    assert.equal(s.repo.getTask(made.created.id)!.browser, "chrome", "a new card can carry the pick from the start");
   } finally {
     await s.cleanup();
   }

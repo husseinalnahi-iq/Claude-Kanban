@@ -179,7 +179,7 @@ export const api = {
   discard: (id: string) => req<Task>("POST", `/tasks/${id}/discard`),
   escalate: (id: string) => req<Task>("POST", `/tasks/${id}/escalate`),
   answerQuestion: (id: string, questionId: string, answer: string) => req<Task>("POST", `/tasks/${id}/questions/${questionId}`, { answer }),
-  chat: (id: string, body: string) => req<Run>("POST", `/tasks/${id}/message`, { body }),
+  chat: (id: string, body: string, attachment_ids?: string[]) => req<Run>("POST", `/tasks/${id}/message`, { body, attachment_ids }),
   diff: (id: string) => req<DiffFile[]>("GET", `/tasks/${id}/diff`),
 
   runs: () => req<RunListItem[]>("GET", "/runs"),
@@ -213,8 +213,8 @@ export const api = {
   projectMemory: (projectId: string) => req<Record<string, MemoryInput>>("GET", `/projects/${projectId}/memory`),
   taskMemory: (taskId: string) => req<MemoryInput>("GET", `/tasks/${taskId}/memory`),
   rounds: (taskId: string) => req<TaskRound[]>("GET", `/tasks/${taskId}/rounds`),
-  startRound: (taskId: string, b: { request: string; review?: boolean }) => req<Task>("POST", `/tasks/${taskId}/rounds`, b),
-  forkTask: (taskId: string, b: { title?: string; request: string; review?: boolean }) => req<Task>("POST", `/tasks/${taskId}/fork`, b),
+  startRound: (taskId: string, b: { request: string; review?: boolean; attachment_ids?: string[] }) => req<Task>("POST", `/tasks/${taskId}/rounds`, b),
+  forkTask: (taskId: string, b: { title?: string; request: string; review?: boolean; attachment_ids?: string[] }) => req<Task>("POST", `/tasks/${taskId}/fork`, b),
 
   stageStats: (projectId: string) => req<StageStat[]>("GET", `/stats/stages?project=${encodeURIComponent(projectId)}`),
   analytics: (projectId: string | undefined, days: number) =>

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { TaskRunner, limitCovers, taskStateDir, type QueryFn } from "../src/engine/runner.ts";
 import type { Provider, Stage } from "../src/types.ts";
 import { fakeQuery, setup, until } from "./helpers.ts";
+import { saveAttachment } from "../src/routes/attachments.ts";
 
 const SONNET: Stage[] = [{ stage: "code", model: "claude-sonnet-5", effort: "low" }];
 const OPUS: Stage[] = [{ stage: "code", model: "claude-opus-5", effort: "low" }];
@@ -32,6 +33,7 @@ function fakeGit(over: Record<string, unknown> = {}) {
     isGitRepo: async () => true,
     currentBranch: async () => "main",
     isDirty: async () => false,
+    isAncestor: async () => false,
     headSha: async () => null,
     statusFiles: async () => [],
     updateFromBase: async () => ({ ok: true, pulled: 0, conflicts: [] }),
@@ -622,6 +624,27 @@ test("two screens asking what runs get, or whether fast mode is on, share one ch
     assert.equal(sessions, 1);
     assert.equal(x, y);
     assert.equal(x.servers[0].name, "board");
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test("files sent with a message to a task are named with their paths, so the run can open them; another task's file is not (D424)", async () => {
+  const f = fakeQuery();
+  const s = setup(f.fn);
+  try {
+    const task = s.repo.createTask({ project_id: s.project.id, title: "x", mode: "supervised", pipeline: SONNET });
+    const other = s.repo.createTask({ project_id: s.project.id, title: "y", mode: "supervised", pipeline: SONNET });
+    s.runner.queueTask(task.id);
+    await until(() => s.repo.getTask(task.id)!.status === "review" && !s.runner.isBusy(task.id));
+    const mine = saveAttachment(s.repo, { task_id: task.id, source: "user", name: "invoice.csv", data: Buffer.from("a,b\n1,2\n"), note: null });
+    const theirs = saveAttachment(s.repo, { task_id: other.id, source: "user", name: "secret.csv", data: Buffer.from("x\n"), note: null });
+    s.runner.chat(task.id, "use these totals", [mine.id, theirs.id]);
+    await until(() => f.calls.length === 2 && !s.runner.isBusy(task.id));
+    const prompt = f.calls[1].prompt;
+    assert.match(prompt, /^use these totals\n\nFiles attached to this message/);
+    assert.ok(prompt.includes(`- invoice.csv: ${mine.path}`));
+    assert.ok(!prompt.includes("secret.csv"), "a file from another card never rides along");
   } finally {
     await s.cleanup();
   }

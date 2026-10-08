@@ -176,6 +176,7 @@ const LATER_COLUMNS: { table: string; column: string; ddl: string; backfill?: st
   { table: "tasks", column: "footprint_json", ddl: "footprint_json TEXT" },
   { table: "tasks", column: "hold_json", ddl: "hold_json TEXT" },
   { table: "tasks", column: "recovery_json", ddl: "recovery_json TEXT" },
+  { table: "tasks", column: "browser", ddl: "browser TEXT" },
 ];
 
 /**
@@ -267,6 +268,7 @@ export function openDb(file: string): DatabaseSync {
   seed.run("browserChecks", "true");
   seed.run("chromeInSupervised", "false");
   seed.run("taskBrowser", "board");
+  seed.run("chromeFallback", "true");
   seed.run("browserSites", "[]");
   seed.run("autoAllowReadOnly", "true");
   seed.run("markitdownInTasks", "true");

@@ -10,6 +10,8 @@ import { searchBoard } from "../search.ts";
 export interface BoardCtx {
   taskId: string;
   runId: string;
+  /** Opens Claude in Chrome to this run, when it is the fallback for the board's browser (D423). */
+  openChrome?: () => void;
 }
 
 /** Lines a past-work search returns: enough to choose from, few enough to stay cheap to read. */
@@ -74,6 +76,7 @@ function stageResults(runs: Run[]) {
 /** Implementation of the board tools, separate from the MCP wrapper so tests can call it directly. */
 export function boardHandlers(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtasks?: (parent: Task) => unknown[]) {
   const own = () => repo.getTask(ctx.taskId)!;
+  const triedInChrome = new Set<string>();
   return {
     getTask(args: { task_id?: string }) {
       const t = repo.getTask(args.task_id ?? ctx.taskId);
@@ -234,6 +237,24 @@ export function boardHandlers(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtasks?: 
      * except an autonomous run that needs a supervised one: the person chose to let it run, so that is
      * a suggestion on the card and the run does what the sandbox allows (D382).
      */
+    /**
+     * The board's browser met a sign-in page. With Chrome as the fallback, the first call for a site opens
+     * Chrome to the run instead of asking the person; a second call means Chrome could not do it either (D423).
+     */
+    needsSignIn(host: string) {
+      const site = host.trim().toLowerCase();
+      if (ctx.openChrome && !triedInChrome.has(site)) {
+        triedInChrome.add(site);
+        ctx.openChrome();
+        return text(
+          `Try ${site} in Claude in Chrome now: the user's own Chrome, where they may already be signed in (load the mcp__claude-in-chrome__* tools with ToolSearch). ` +
+            "Work in a new tab, never sign out, change an account or send anything on their behalf. " +
+            `If Chrome is not connected, or it is not signed in to ${site} either, call board_needs_sign_in again with the same host: the card then asks the person to sign in.`,
+        );
+      }
+      return this.reportBlocked({ reason: `It needs you signed in to ${site} to go on.`, needs: "supervised", needs_access: { kind: "sign_in", target: site } });
+    },
+
     reportBlocked(args: { reason: string; needs: Blocked["needs"]; ask?: string; needs_access?: NeedsAccess }) {
       const run = repo.getRun(ctx.runId);
       const mode = own().mode;
@@ -357,7 +378,7 @@ export function createBoardServer(repo: Repo, bus: Bus, ctx: BoardCtx, onSubtask
       tool("board_needs_sign_in",
         "A page you must use needs a sign-in the board's browser does not have. Call this with the site's host: the card asks the person to sign in to it, and this stage runs again once they have. Carry on with everything else meanwhile.",
         { host: z.string().min(3).max(200).describe("The site's host, e.g. erp.example.com.") },
-        async (a) => h.reportBlocked({ reason: `It needs you signed in to ${a.host} to go on.`, needs: "supervised", needs_access: { kind: "sign_in", target: a.host } })),
+        async (a) => h.needsSignIn(a.host)),
     ],
   });
 }

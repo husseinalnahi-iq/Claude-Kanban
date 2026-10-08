@@ -26,6 +26,8 @@ import { Transcript } from "../components/Transcript.tsx";
 import { DiffView } from "../components/DiffView.tsx";
 import { DepGraph } from "../components/DepGraph.tsx";
 import { Gallery } from "../components/Gallery.tsx";
+import { AttachButton, FileChips, onPasteFiles } from "../components/AttachFiles.tsx";
+import { fileName, toBase64 } from "../lib/files.ts";
 import { CostPanel } from "../components/CostPanel.tsx";
 import { PlanGate } from "../components/PlanGate.tsx";
 import { SafetyOptions } from "../components/SafetyOptions.tsx";
@@ -456,13 +458,24 @@ function ActivityTab({ d }: { d: TaskDetail }) {
   const runId = selected ?? d.runs.at(-1)?.id;
   const run = d.runs.find((r) => r.id === runId);
   const [text, setText] = useState("");
+  // Saved to the task's Files the moment they are attached; the message names them so the run opens them (D424).
+  const [files, setFiles] = useState<{ key: string; name: string }[]>([]);
   const { busy, error, run: act } = useAction();
+  const upload = useAction();
   const canSend = d.busy || Boolean(latest?.session_id);
+  const attach = (list: File[]) =>
+    void upload.run(async () => {
+      for (const f of list) {
+        const a = await api.addAttachment(d.task.id, { name: fileName(f), media_type: f.type, data: await toBase64(f) });
+        setFiles((prev) => [...prev, { key: a.id, name: a.name }]);
+      }
+    });
   const send = () => {
-    if (!text.trim()) return;
+    if (!text.trim() && !files.length) return;
     void act(async () => {
-      await api.chat(d.task.id, text);
+      await api.chat(d.task.id, text.trim() || "See the attached file(s).", files.map((f) => f.key));
       setText("");
+      setFiles([]);
     });
   };
   return (
@@ -515,14 +528,17 @@ function ActivityTab({ d }: { d: TaskDetail }) {
             value={text}
             disabled={!canSend}
             onChange={(e) => setText(e.target.value)}
+            onPaste={canSend ? onPasteFiles(attach) : undefined}
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send();
             }}
           />
-          <Button type="submit" variant="primary" busy={busy} disabled={!canSend || !text.trim()}>Send</Button>
+          <AttachButton onFiles={attach} disabled={!canSend} busy={upload.busy} />
+          <Button type="submit" variant="primary" busy={busy} disabled={!canSend || upload.busy || (!text.trim() && !files.length)}>Send</Button>
         </div>
+        <FileChips files={files} onRemove={(key) => setFiles((prev) => prev.filter((f) => f.key !== key))} />
       </form>
-      <ErrorLine error={error} />
+      <ErrorLine error={error ?? upload.error} />
     </div>
   );
 }
@@ -647,6 +663,17 @@ function RoundsPanel({ d }: { d: TaskDetail }) {
   const [ask, setAsk] = useState("");
   const [review, setReview] = useState(false);
   const { busy, error, run } = useAction();
+  // Saved to this card at once; a new card branched from it gets its own copies (D424).
+  const [files, setFiles] = useState<{ key: string; name: string }[]>([]);
+  const upload = useAction();
+  const attach = (list: File[]) =>
+    void upload.run(async () => {
+      for (const f of list) {
+        const a = await api.addAttachment(t.id, { name: fileName(f), media_type: f.type, data: await toBase64(f) });
+        setFiles((prev) => [...prev, { key: a.id, name: a.name }]);
+      }
+    });
+  const attachment_ids = files.map((f) => f.key);
   if (!memory || !(t.status === "done" || t.round > 1)) return null;
   const hasReview = t.pipeline.some((st) => st.stage === "review");
   const next = t.round + 1;
@@ -684,17 +711,21 @@ function RoundsPanel({ d }: { d: TaskDetail }) {
             className={`${inputCls} min-h-[56px] text-[12.5px]`}
             value={ask}
             onChange={(e) => setAsk(e.target.value)}
-            placeholder="What else should it do? It picks up where it left off, with everything it already knows about this work."
+            onPaste={onPasteFiles(attach)}
+            placeholder="What else should it do? It picks up where it left off, with everything it already knows about this work. (Paste a screenshot or file to attach it.)"
           />
+          <FileChips files={files} onRemove={(key) => setFiles((prev) => prev.filter((f) => f.key !== key))} />
           <div className="flex flex-wrap items-center gap-2">
+            <AttachButton onFiles={attach} busy={upload.busy} />
             <Button
               size="sm"
               variant="primary"
-              disabled={busy || !ask.trim()}
+              disabled={busy || upload.busy || !ask.trim()}
               title={`Round ${next} of this same card: its coder carries on in its own session, ${price(memory.continueUsd, memory.continueWeight)}, against ${price(memory.freshUsd, memory.freshWeight)} for a new card finding the same files. It gets its own steps, changes and Approve.`}
               onClick={() => run(async () => {
-                await api.startRound(t.id, { request: ask.trim(), review });
+                await api.startRound(t.id, { request: ask.trim(), review, attachment_ids });
                 setAsk("");
+                setFiles([]);
               })}
             >
               Continue on this card
@@ -702,11 +733,12 @@ function RoundsPanel({ d }: { d: TaskDetail }) {
             <Button
               size="sm"
               variant="outline"
-              disabled={busy || !ask.trim()}
+              disabled={busy || upload.busy || !ask.trim()}
               title="For separate work beside this one: a new card that starts with a copy of what this card knows. This card stays as it is."
               onClick={() => run(async () => {
-                const created = await api.forkTask(t.id, { request: ask.trim(), review });
+                const created = await api.forkTask(t.id, { request: ask.trim(), review, attachment_ids });
                 setAsk("");
+                setFiles([]);
                 navigate({ taskId: created.id });
               })}
             >
@@ -722,7 +754,7 @@ function RoundsPanel({ d }: { d: TaskDetail }) {
               this card {price(memory.continueUsd, memory.continueWeight)} · new card {price(memory.freshUsd, memory.freshWeight)}
             </span>
           </div>
-          <ErrorLine error={error} />
+          <ErrorLine error={error ?? upload.error} />
         </div>
       ) : null}
     </div>
@@ -1015,8 +1047,9 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
             </div>
             {showCost ? <div className="border-b border-ink-800 px-5 py-3"><CostPanel runs={d.runs} /></div> : null}
             {d.task.plan_gate ? <PlanGate d={d} showingPlan={current === "plan"} onShowPlan={() => setTab("plan")} /> : null}
-            {/* A suggestion matters only while the work it is about waits on you (D382). */}
-            {(stoppedBy(d.task) || (d.task.blocked?.advisory && ["review", "failed"].includes(d.task.status))) && !d.busy ? <BlockedPanel d={d} /> : null}
+            {/* A suggestion matters only while the work it is about waits on you (D382). A sign-in is the exception:
+                given while it still runs, its next stage already has it, so it is asked for at once (D422). */}
+            {((stoppedBy(d.task) || (d.task.blocked?.advisory && ["review", "failed"].includes(d.task.status))) && !d.busy) || (d.busy && d.task.blocked?.needs_access?.kind === "sign_in") ? <BlockedPanel d={d} /> : null}
             <QuestionsPanel d={d} />
             <RoundsPanel d={d} />
             {/* While it works, and after a stop or failure: where it got to. A finished task's list is only noise. */}

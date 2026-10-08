@@ -941,3 +941,11 @@ test("a skill the chat changed is named in its tool line, not just as SKILL.md",
   assert.equal(describeTool("Edit", { file_path: skill }, "/p"), "changed the skill file erp/SKILL.md");
   assert.equal(describeTool("Write", { file_path: join("/p", ".claude", "skills", "mine", "SKILL.md") }, "/p"), "wrote the skill file mine/SKILL.md");
 });
+
+test("the chat says an autonomous card reaches live systems when Settings let it, so it stops making live cards supervised (D427)", () => {
+  const project = { name: "Shop", path: "/p" } as any;
+  const on = chatPrompt(project, { models: [], defaults: [], liveAutonomous: true });
+  assert.match(on, /an autonomous card reaches live systems too/);
+  assert.doesNotMatch(on, /cannot reach it/);
+  assert.match(chatPrompt(project, { models: [], defaults: [], liveAutonomous: false }), /an autonomous change is sandboxed and cannot reach it/);
+});

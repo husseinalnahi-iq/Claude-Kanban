@@ -595,6 +595,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [browserCheckModel, setBrowserCheckModel] = useState<HelperModel>("stage");
   const [chrome, setChrome] = useState(false);
   const [taskBrowser, setTaskBrowser] = useState<"board" | "chrome">("board");
+  const [chromeFallback, setChromeFallback] = useState(true);
   const [browserSites, setBrowserSites] = useState<string[]>([]);
   const [signInUrl, setSignInUrl] = useState("");
   const signIn = useAction();
@@ -680,6 +681,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
     take((s) => s.browserCheckModel ?? "stage", setBrowserCheckModel);
     take((s) => s.chromeInSupervised, setChrome);
     take((s) => s.taskBrowser ?? "board", setTaskBrowser);
+    take((s) => s.chromeFallback ?? true, setChromeFallback);
     take((s) => s.browserSites ?? [], setBrowserSites);
     take((s) => s.autoAllowReadOnly, setReadOnlyNoCard);
     take((s) => s.markitdownInTasks ?? true, setMarkitdown);
@@ -721,6 +723,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
           browserCheckModel,
           chromeInSupervised: chrome,
           taskBrowser,
+          chromeFallback,
           browserSites,
           autoAllowReadOnly: readOnlyNoCard,
           markitdownInTasks: markitdown,
@@ -1426,8 +1429,8 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
                 <span>
                   The board's browser, with the sites you sign in to <span className="text-moss">(recommended)</span>
                   <span className="block text-[11.5px] text-ink-400">
-                    Sign in once below; every task starts from that sign-in, and autonomous tasks may open those sites. Your own Chrome,
-                    with your email and bank, stays out of reach.
+                    Sign in once below; every task starts from that sign-in, and autonomous tasks may open those sites.
+                    {chromeFallback ? null : " Your own Chrome, with your email and bank, stays out of reach."}
                   </span>
                 </span>
               </label>
@@ -1442,6 +1445,18 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
                 </span>
               </label>
             </div>
+            {taskBrowser === "board" ? (
+              <label className="mt-2.5 flex cursor-pointer items-start gap-2">
+                <input type="checkbox" className="mt-1 accent-amber" checked={chromeFallback} onChange={(e) => setChromeFallback(e.target.checked)} />
+                <span>
+                  If a site there asks to sign in, try your own Chrome first
+                  <span className="block text-[11.5px] text-ink-400">
+                    A task gets your Chrome only after the board's browser met a sign-in page, for the rest of that stage. If Chrome
+                    can't do it either, the card asks you to sign in. Needs the Claude in Chrome extension.
+                  </span>
+                </span>
+              </label>
+            ) : null}
             {taskBrowser === "board" ? (
               <div className="mt-2.5 rounded-lg border border-ink-700 px-3 py-2">
                 <div className="text-[11.5px] text-ink-400">

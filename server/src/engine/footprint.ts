@@ -64,7 +64,9 @@ export function clash(a: FootprintOf, b: FootprintOf): Clash | null {
   if (sharesProjectFolder(a) && sharesProjectFolder(b)) {
     const fa = filesOf(a.footprint);
     const fb = filesOf(b.footprint);
-    if (!fa.length || !fb.length) out.unknown = true;
+    // "No files" holds only until it writes one: then what it touched is what counts (D426).
+    const known = (f: Footprint, files: string[]) => files.length > 0 || Boolean(f.none);
+    if (!known(a.footprint, fa) || !known(b.footprint, fb)) out.unknown = true;
     else out.files = sharedFiles(fa, fb);
   }
   // A lookup only reads the live system; two of them, or one beside a change, do not collide.

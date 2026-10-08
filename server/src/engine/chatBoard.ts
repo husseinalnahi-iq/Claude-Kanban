@@ -3,7 +3,7 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { Repo } from "../repo.ts";
 import type { Bus } from "../bus.ts";
-import type { ChatMessage, Effort, EventRow, Mode, RunStyle, Stage, Task } from "../types.ts";
+import type { ChatMessage, Effort, EventRow, Mode, RunStyle, Stage, Task, TaskBrowser } from "../types.ts";
 import { EFFORTS, PRIORITIES, RUN_STYLES, runStyleFields, TASK_STATUSES, TASK_TYPES } from "../types.ts";
 import { allowedMode, defaultPipeline } from "./boardMcp.ts";
 import { QUESTION_TOOL, type TaskRunner } from "./runner.ts";
@@ -19,12 +19,16 @@ const text = (value: unknown) => ({
 });
 const fail = (message: string) => ({ ...text(message), isError: true });
 const FILES_ARG = z.array(z.string()).max(60).optional().describe("Project files (or folders, ending in /) this card will change, as paths from the project's top. The board keeps cards changing the same files from running at the same time in one folder.");
+const NO_FILES_ARG = z.boolean().optional().describe("True when the card changes no project files at all (it only writes to a live system, or only reads): it can then run beside other cards in the same folder. Leave it out when unsure.");
 const SYSTEMS_ARG = z.array(z.string()).max(10).optional().describe("Live systems this card will write to, by name (for example \"the ERP\", \"the payments database\"). Two cards writing to the same one take turns.");
 /** One sentence on what a card overlaps with, for the chat to pass on; empty when nothing does (D400). */
-function overlapNote(found: { title: string; waits: boolean; files: string[]; systems: string[]; unknown: boolean }[]): string {
-  const waits = found.filter((f) => f.waits);
+function overlapNote(found: { title: string; status: string; waits: boolean; files: string[]; systems: string[]; unknown: boolean }[]): string {
+  const idle = found.filter((f) => f.waits && f.status === "backlog");
+  const waits = found.filter((f) => f.waits && f.status !== "backlog");
   const later = found.filter((f) => !f.waits);
   const parts: string[] = [];
+  // Cards made in this chat that are still in Backlog: started together, the second waits (D426).
+  if (idle.length) parts.push(`It cannot run at the same time as ${idle.map((f) => holdLine({ ...f }).replace(/^Waits for /, "")).join("; ")}. Whichever starts second waits. Tell the user they will take turns, not run together.`);
   if (waits.length) parts.push(`When started, it will wait for ${waits.map((f) => holdLine({ ...f }).replace(/^Waits for /, "")).join("; ")}. Tell the user it will take its turn.`);
   if (later.length) parts.push(`It changes the same files as ${later.map((f) => `“${f.title}” (${f.files.slice(0, 2).join(", ")})`).join(", ")}: both can run, but the second to be approved may need its conflicts resolved.`);
   return parts.join(" ");
@@ -182,7 +186,7 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
 
     createTask(args: {
       title: string; spec_md: string; type?: string; priority?: string; mode?: RunStyle; depends_on?: string[];
-      stages?: StageArg[]; live?: boolean; own_branch?: boolean; follows?: string; files?: string[]; live_systems?: string[]; force?: boolean;
+      stages?: StageArg[]; live?: boolean; own_branch?: boolean; follows?: string; files?: string[]; no_files?: boolean; live_systems?: string[]; force?: boolean; browser?: TaskBrowser;
     }) {
       const follows = args.follows ? mine(args.follows) : undefined;
       if (args.follows && !follows) return fail(`No card ${args.follows} in this project.`);
@@ -209,7 +213,7 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
       const style: RunStyle = answer && picked === "ask" ? "autonomous" : picked;
       const wanted: Mode = runStyleFields(style).mode;
       const mode: Mode = allowedMode(project, wanted, pipeline);
-      const t = repo.createTask({
+      const made0 = repo.createTask({
         project_id: projectId,
         title: args.title.trim(),
         // A fresh card that follows another is told what that one did (D56): it cannot remember it.
@@ -228,12 +232,13 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
         // A card with a plan waits for the user to see its mode and models on its setup card (D365).
         setup_pending: repo.getSettings().confirmSetup && pipeline.some((s) => s.stage === "plan"),
       });
+      const t = args.browser ? repo.updateTask(made0.id, { browser: args.browser }) : made0;
       // What the chat expects it to change: the queue keeps it off cards changing the same things (D400).
-      const made = args.files?.length || args.live_systems?.length
-        ? repo.updateTask(t.id, { footprint: { files: (args.files ?? []).slice(0, 60), systems: (args.live_systems ?? []).slice(0, 10), touched: [] } })
+      const made = args.files?.length || args.live_systems?.length || args.no_files
+        ? repo.updateTask(t.id, { footprint: { files: (args.files ?? []).slice(0, 60), systems: (args.live_systems ?? []).slice(0, 10), touched: [], ...(args.no_files ? { none: true } : {}) } })
         : t;
       publish(made);
-      const overlaps = runner.overlapsWith(projectId, made, made.id);
+      const overlaps = runner.overlapsWith(projectId, made, made.id, chatId);
       // The same intake a card made on the board gets — type and labels — but what was settled here with
       // the user is not offered back as a second opinion (D286).
       if (repo.getSettings().autoTriage) {
@@ -258,7 +263,7 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
       });
     },
 
-    overlaps(args: { files?: string[]; live_systems?: string[]; live?: boolean; mode?: RunStyle }) {
+    overlaps(args: { files?: string[]; no_files?: boolean; live_systems?: string[]; live?: boolean; mode?: RunStyle }) {
       const project = repo.getProject(projectId)!;
       const style = args.mode ?? (chatId ? repo.getChat(chatId)?.mode : undefined) ?? repo.getSettings().defaultRunStyle;
       const mode = allowedMode(project, runStyleFields(style).mode);
@@ -266,15 +271,15 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
         mode,
         in_folder: mode === "autonomous" && (!repo.getSettings().autonomousWorktree || project.policy.worktrees === "forbidden"),
         live: Boolean(args.live || args.live_systems?.length),
-        footprint: { files: args.files ?? [], systems: args.live_systems ?? [], touched: [] },
+        footprint: { files: args.files ?? [], systems: args.live_systems ?? [], touched: [], ...(args.no_files ? { none: true } : {}) },
       };
-      const found = runner.overlapsWith(projectId, card);
+      const found = runner.overlapsWith(projectId, card, undefined, chatId);
       return text({ overlaps: found, note: overlapNote(found) || "Nothing working now changes the same files or live systems: it can run alongside." });
     },
 
     updateTask(args: {
       task_id: string; title?: string; spec_md?: string; priority?: string; labels?: string[];
-      stages?: StageArg[]; mode?: RunStyle; own_branch?: boolean; live?: boolean; files?: string[]; live_systems?: string[];
+      stages?: StageArg[]; mode?: RunStyle; own_branch?: boolean; live?: boolean; files?: string[]; no_files?: boolean; live_systems?: string[];
     }) {
       const t = mine(args.task_id);
       if (!t) return fail(`No card ${args.task_id} in this project.`);
@@ -305,8 +310,8 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
         may_ask: asked ? allowed === "autonomous" && asked.may_ask : undefined,
         own_branch: ownBranch,
         live: answer ? (t.live ? false : undefined) : args.live,
-        footprint: args.files || args.live_systems
-          ? { ...t.footprint, ...(args.files ? { files: args.files.slice(0, 60) } : {}), ...(args.live_systems ? { systems: args.live_systems.slice(0, 10) } : {}) }
+        footprint: args.files || args.live_systems || args.no_files !== undefined
+          ? { ...t.footprint, ...(args.files ? { files: args.files.slice(0, 60) } : {}), ...(args.live_systems ? { systems: args.live_systems.slice(0, 10) } : {}), ...(args.no_files !== undefined ? { none: args.no_files } : {}) }
           : undefined,
       });
       // What the user just settled here replaces what triage offered for the same thing.
@@ -578,6 +583,19 @@ export function chatBoardHandlers({ repo, bus, runner, scheduler }: ChatBoardDep
       }
     },
 
+    /** The user named a browser for this card: it overrides Settings for this card only (D423). */
+    setTaskBrowser(args: { task_id: string; browser: TaskBrowser | "default" }) {
+      const t = mine(args.task_id);
+      if (!t) return fail(`No card ${args.task_id} in this project.`);
+      const browser = args.browser === "default" ? null : args.browser;
+      const updated = repo.updateTask(t.id, { browser });
+      bus.publish({ type: "task.updated", task: updated });
+      const what = browser === "chrome" ? "the user's own Chrome (Claude in Chrome)" : browser === "board" ? "the board's browser" : "the browser set in Settings";
+      // Tools are given to a session when it starts: a stage already running keeps what it began with.
+      const running = runner.isBusy(t.id) ? " The stage running now keeps the browser it started with; its next stage, or a retry, uses this one." : "";
+      return text({ task: brief(updated), note: `"${t.title}" now uses ${what}. Settings are unchanged.${running}` });
+    },
+
     stopTask(args: { task_id: string }) {
       const t = mine(args.task_id);
       if (!t) return fail(`No card ${args.task_id} in this project.`);
@@ -670,13 +688,15 @@ export function createChatBoardServer(deps: ChatBoardDeps, projectId: string, ch
           depends_on: z.array(z.string()).max(10).optional().describe("Ids of cards that must be done first. It can be started at once: it waits for them, then starts by itself with their results."),
           follows: z.string().optional().describe("The id of an earlier card this one follows on from, when board_related_cards recommends a fresh card: it is told what that card did and which files it changed."),
           files: FILES_ARG,
+          no_files: NO_FILES_ARG,
           live_systems: SYSTEMS_ARG,
           force: z.boolean().optional().describe("Make the card even when an open card has the same title — only when this is genuinely different work."),
+          browser: z.enum(["board", "chrome"]).optional().describe("Only when the user named a browser for this card: \"chrome\" = their own Chrome, \"board\" = the board's browser. Left out, Settings decide."),
         },
         async (a) => h.createTask(a)),
       tool("board_overlaps",
         "Before making or starting a change card, check which working cards it would wait for (the same files in the project folder, or the same live system) or might conflict with when both land. Pass the files and live systems it will change.",
-        { files: FILES_ARG, live_systems: SYSTEMS_ARG, live: z.boolean().optional(), mode: z.enum(RUN_STYLES as [RunStyle, ...RunStyle[]]).optional() },
+        { files: FILES_ARG, no_files: NO_FILES_ARG, live_systems: SYSTEMS_ARG, live: z.boolean().optional(), mode: z.enum(RUN_STYLES as [RunStyle, ...RunStyle[]]).optional() },
         async (a) => h.overlaps(a)),
       tool("board_related_cards",
         "Before making a change card, find the cards this request is about and what each one remembers: whether its coder's memory is warm, how full it is, what continuing costs against a new card, the routes open and the board's recommendation. Pass the user's request and any project files you looked at for it.",
@@ -697,7 +717,7 @@ export function createChatBoardServer(deps: ChatBoardDeps, projectId: string, ch
         {
           task_id: z.string(), title: z.string().optional(), spec_md: z.string().optional(), priority: z.enum(PRIORITIES as [string, ...string[]]).optional(), labels: z.array(z.string()).max(8).optional(),
           stages: stagesArg, mode: z.enum(RUN_STYLES as [RunStyle, ...RunStyle[]]).optional(), own_branch: z.boolean().optional(), live: z.boolean().optional(),
-          files: FILES_ARG, live_systems: SYSTEMS_ARG,
+          files: FILES_ARG, no_files: NO_FILES_ARG, live_systems: SYSTEMS_ARG,
         },
         async (a) => h.updateTask(a)),
       tool("board_queue_task", "Start a Backlog card now (it joins the queue). Only when the user asked for it to run.", { task_id: z.string() }, async (a) => h.queueTask(a)),
@@ -725,6 +745,10 @@ export function createChatBoardServer(deps: ChatBoardDeps, projectId: string, ch
       tool("board_approve_plan",
         "Approve a card's waiting plan so the work can start, when the user's latest message tells you to. Never on your own.",
         { task_id: z.string() }, async (a) => h.approvePlan(a)),
+      tool("board_set_task_browser",
+        "The user told you which browser a card should use (\"use Chrome\", \"use the board's browser\"): set it for that card only — Settings stay as they are. \"chrome\" = the user's own Chrome, signed in to their accounts; \"board\" = the board's own browser; \"default\" = back to Settings. Works in any status; a stage already running picks it up from its next stage or a retry. Do this instead of only messaging the card, which cannot switch browsers by itself.",
+        { task_id: z.string(), browser: z.enum(["board", "chrome", "default"]) },
+        async (a) => h.setTaskBrowser(a)),
       tool("board_stop_task", "Stop a card that is queued or running. Only when the user asked.", { task_id: z.string() }, async (a) => h.stopTask(a)),
       tool("board_retry_task", "Run a failed card again from the stage that failed. Only when the user asked.", { task_id: z.string() }, async (a) => h.retryTask(a)),
       tool("board_ask_task",

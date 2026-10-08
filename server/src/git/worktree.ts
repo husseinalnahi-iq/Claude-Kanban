@@ -151,7 +151,7 @@ export async function commitAll(worktreePath: string, message: string): Promise<
 }
 
 export async function diffTask(projectPath: string, baseSha: string, branch: string): Promise<DiffFile[]> {
-  const range = `${baseSha}..${branch}`;
+  const range = `${await ownStart(projectPath, baseSha, branch)}..${branch}`;
   const nameStatus = (await git(projectPath, ["diff", "--name-status", "--no-renames", range])).trim();
   if (!nameStatus) return [];
   const patch = await git(projectPath, ["diff", "--no-renames", range]);
@@ -450,7 +450,7 @@ export async function removeWorktree(
     try {
       await git(projectPath, ["worktree", "remove", path]);
     } catch (err) {
-      // On Windows a program whose working folder is the worktree (a dev server, a terminal), or OneDrive
+      // On Windows a program whose working folder is the worktree (a dev server, a terminal), or CloudSync
       // syncing it, can stop git deleting the folder. Once git has let go of the worktree, the folder is
       // retried here for a while; Node's rmSync gives up on the first EPERM by itself.
       if ((await listWorktrees(projectPath)).some((p) => samePath(p, path))) throw err;
@@ -613,7 +613,23 @@ const MARKER = /^(<{7}|>{7}|\|{7})(\s|$)/;
 const SEPARATOR = /^={7}$/;
 const LOST_PER_FILE = 20;
 
-async function isAncestor(cwd: string, a: string, b: string): Promise<boolean> {
+/**
+ * Where a task branch's own changes start: the newest commit it shares with the branch it lands on (the
+ * main checkout's HEAD), or where it was made when that is newer. "Update from base" brings the base's
+ * commits into the branch; counted from `baseSha` they were the card's own, and two cards that changed
+ * nothing listed the owner's 43-file commit as theirs (D428).
+ */
+async function ownStart(projectPath: string, baseSha: string, branch: string): Promise<string> {
+  try {
+    const shared = (await git(projectPath, ["merge-base", "HEAD", branch])).trim();
+    return shared && (await isAncestor(projectPath, baseSha, shared)) ? shared : baseSha;
+  } catch {
+    return baseSha;
+  }
+}
+
+/** Whether commit `a` is already contained in `b`. */
+export async function isAncestor(cwd: string, a: string, b: string): Promise<boolean> {
   try {
     await git(cwd, ["merge-base", "--is-ancestor", a, b]);
     return true;

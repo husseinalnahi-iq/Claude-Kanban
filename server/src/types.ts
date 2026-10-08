@@ -392,6 +392,10 @@ export interface NeedsAccess {
 /** The card's line while the board makes a task's own copy of the project (D192, D395, D416). */
 export const PREPARING_COPY = "Making its own copy of the project — a minute or two on a big one";
 
+export type TaskBrowser = "board" | "chrome";
+/** The browser a card's runs use: its own pick, else the board's setting (D423). */
+export const browserOf = (t: { browser?: TaskBrowser | null }, s: { taskBrowser: TaskBrowser }): TaskBrowser => t.browser ?? s.taskBrowser;
+
 /** The block that stopped the task, if one did: a suggestion the run carried on past is not one (D382). */
 export const stoppedBy = (t: { blocked: Blocked | null }): Blocked | null => (t.blocked && !t.blocked.advisory ? t.blocked : null);
 
@@ -672,6 +676,11 @@ export interface Footprint {
   files: string[];
   systems: string[];
   touched: string[];
+  /**
+   * Said up front: it changes no project files (it only writes to a live system). Without it an empty
+   * `files` means "can't tell", which in a shared folder is everything (D426).
+   */
+  none?: boolean;
 }
 
 /** Why a queued task waits for another one that is running (D400). Cleared when it starts. */
@@ -795,6 +804,8 @@ export interface Task {
   files: string[];
   /** The base's commit right after the card last landed: what "changed since your last round" is measured from. */
   landed_sha: string | null;
+  /** This card's browser, when someone picked one for it (the AI Manager, on your word); null follows Settings → taskBrowser (D423). */
+  browser: TaskBrowser | null;
   /**
    * A scheduled start for a Backlog card: an ISO time, or "reset" for when the Claude 5-hour usage
    * window next resets. Cleared once it fires (or the card is started by hand).
@@ -1378,7 +1389,12 @@ export interface Settings {
    * from a saved profile you sign in to once; autonomous runs may also open the sites in browserSites.
    * "chrome": every run, autonomous included, also gets Claude in Chrome — your own signed-in Chrome.
    */
-  taskBrowser: "board" | "chrome";
+  taskBrowser: TaskBrowser;
+  /**
+   * With the board's browser: a site that opens on a sign-in page there is tried in Claude in Chrome — your
+   * own signed-in Chrome — before the card asks you to sign in (D423).
+   */
+  chromeFallback: boolean;
   /** Sites signed in to in the board's browser profile, by host; autonomous runs may open them (D389). */
   browserSites: string[];
   /**

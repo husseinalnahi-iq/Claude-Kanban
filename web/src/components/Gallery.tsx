@@ -4,6 +4,7 @@ import { ATTACHMENT_TYPES, attachmentKind } from "../../../server/src/types.ts";
 import { api } from "../lib/api.ts";
 import { ago } from "../lib/format.ts";
 import { Button, ErrorLine, useAction, useEscape } from "./ui.tsx";
+import { toBase64 } from "../lib/files.ts";
 
 const MAX_BYTES = 10 * 1024 * 1024;
 const EXTS = Object.keys(ATTACHMENT_TYPES);
@@ -18,16 +19,6 @@ const TYPE_LABEL: Record<string, string> = {
   ".html": "html", ".htm": "html", ".svg": "svg", ".json": "json",
   ".md": "markdown", ".txt": "text", ".log": "log", ".yaml": "yaml", ".yml": "yaml", ".xml": "xml",
 };
-
-/** File → base64 without the `data:…;base64,` prefix, which is what the upload route expects. */
-function toBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onerror = () => reject(new Error(`Could not read ${file.name}`));
-    r.onload = () => resolve(String(r.result).split(",")[1] ?? "");
-    r.readAsDataURL(file);
-  });
-}
 
 /** CSV/TSV split well enough for a preview table: quoted separators work, exotic escapes do not. */
 function parseRows(text: string, sep: string): string[][] {

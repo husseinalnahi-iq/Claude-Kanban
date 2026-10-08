@@ -30,6 +30,15 @@ test("two tasks in one folder clash on shared files, not on separate ones, and a
   assert.deepEqual(mayConflict(worktree, { ...worktree }), ["src/pay.ts"], "but landing both may conflict");
 });
 
+test("a card that says it changes no files runs beside others in the folder, until it writes one (D426)", () => {
+  const none: Footprint = { ...fp(), none: true };
+  const sup = (footprint: Footprint) => ({ mode: "supervised" as const, live: false, footprint });
+  assert.equal(clash(sup(none), sup(none)), null, "two live-only cards share the folder without waiting");
+  assert.equal(clash(sup(none), sup(fp(["src/pay.ts"])))?.files.length ?? 0, 0);
+  assert.equal(clash(sup(none), sup(fp()))?.unknown, true, "the other one still could be changing anything");
+  assert.deepEqual(clash(sup({ ...none, touched: ["src/pay.ts"] }), sup(fp(["src/pay.ts"])))?.files, ["src/pay.ts"], "what it wrote counts");
+});
+
 test("two live tasks writing the same live system clash in worktrees too; a lookup does not", () => {
   const live = (systems: string[], pipeline?: Stage[]) => ({ mode: "autonomous" as const, live: true, pipeline, footprint: fp([], systems) });
   assert.deepEqual(clash(live(["The ERP"]), live(["the erp"]))?.systems, ["The ERP"]);
@@ -244,6 +253,37 @@ test("the chat sees which working card a new card would wait for, and the card i
     assert.match(made.note, /it will wait for “Fee on invoices”: both change src\/pay\.ts/);
     assert.deepEqual(made.created.files, ["src/pay.ts"]);
     await b.release("Fee on invoices");
+  } finally {
+    await b.cleanup();
+  }
+});
+
+test("two cards made in one chat are told they will take turns, and run together when both say they change no files (D426)", async () => {
+  const b = board({ autonomousWorktree: false, confirmSetup: false });
+  try {
+    const chat = b.repo.createChat({ project_id: b.project.id, title: "c", model: "m", effort: "low", mode: "supervised" });
+    const h = chatBoardHandlers({ repo: b.repo, bus: new Bus(), runner: b.runner }, b.project.id, chat.id, () => {});
+    const make = (title: string, extra: object) => JSON.parse(h.createTask({ title, spec_md: "x", mode: "supervised", ...extra } as never).content[0].text);
+    make("Move reports", { live_systems: ["BizApp"] });
+    const second = make("Move invoices", { live_systems: ["BizApp"] });
+    assert.match(second.note, /cannot run at the same time as “Move reports”.*take turns/);
+
+    const other = chatBoardHandlers({ repo: b.repo, bus: new Bus(), runner: b.runner }, b.project.id, null, () => {});
+    const elsewhere = JSON.parse(other.createTask({ title: "Unrelated", spec_md: "x", mode: "supervised" } as never).content[0].text);
+    assert.doesNotMatch(elsewhere.note, /at the same time/, "another chat's Backlog is not this one's business");
+
+    const chat2 = b.repo.createChat({ project_id: b.project.id, title: "c2", model: "m", effort: "low", mode: "supervised" });
+    const h2 = chatBoardHandlers({ repo: b.repo, bus: new Bus(), runner: b.runner }, b.project.id, chat2.id, () => {});
+    const make2 = (title: string) => JSON.parse(h2.createTask({ title, spec_md: "x", mode: "supervised", stages: [{ stage: "code" }], live_systems: ["BizApp sidebar"], no_files: true } as never).content[0].text);
+    const a = make2("Rename reports");
+    const c = make2("Rename invoices");
+    assert.doesNotMatch(c.note, /at the same time/);
+    b.runner.queueTask(a.created.id);
+    b.runner.queueTask(c.created.id);
+    await until(() => b.started.includes("Rename reports") && b.started.includes("Rename invoices"));
+    assert.equal(b.repo.getTask(c.created.id)!.hold, null);
+    await b.release("Rename reports");
+    await b.release("Rename invoices");
   } finally {
     await b.cleanup();
   }

@@ -112,6 +112,7 @@ const patchSchema = z.object({
   browserChecks: z.boolean().optional(),
   chromeInSupervised: z.boolean().optional(),
   taskBrowser: z.enum(["board", "chrome"]).optional(),
+  chromeFallback: z.boolean().optional(),
   browserSites: z.array(z.string().trim().toLowerCase().min(3).max(200)).max(50).optional(),
   autoAllowReadOnly: z.boolean().optional(),
   markitdownInTasks: z.boolean().optional(),

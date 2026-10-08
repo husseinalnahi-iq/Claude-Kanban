@@ -95,7 +95,8 @@ export interface PromptCtx {
   /** The run has a browser to look at what it built. `port` is reserved for this task's dev server. */
   /** `helper`: a cheaper `browser-check` agent drives the browser, and this stage asks it (D273). */
   /** `sites`: signed in to in the board browser's saved profile; an autonomous run may open them (D389). */
-  browser?: { port: number | null; chrome: boolean; helper?: boolean; sites?: string[] } | null;
+  /** `chromeFallback`: a sign-in page in the board's browser opens Claude in Chrome to the run (D423). */
+  browser?: { port: number | null; chrome: boolean; helper?: boolean; sites?: string[]; chromeFallback?: boolean } | null;
   /**
    * What the model running this stage can do. `sdk`: Claude Code with every tool and the board MCP
    * server. `cli`: another agent with its own tools, no board server. `text`: nothing but the prompt,
@@ -151,6 +152,9 @@ function browserSection(ctx: PromptCtx): string | null {
     lines.push(
       `The board's browser is already signed in to ${ctx.browser.sites.join(", ")}: open those with the \`browser_*\` tools to check what you changed there. Never sign out, and never change the account itself.`,
     );
+  }
+  if (ctx.browser.chromeFallback && !ctx.browser.chrome) {
+    lines.push("If a site opens on a sign-in page in the board's browser, call `board_needs_sign_in` with its host: it opens the user's own Chrome to you for it, and only asks them to sign in if Chrome cannot do it either.");
   }
   if (ctx.browser.chrome) {
     lines.push(
@@ -348,6 +352,8 @@ export function buildStagePrompt(ctx: PromptCtx): string {
   out.push(`# Stage: ${ctx.stage}`);
   out.push(`You are one stage of a pipeline on the Claude Kanban board (task \`${ctx.task.id}\`).`);
   out.push(stageInstructions(ctx));
+  // Asked for once, a refusal costs a turn; said up front, the first command already loads the key (D426).
+  out.push("Never show what is in a key or credentials file (`.env`, `*secret*`, `*credential*`, `.pem`): the board refuses it. Let your script load the file itself.");
   const browser = (ctx.capabilities ?? "sdk") === "sdk" ? browserSection(ctx) : null;
   if (browser) out.push(browser);
 
@@ -402,7 +408,7 @@ export function buildStagePrompt(ctx: PromptCtx): string {
         : "Check whether what stopped it has changed before you start.";
     // The earlier attempt ran to the end; only the step that needed access waited (D382, D410).
     const head = b.advisory ? "What the last attempt waited for" : "What stopped the last attempt";
-    const access = b.advisory && b.needs_access && ctx.mode === "autonomous"
+    const access = b.needs_access && ctx.mode === "autonomous"
       ? `The person has since done this: ${accessAsk(b)!.toLowerCase()}. Do that step now, and check the rest still holds.`
       : now;
     out.push(`\n## ${head}\n${b.reason.trim()}${b.ask ? `\nIt asked: ${b.ask}` : ""}\n${access}`);

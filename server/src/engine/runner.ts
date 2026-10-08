@@ -53,7 +53,7 @@ import { QuotaReader, type LiveQuota } from "./providers/usage.ts";
 import type { Resolved, StageInvocation } from "./providers/types.ts";
 import { saveAttachment } from "../routes/attachments.ts";
 import { pickBrowser, realProbe } from "../setup/probe.ts";
-import { ANTHROPIC_PROVIDER_ID, ARTIFACT_EXTS, DEBATE_ROUND_CEILING, EFFORTS, MARKITDOWN_TOOL, PREPARING_COPY, TRANSIENT_DELAYS_MS, TRANSIENT_RETRIES, accessOf, isHandsOff, recommendedOption, sharesProjectFolder, supervisedFrom, unlockedBySignIn, usesWorktree, worksInFolder, MAX_ATTACHMENT_BYTES, attachmentKind, supportsFastMode, type ClaudeModelsResult, type FastModeStatus } from "../types.ts";
+import { ANTHROPIC_PROVIDER_ID, ARTIFACT_EXTS, DEBATE_ROUND_CEILING, EFFORTS, MARKITDOWN_TOOL, PREPARING_COPY, TRANSIENT_DELAYS_MS, TRANSIENT_RETRIES, accessOf, browserOf, isHandsOff, recommendedOption, sharesProjectFolder, supervisedFrom, unlockedBySignIn, usesWorktree, worksInFolder, MAX_ATTACHMENT_BYTES, attachmentKind, supportsFastMode, type Attachment, type ClaudeModelsResult, type FastModeStatus } from "../types.ts";
 import { claudeUpgrades, fromSdk, type SdkModelInfo } from "./claudeModels.ts";
 import { BROWSER_AGENT, helperAgents, usesHelper } from "./helpers.ts";
 import { applyChecklistTool } from "./checklist.ts";
@@ -454,6 +454,18 @@ export function sameStage(a: Stage | undefined, b: Stage | undefined): boolean {
  * Supervised runs: force every non-read-only tool through the approval card, even when a settings
  * file pre-allows it (a PreToolUse "ask" overrides allow rules). See docs/DECISIONS.md D20.
  */
+/**
+ * Why a call that would print a credentials file is refused, or null. Every run, every mode: an Allow would
+ * put live keys into a transcript the board keeps, and a script can always load the file instead (D426).
+ */
+export function printsKeys(toolName: string, input: Record<string, unknown>): string | null {
+  const risk = credentialRisk(toolName, input);
+  return risk?.level === "prints"
+    ? `Refused: that would put what is in ${risk.files.slice(0, 3).join(", ")} (passwords or keys) into the transcript, which the board keeps. ` +
+        "Let your script load the file itself (for example json.load in Python) without printing it, and never echo the values. Nothing was run."
+    : null;
+}
+
 export function forceAsk(readsFree: boolean, cwd: string): HookCallbackMatcher[] {
   // A read-only command skips the forced "ask" too, or a settings file's own "ask" would still put it
   // on a card; canUseTool then applies the same rule and records it (D202, D240).
@@ -464,6 +476,9 @@ export function forceAsk(readsFree: boolean, cwd: string): HookCallbackMatcher[]
       hooks: [
         async (input) => {
           const { tool_name: name = "", tool_input: toolInput } = input as { tool_name?: string; tool_input?: unknown };
+          // Before anything else: a Read is otherwise allowed without asking, and an Allow is one wrong click (D426).
+          const keys = printsKeys(name, (toolInput ?? {}) as Record<string, unknown>);
+          if (keys) return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: keys } };
           if (READ_ONLY_TOOLS.has(name) || isSafeMcp(name) || freeShellRead(name, toolInput) || (readsFree && isReadOnlyMcp(name))) return {};
           return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask", permissionDecisionReason: "Supervised task: every write is approved on the board." } };
         },
@@ -517,7 +532,11 @@ export class TaskRunner {
   /** taskId → how many times a review's CHANGES_NEEDED sent the code stage back to fix it this pipeline (D410). */
   private reviewLoops = new Map<string, number>();
   /** taskId → the checkout's uncommitted files when a supervised run started, with size+mtime (D204). */
-  private checkoutStamps = new Map<string, { cwd: string; own: Set<string>; stamps: Map<string, string> }>();
+  /**
+   * A folder run's checkout at its start, and what the run itself has changed since: files its tools wrote
+   * and files that changed while one of its commands ran (`pending`: the status before each, by tool call).
+   */
+  private checkoutStamps = new Map<string, { cwd: string; own: Set<string>; stamps: Map<string, string>; mine: Set<string>; pending: Map<string, Map<string, string>> }>();
 
   constructor(deps: RunnerDeps) {
     this.repo = deps.repo;
@@ -851,7 +870,7 @@ export class TaskRunner {
       );
     }
     // A checkout of a big repository takes a minute — measured 61 s for 40k files, and 47 s outside
-    // OneDrive, so it is the size, not the sync. Say so instead of sitting silently in Queued (D192).
+    // CloudSync, so it is the size, not the sync. Say so instead of sitting silently in Queued (D192).
     // In progress, not Queued: it has started, and the copy of a big project takes a minute or two.
     // Sitting in Queued all that time read as "stuck waiting for its turn" (D416).
     this.setTask(task.id, { status: "running", summary: PREPARING_SUMMARY });
@@ -1050,8 +1069,13 @@ export class TaskRunner {
         const standing = this.repo.getTask(taskId)?.blocked;
         if (outcome.ok && verdict === "BLOCKED" && (!standing || standing.advisory)) {
           // After a "needs a supervised run" suggestion, a review that still blocks is asking for that run.
+          // It keeps the access the suggestion named: without it the card lost its "Sign in to …" button and
+          // signing in no longer woke it, so the person was never asked (D422).
           this.setTask(taskId, {
-            blocked: { stage_index: i, reason: verdictReason(this.repo.getRun(run.id)?.result_md), needs: standing?.advisory ? "supervised" : "input", ask: null, source: "agent", mode: task.mode, created_at: nowIso() },
+            blocked: {
+              stage_index: i, reason: verdictReason(this.repo.getRun(run.id)?.result_md), needs: standing?.advisory ? "supervised" : "input", ask: null, source: "agent", mode: task.mode, created_at: nowIso(),
+              ...(standing?.needs_access ? { needs_access: standing.needs_access } : {}),
+            },
           });
         }
         const blocked = this.repo.getTask(taskId)?.blocked;
@@ -1520,8 +1544,9 @@ export class TaskRunner {
       browser: settings.browserChecks
         ? {
             port: this.ports.get(task.id) ?? null,
-            chrome: settings.taskBrowser === "chrome" || (settings.chromeInSupervised && task.mode !== "autonomous"),
-            sites: settings.taskBrowser === "board" ? settings.browserSites : [],
+            chrome: browserOf(task, settings) === "chrome" || (settings.chromeInSupervised && task.mode !== "autonomous"),
+            sites: browserOf(task, settings) === "board" ? settings.browserSites : [],
+            chromeFallback: browserOf(task, settings) === "board" && settings.chromeFallback,
             helper: claudeStage && usesHelper(settings.browserCheckModel, effective.model),
           }
         : null,
@@ -1569,7 +1594,7 @@ export class TaskRunner {
       if (!existsSync(join(cwd, ".git")) || !(await this.git.isGitRepo(cwd))) return;
       const own = new Set(this.repo.getTask(taskId)?.checkout?.touched ?? []);
       const files = await this.git.statusFiles(cwd);
-      this.checkoutStamps.set(taskId, { cwd, own, stamps: new Map(files.slice(0, 500).map((f) => [f, fileStamp(join(cwd, f))])) });
+      this.checkoutStamps.set(taskId, { cwd, own, stamps: new Map(files.slice(0, 500).map((f) => [f, fileStamp(join(cwd, f))])), mine: new Set(), pending: new Map() });
       this.setTask(taskId, { checkout: { at: nowIso(), dirtyAtStart: files.filter((f) => !own.has(f)).slice(0, 200), touched: null } });
     } catch (err) {
       // A checkout the board cannot read is no reason to stop the task.
@@ -1578,8 +1603,9 @@ export class TaskRunner {
   }
 
   /**
-   * Files added or changed since the snapshot: this task's, or changed by someone else while it ran.
-   * Called after every stage, each time measured from the start of the run.
+   * The files this run changed and are still changed: what an earlier attempt of it left, and what its own
+   * tools and commands changed. Called after every stage. Everything that changed since the start counted
+   * once, and a card listed 13 files the owner's other sessions edited in that folder meanwhile (D428).
    */
   private async recordTouched(taskId: string): Promise<void> {
     const before = this.checkoutStamps.get(taskId);
@@ -1587,7 +1613,7 @@ export class TaskRunner {
     if (!before || !task?.checkout) return;
     try {
       const now = await this.git.statusFiles(before.cwd);
-      const touched = now.filter((f) => before.own.has(f) || !before.stamps.has(f) || before.stamps.get(f) !== fileStamp(join(before.cwd, f)));
+      const touched = now.filter((f) => before.own.has(f) || before.mine.has(f));
       // What it changed with commands too, so the queue keeps the next task off these files (D400).
       const all = [...new Set([...task.footprint.touched, ...touched])].slice(0, 500);
       this.setTask(taskId, { checkout: { ...task.checkout, touched: touched.slice(0, 200) }, footprint: { ...task.footprint, touched: all } });
@@ -1776,7 +1802,8 @@ export class TaskRunner {
     // The Stop hook's verify passed and no tool has run since: the board need not run it again (D108).
     let verifiedAtStop = false;
     // Where the board browser may go without asking in an autonomous run, and whether Chrome is the owner's choice (D389).
-    const browserReach = { sites: settings.taskBrowser === "board" ? settings.browserSites : [], chrome: settings.taskBrowser === "chrome", anywhere: settings.autonomousReach !== "sandbox" };
+    // `chrome` turns on mid-run when the board's browser met a sign-in page and Chrome is the fallback (D423).
+    const browserReach = { sites: browserOf(task, settings) === "board" ? settings.browserSites : [], chrome: browserOf(task, settings) === "chrome", anywhere: settings.autonomousReach !== "sandbox" };
     const refuse = (message: string): { behavior: "deny"; message: string } => {
       refusals++;
       this.log(run.id, `\n[board] sandbox refusal ${refusals}: ${message}\n`);
@@ -1813,15 +1840,6 @@ export class TaskRunner {
       if (note) this.log(run.id, `\n[board] ${note}\n  ${command}\n`);
       return note;
     };
-    // The keys a live task was given stay out of the transcript, which the board keeps (D385). In the
-    // project folder the keys are always there, live task or not (D398).
-    const liveKeys = this.liveAllowed(task) || inFolder;
-    const printsKeys = (toolName: string, input: Record<string, unknown>): string | null => {
-      const risk = liveKeys ? credentialRisk(toolName, input) : null;
-      return risk?.level === "prints"
-        ? `Refused: that would put what is in ${risk.files.slice(0, 3).join(", ")} (passwords or keys) into the transcript, which the board keeps. Let a script load the file instead of showing it.`
-        : null;
-    };
     const handsOffDecision = (toolName: string, input: Record<string, unknown>) => {
       const decision = handsOffGate(toolName, input);
       if (decision.behavior === "deny") this.log(run.id, `\n[board] ${decision.message}\n`);
@@ -1852,6 +1870,14 @@ export class TaskRunner {
       const command = String((input as { command?: unknown }).command ?? "");
       const outright = refusedOutright(command);
       if (outright) return { behavior: "deny", message: outright };
+      // Keys never reach the transcript, in any mode: refused here rather than put on a card (D385, D426).
+      const keys = printsKeys(toolName, input);
+      if (keys) {
+        this.log(run.id, `
+[board] ${keys}
+`);
+        return { behavior: "deny", message: keys };
+      }
       // An image from the board's own tool lands inside the task's folder (the tool refuses any other
       // path): a card in a supervised run, like any new file; free in an autonomous one (D262).
       if (toolName.startsWith(IMAGE_PREFIX)) return autonomous ? { behavior: "allow", updatedInput: input } : this.askApproval(run, task.id, toolName, input, o);
@@ -1895,9 +1921,6 @@ export class TaskRunner {
       const decision = gateFor(toolName, input);
       // A question nobody can answer is not the sandbox saying no: it gets its own message, uncounted.
       if (decision.behavior === "deny" && toolName !== "AskUserQuestion") return refuse(decision.message);
-      // Inside the folder, and reaching for a key file: the sandbox allows it, the transcript must not see it.
-      const keys = printsKeys(toolName, input);
-      if (keys) return { behavior: "deny", message: keys };
       return decision;
     };
     // An autonomous run's whole gate, as a hook too. canUseTool is only asked about a call nothing has
@@ -1921,6 +1944,8 @@ export class TaskRunner {
             if (name.startsWith("mcp__board__") || name === QUESTION_TOOL || name.startsWith(IMAGE_PREFIX)) return {};
             const outright = refusedOutright(String(input.command ?? ""));
             if (outright) return deny(outright);
+            const keys = printsKeys(name, input);
+            if (keys) return deny(keys);
             if (handsOff) {
               const decision = handsOffDecision(name, input);
               return decision.behavior === "deny" ? deny(decision.message) : {};
@@ -1930,9 +1955,6 @@ export class TaskRunner {
             if (browser?.behavior === "deny") return deny(refuse(browser.message).message);
             const decision = gateFor(name, input);
             if (decision.behavior === "deny") return deny(refuse(decision.message).message);
-            // The sandbox lets a key file in the folder be read; the transcript must not see it (D385).
-            const keys = printsKeys(name, input);
-            if (keys) return deny(keys);
             const written = PATH_KEYS[name] ? input[PATH_KEYS[name]] : undefined;
             if (typeof written === "string") {
               const rel = relInside(a.cwd, written);
@@ -1953,19 +1975,24 @@ export class TaskRunner {
         ],
       },
     ];
-    // Settings → Browser for tasks → Your Chrome gives every run your signed-in Chrome, autonomous ones too (D389).
-    const chrome = settings.taskBrowser === "chrome" || (settings.chromeInSupervised && !autonomous);
     const steer = this.steerHooks(task.id, run.id);
+    const sharesFolder = sharesProjectFolder(task);
+    const folderWrites = this.folderWriteHooks(task.id);
 
     // Claude's fast mode, per stage. Only Opus 5 / 4.8 support it; on anything else the flag is not
     // sent at all, so a stage moved to a cheaper model does not start failing.
     const fast = Boolean(task.pipeline[run.stage_index]?.fast) && supportsFastMode(run.model);
     // The board browser starts from its own copy of the profile you signed in to, when there is one (D389).
-    const signedIn = visual && settings.browserChecks && settings.taskBrowser === "board" && copyProfile(join(settings.stateDir, BOARD_PROFILE), join(browserDir, "profile"));
+    const signedIn = visual && settings.browserChecks && browserOf(task, settings) === "board" && copyProfile(join(settings.stateDir, BOARD_PROFILE), join(browserDir, "profile"));
     const browserConfig = visual && settings.browserChecks ? browserServer(browserDir, pickBrowser(realProbe)?.browser, watchPort, signedIn ? join(browserDir, "profile") : undefined) : null;
     // Helpers are Claude models picked by name; another provider's endpoint would not know them.
     const helpers = foreign ? {} : helperAgents({ browser: browserConfig, browserModel: settings.browserCheckModel, stageModel: run.model });
     const browserByHelper = BROWSER_AGENT in helpers;
+    // A run with the board's browser also gets Chrome when it is the fallback, but the gate keeps it shut
+    // until a site there opens on a sign-in page (D423).
+    const chromeFallback = Boolean(browserConfig) && browserOf(task, settings) === "board" && settings.chromeFallback;
+    // Settings → Browser for tasks → Your Chrome (or this card's own pick) gives every run your signed-in Chrome, autonomous ones too (D389).
+    const chrome = browserOf(task, settings) === "chrome" || (settings.chromeInSupervised && !autonomous) || chromeFallback;
     // Measured before deciding (D272): leaving connectors and plugin servers out of autonomous stages
     // saved under 1% of a stage's start, because Claude Code only loads a tool when it is searched
     // for. A critique still gets nothing but the project: it reads a plan, it does not do the work.
@@ -1987,9 +2014,9 @@ export class TaskRunner {
       permissionMode: autonomous && !handsOff ? "acceptEdits" : "default",
       canUseTool,
       hooks: {
-        PreToolUse: autonomous ? autonomousGuard : forceAsk(settings.autoAllowReadOnly, a.cwd),
+        PreToolUse: [...(autonomous ? autonomousGuard : forceAsk(settings.autoAllowReadOnly, a.cwd)), ...(sharesFolder ? [folderWrites.pre] : [])],
         // A message typed while the stage runs is handed over at the next tool call (D215).
-        PostToolUse: steer.PostToolUse,
+        PostToolUse: [...steer.PostToolUse, ...(sharesFolder ? [folderWrites.post] : [])],
         // A waiting message holds the turn open first; then the deterministic gate: a code stage
         // can't end while the project's own check fails.
         Stop: [...steer.Stop, ...(a.verifyCommand ? this.verifyStopHook(a.verifyCommand, a.cwd, run.id, task.id, (ok) => (verifiedAtStop = ok)) : [])],
@@ -2019,7 +2046,14 @@ export class TaskRunner {
       // dynamic parts (cwd, git status) are re-injected as the first user message.
       systemPrompt: settings.cacheableSystemPrompt ? { type: "preset", preset: "claude_code", excludeDynamicSections: true } : undefined,
       mcpServers: {
-        board: createBoardServer(this.repo, this.bus, { taskId: task.id, runId: run.id }, (parent) => this.promoteReady(parent.project_id)),
+        board: createBoardServer(
+          this.repo, this.bus,
+          {
+            taskId: task.id, runId: run.id,
+            ...(chromeFallback ? { openChrome: () => { browserReach.chrome = true; this.log(run.id, "\n[board] sign-in page in the board's browser: Claude in Chrome opened to this run\n"); } } : {}),
+          },
+          (parent) => this.promoteReady(parent.project_id),
+        ),
         ...(browserConfig && !browserByHelper ? { [BROWSER_SERVER]: browserConfig } : {}),
         // Pictures are made while building; a plan, a review or a critique has no use for them.
         ...(pictures
@@ -2288,6 +2322,48 @@ export class TaskRunner {
    * call as extra context, and a turn is not allowed to end while one is still waiting. The cursor
    * advances synchronously before any await, so parallel tool calls cannot deliver a message twice.
    */
+  /**
+   * For a run sharing the project folder: which changed files are its own (D428). A file tool names its file;
+   * a command is judged by what changed in the checkout while it ran, so edits made between its commands —
+   * by you, another session — stay theirs. A no-op when the folder is not a repository (no snapshot).
+   */
+  private folderWriteHooks(taskId: string): { pre: HookCallbackMatcher; post: HookCallbackMatcher } {
+    const shell = (name: string) => name === "Bash" || name === "PowerShell";
+    const statusStamps = async (cwd: string) => new Map((await this.git.statusFiles(cwd)).slice(0, 500).map((f) => [f, fileStamp(join(cwd, f))]));
+    const pre: HookCallbackMatcher = {
+      hooks: [
+        async (input, toolUseID) => {
+          const at = this.checkoutStamps.get(taskId);
+          const name = (input as { tool_name?: string }).tool_name ?? "";
+          if (at && toolUseID && shell(name)) at.pending.set(toolUseID, await statusStamps(at.cwd).catch(() => new Map()));
+          return {};
+        },
+      ],
+    };
+    const post: HookCallbackMatcher = {
+      hooks: [
+        async (input, toolUseID) => {
+          const at = this.checkoutStamps.get(taskId);
+          if (!at) return {};
+          const { tool_name: name = "", tool_input: toolInput = {} } = input as { tool_name?: string; tool_input?: Record<string, unknown> };
+          const written = PATH_KEYS[name] ? toolInput[PATH_KEYS[name]] : undefined;
+          if (typeof written === "string") {
+            const rel = relInside(at.cwd, written);
+            if (rel) at.mine.add(rel);
+          }
+          const before = toolUseID ? at.pending.get(toolUseID) : undefined;
+          if (before) {
+            at.pending.delete(toolUseID!);
+            const after = await statusStamps(at.cwd).catch(() => null);
+            for (const [f, stamp] of after ?? []) if (before.get(f) !== stamp) at.mine.add(f);
+          }
+          return {};
+        },
+      ],
+    };
+    return { pre, post };
+  }
+
   private steerHooks(taskId: string, runId: string): { PostToolUse: HookCallbackMatcher[]; Stop: HookCallbackMatcher[] } {
     const take = (): string | null => {
       const active = this.active.get(taskId);
@@ -2368,6 +2444,9 @@ export class TaskRunner {
     await previous;
     try {
       await this.mergeAttributes(project);
+      // Nothing to land: everything on the branch is in the base already — a card that changed only a live
+      // system, then took the base's commits in. Your uncommitted work is no reason to keep it open (D428).
+      if (await this.git.isAncestor(project.path, branch, base)) return "landed";
       // Landing while the checkout has uncommitted work risks entangling it in a merge commit.
       if (await this.git.isDirty(project.path)) {
         throw new ConflictError(
@@ -3784,16 +3863,23 @@ export class TaskRunner {
    * folder, the same live system) or might conflict with when both land (same files, each in its own
    * copy). What the chat and a run see before they make a card (D400).
    */
-  overlapsWith(projectId: string, card: FootprintOf, exceptId?: string): { id: string; title: string; status: TaskStatus; waits: boolean; files: string[]; systems: string[]; unknown: boolean }[] {
+  overlapsWith(projectId: string, card: FootprintOf, exceptId?: string, chatId?: string | null): { id: string; title: string; status: TaskStatus; waits: boolean; files: string[]; systems: string[]; unknown: boolean }[] {
     const working: TaskStatus[] = ["queued", "planning", "running", "approval", "paused", "review"];
     const out: ReturnType<TaskRunner["overlapsWith"]> = [];
     // A card not queued yet has no place stamped: judge it where the queue will put it.
     const project = this.repo.getProject(projectId);
     const settings = this.repo.getSettings();
-    const unplaced = card.mode === "autonomous" && !card.own_branch && !card.in_folder;
-    if (unplaced && project && (!settings.autonomousWorktree || project.policy.worktrees === "forbidden")) card = { ...card, in_folder: true };
-    for (const t of this.repo.listTasks({ project_id: projectId })) {
-      if (t.id === exceptId || !working.includes(t.status)) continue;
+    const place = <T extends FootprintOf>(c: T): T =>
+      c.mode === "autonomous" && !c.own_branch && !c.in_folder && project && (!settings.autonomousWorktree || project.policy.worktrees === "forbidden")
+        ? { ...c, in_folder: true }
+        : c;
+    card = place(card);
+    for (const raw of this.repo.listTasks({ project_id: projectId })) {
+      // A Backlog card from the same chat counts too: two cards made in one breath are usually started
+      // together, and the chat promised "they run at the same time" when the queue then held one (D426).
+      const sibling = raw.status === "backlog" && Boolean(chatId) && raw.chat_id === chatId;
+      if (raw.id === exceptId || (!working.includes(raw.status) && !sibling)) continue;
+      const t = sibling ? place(raw) : raw;
       // Review has finished writing: in a worktree only a merge conflict is left to warn about; in the folder its
       // changes still wait there for Approve or Discard, so the same files still wait for it (D400).
       const loose = t.status === "review" && worksInFolder(t) && t.footprint.touched.length > 0;
@@ -4063,8 +4149,27 @@ export class TaskRunner {
     return out.trim() || "The card's session had nothing to add.";
   }
 
-  chat(taskId: string, text: string): Run {
+  /**
+   * Files sent with a message, a round or a fork, named with their paths so "this file" points at
+   * something the run can open (D424). Only `fromTask`'s own files count; for a fork they are copied onto
+   * the new card, because a run's sandbox reads only its own card's attachments.
+   */
+  private attachedNote(fromTask: string, ids: string[] = [], toTask = fromTask): string {
+    const files = ids
+      .map((id) => this.repo.getAttachment(id))
+      .filter((a): a is Attachment => a?.task_id === fromTask)
+      .map((a) => {
+        if (toTask === fromTask) return a;
+        const copy = saveAttachment(this.repo, { task_id: toTask, source: "user", name: a.name, data: readFileSync(a.path), note: a.note });
+        this.bus.publish({ type: "attachment.added", attachment: copy });
+        return copy;
+      });
+    return files.length ? `\n\nFiles attached to this message (open them with the Read tool):\n${files.map((f) => `- ${f.name}: ${f.path}`).join("\n")}` : "";
+  }
+
+  chat(taskId: string, message: string, attachmentIds: string[] = []): Run {
     const { task, project } = this.load(taskId);
+    const text = message + this.attachedNote(taskId, attachmentIds);
     const live = this.active.get(taskId);
     if (live) {
       // The stage is running: keep the message and let the hooks hand it over at the next step (D215).
@@ -4339,10 +4444,11 @@ export class TaskRunner {
   resumeAfterSignIn(host: string): Task[] {
     const sent: Task[] = [];
     for (const task of this.repo.listTasks({})) {
-      if (!task.blocked?.advisory || !unlockedBySignIn(task.blocked, host)) continue;
+      if (!task.blocked || !unlockedBySignIn(task.blocked, host)) continue;
       if (!["review", "failed", "backlog"].includes(task.status) || this.isBusy(task.id) || task.archived_at) continue;
       try {
-        const from = supervisedFrom(task.pipeline, task.blocked.stage_index);
+        // A suggestion reruns the stage that writes; a stage that stopped for the sign-in reruns itself (D422).
+        const from = task.blocked.advisory ? supervisedFrom(task.pipeline, task.blocked.stage_index) : task.blocked.stage_index;
         this.setTask(task.id, { note: `You signed in to ${host}: running the ${task.pipeline[from]?.stage ?? "work"} stage again with it.` });
         sent.push(this.queueTask(task.id, { fromStage: Math.min(from, Math.max(0, task.pipeline.length - 1)) }));
       } catch {
@@ -4616,7 +4722,7 @@ export class TaskRunner {
    * the same path from the current base, told what others changed in its files since. Queued like any run,
    * so the queue's caps, usage-limit pauses and the verify command all apply. Its own approval lands it.
    */
-  async startRound(taskId: string, request: string, opts: { review?: boolean; force?: boolean } = {}): Promise<Task> {
+  async startRound(taskId: string, request: string, opts: { review?: boolean; force?: boolean; attachmentIds?: string[] } = {}): Promise<Task> {
     const { task, project } = this.load(taskId);
     const ask = request.trim();
     if (!ask) throw new ConflictError("Say what this round should do.");
@@ -4631,8 +4737,10 @@ export class TaskRunner {
     const n = task.round + 1;
     const review = (Boolean(opts.review) || task.live) && task.pipeline.some((st) => st.stage === "review");
     const changedByOthers = task.landed_sha ? await this.git.changedSince(project.path, task.landed_sha, task.files) : [];
-    const prompt = buildRoundPrompt({ round: n, request: ask, changedByOthers, worktree: usesWorktree(task) });
-    const fallback = buildRoundFallbackPrompt({ round: n, request: ask, handoff: await this.handoffFor(task, project) });
+    // The files go to the prompt only: the round's list and the card's summary keep the request short.
+    const withFiles = ask + this.attachedNote(taskId, opts.attachmentIds);
+    const prompt = buildRoundPrompt({ round: n, request: withFiles, changedByOthers, worktree: usesWorktree(task) });
+    const fallback = buildRoundFallbackPrompt({ round: n, request: withFiles, handoff: await this.handoffFor(task, project) });
     this.repo.addRound({ task_id: taskId, round: n, request: ask, review, checklist_from: task.checklist.length });
     // The ceiling counts this round alone, and Continue's grants belonged to the last one.
     this.setTask(taskId, { round: n, round_cost_base: this.repo.taskCost(taskId), checklist_from: task.checklist.length, budget_extra_usd: 0, summary: `Round ${n}: ${ask}`.slice(0, 280) });
@@ -4651,7 +4759,7 @@ export class TaskRunner {
    * files that should run beside it, or while it waits for review. Started at once — a fork is only worth
    * it while the memory is there — in its own folder; the original session stays as it was.
    */
-  async forkTask(sourceId: string, o: { title: string; request: string; chatId?: string | null; review?: boolean; force?: boolean }): Promise<Task> {
+  async forkTask(sourceId: string, o: { title: string; request: string; chatId?: string | null; review?: boolean; force?: boolean; attachmentIds?: string[] }): Promise<Task> {
     const { task: source, project } = this.load(sourceId);
     const ask = o.request.trim();
     if (!ask) throw new ConflictError("Say what the new card should do.");
@@ -4684,10 +4792,11 @@ export class TaskRunner {
     this.setTask(source.id, { related_to: [...new Set([...source.related_to, created.id])].slice(0, 10) });
     this.bus.publish({ type: "task.updated", task: created });
     const own = usesWorktree(created) ? gitOps.worktreePathFor(project.path, created.id) : project.path;
+    const withFiles = ask + this.attachedNote(source.id, o.attachmentIds, created.id);
     const prompt = [
       `## ${created.title}`,
       "",
-      ask,
+      withFiles,
       "",
       `This is a new task, branched from the work you did earlier in this session on "${source.title}". Do only what it asks.`,
       source.status === "done"
@@ -4696,7 +4805,7 @@ export class TaskRunner {
       own !== (source.worktree_path ?? project.path) ? "Paths you remember from before point at the old folder: use the same file names under your new folder." : "",
       "Read a file again before you edit it, keep a to-do list for this task, and end with a short report of what you changed.",
     ].filter(Boolean).join("\n");
-    const fallback = buildRoundFallbackPrompt({ round: 1, request: ask, handoff: await this.handoffFor(source, project) });
+    const fallback = buildRoundFallbackPrompt({ round: 1, request: withFiles, handoff: await this.handoffFor(source, project) });
     return this.queueTask(created.id, { fromStage: 0, resume: work.session_id ?? undefined, round: { n: 1, prompt, fallback, review, fork: true } }, o.force);
   }
 

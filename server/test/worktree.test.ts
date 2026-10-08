@@ -5,7 +5,7 @@ import { removeTemp } from "./helpers.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
-import { addWorktree, commitAll, diffTask, mergeTask, removeWorktree, listWorktrees, isGitRepo, currentBranch, syncUnionFiles } from "../src/git/worktree.ts";
+import { addWorktree, commitAll, diffTask, mergeTask, removeWorktree, listWorktrees, isGitRepo, currentBranch, syncUnionFiles, updateFromBase } from "../src/git/worktree.ts";
 
 function git(cwd: string, ...args: string[]) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -260,4 +260,24 @@ test("git's error is shown without its progress meter", async () => {
   const { gitErrorText } = await import("../src/git/worktree.ts");
   const raw = "Preparing worktree (new branch 'kanban/t_x')\nUpdating files:   6% (2858/42454)\rUpdating files:   7% (2972/42454)\rUpdating files: 100% (42454/42454), done.\nerror: unable to create file migration/very/long/name.pdf: Filename too long\nfatal: Could not reset index file to revision 'HEAD'.";
   assert.equal(gitErrorText(raw), "Preparing worktree (new branch 'kanban/t_x')\nerror: unable to create file migration/very/long/name.pdf: Filename too long\nfatal: Could not reset index file to revision 'HEAD'.");
+});
+
+test("a task's diff leaves out the base's commits it took in with Update from base (D428)", async () => {
+  const repo = makeRepo();
+  try {
+    const wt = await addWorktree(repo, "t_ff");
+    // Someone else commits on main while the task works; the task's branch is brought up to date.
+    writeFileSync(join(repo, "theirs.md"), "owner's work\n");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-q", "-m", "updates");
+    await updateFromBase(wt.path, "main", "merge");
+    assert.deepEqual(await diffTask(repo, wt.baseSha!, wt.branch), [], "a card that changed nothing lists nothing");
+
+    writeFileSync(join(wt.path, "mine.md"), "the task's work\n");
+    await commitAll(wt.path, "kanban: mine");
+    assert.deepEqual((await diffTask(repo, wt.baseSha!, wt.branch)).map((f) => f.file), ["mine.md"]);
+    await removeWorktree(repo, "t_ff", { deleteBranch: "force" });
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
 });

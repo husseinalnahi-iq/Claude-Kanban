@@ -45,6 +45,8 @@ export function waitsOnYou(card: TaskCard, asking?: boolean): { chip: string | n
   const open = card.questions?.filter((q) => !q.answer).length ?? 0;
   if (card.status === "approval" && card.plan_gate && !asking) return said(phase(card, asking).title, "Approve the plan");
   if (open) return said("Claude asked you something — open the task to answer", `Answer ${open} question${open === 1 ? "" : "s"}`);
+  // Asked for while it still runs: the next stage copies the board's sign-ins when it starts (D422).
+  if (card.blocked?.needs_access?.kind === "sign_in" && card.stage_states.includes("running")) return said(`It needs you signed in to ${card.blocked.needs_access.target} — sign in now and its next stage uses it`, accessAsk(card.blocked)!);
   if (card.status === "approval") return said(phase(card, asking).title, asking ? "Answer its question" : "Allow or deny a step");
   if (card.status === "paused" && (card.pause_reason === "cost" || (card.pause_reason === "provider" && !card.resume_at))) return said(phase(card).title, card.pause_reason === "cost" ? "Continue or stop — cost limit" : "Switch provider or top up");
   if (card.status === "backlog" && card.setup_pending) return said("Check its mode and models, then press Start", "Check setup, then Start");
@@ -62,6 +64,7 @@ export function waitsOnYou(card: TaskCard, asking?: boolean): { chip: string | n
   if (card.status === "failed") {
     // Stopped on purpose, or set to try again by itself: nothing to decide.
     if (card.error === "stopped by user" || card.start_at) return null;
+    if (stoppedBy(card)?.needs_access) return said(`It stopped for one thing — ${accessAsk(card.blocked)!.toLowerCase()}`, accessAsk(card.blocked)!);
     if (stoppedBy(card)) return said("It was blocked — open the task for what it needs", "See what it needs");
     return said("It failed — open it to retry, change it or drop it", "Retry, change or drop it");
   }

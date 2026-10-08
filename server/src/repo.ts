@@ -156,6 +156,7 @@ const toTask = (r: Row): Task => ({
   checklist_from: Number(r.checklist_from ?? 0),
   files: json<string[]>(r.files_json, []),
   landed_sha: (r.landed_sha as string) ?? null,
+  browser: r.browser === "board" || r.browser === "chrome" ? r.browser : null,
   start_at: (r.start_at as string) ?? null,
   suggestion: json<Task["suggestion"]>(r.suggestion_json, null),
   onboarding: (r.onboarding as Task["onboarding"]) ?? null,
@@ -435,6 +436,7 @@ const TASK_COLUMNS: Record<string, (v: unknown) => SQLInputValue> = {
   checklist_from: num,
   files: js,
   landed_sha: str,
+  browser: str,
 };
 
 export type NewTask = {
@@ -590,6 +592,7 @@ export class Repo {
       browserChecks: (m.get("browserChecks") ?? "true") !== "false",
       chromeInSupervised: m.get("chromeInSupervised") === "true",
       taskBrowser: m.get("taskBrowser") === "chrome" ? "chrome" : "board",
+      chromeFallback: (m.get("chromeFallback") ?? "true") !== "false",
       browserSites: json(m.get("browserSites"), [] as string[]),
       autoAllowReadOnly: (m.get("autoAllowReadOnly") ?? "true") !== "false",
       markitdownInTasks: (m.get("markitdownInTasks") ?? "true") !== "false",

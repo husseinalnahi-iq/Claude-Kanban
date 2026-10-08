@@ -85,7 +85,9 @@ test("a supervised run runs a read-only command without a card, and still asks f
       decisions.push((await o.canUseTool("Bash", { command: "git log --oneline -3 | head -1" }, opts)).behavior);
       // A skill's reference file lives outside the project: read freely, like an autonomous run may.
       decisions.push((await o.canUseTool("Read", { file_path: join(homedir(), ".claude", "skills", "bizapp", "references", "api.md") }, opts)).behavior);
+      // Printing a key file is refused outright, never a card (D426).
       decisions.push((await o.canUseTool("Bash", { command: "cat .env" }, opts)).behavior);
+      decisions.push((await o.canUseTool("Bash", { command: "rm -rf build" }, opts)).behavior);
     },
   );
   const s = setup(f.fn);
@@ -95,10 +97,10 @@ test("a supervised run runs a read-only command without a card, and still asks f
     await until(() => s.repo.pendingApprovals(task.id).length === 1);
     const [card] = s.repo.pendingApprovals(task.id);
     assert.equal(card.tool_name, "Bash");
-    assert.equal((card.input as { command: string }).command, "cat .env", "the read-only one never became a card; the credentials one did");
+    assert.equal((card.input as { command: string }).command, "rm -rf build", "the read-only one never became a card, nor the refused credentials one; the write did");
     s.runner.decideApproval(card.id, "deny", null);
     await until(() => s.repo.getTask(task.id)!.status === "review");
-    assert.deepEqual(decisions, ["allow", "allow", "deny"]);
+    assert.deepEqual(decisions, ["allow", "allow", "deny", "deny"]);
     const run = s.repo.latestRun(task.id)!;
     assert.ok(s.repo.eventsAfter(run.id).some((e) => e.type === "board:auto-allowed"), "the transcript says the board allowed it");
 
@@ -172,7 +174,18 @@ test("a supervised run is told which uncommitted files are not its own, and the 
   const git = (dir: string, ...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
   const f = scripted(
     () => "done",
-    async (_i, o) => writeFileSync(join(o.cwd, "mine.txt"), "from the task\n"),
+    async (i, o) => {
+      // Its own command writes mine.txt; between commands another session edits elsewhere.md (D428).
+      const signal = { signal: new AbortController().signal };
+      const run = async (hooks: any[], input: object) => {
+        for (const m of hooks) for (const h of m.hooks) await h(input, `t${i}`, signal);
+      };
+      const call = { tool_name: "Bash", tool_input: { command: "echo from the task > mine.txt" } };
+      await run(o.hooks.PreToolUse, call);
+      writeFileSync(join(o.cwd, "mine.txt"), "from the task\n");
+      await run(o.hooks.PostToolUse, call);
+      writeFileSync(join(o.cwd, "elsewhere.md"), `another session, ${i}\n`);
+    },
   );
   const s = setup(f.fn);
   git(s.dir, "init", "-q", "-b", "main");
@@ -190,7 +203,7 @@ test("a supervised run is told which uncommitted files are not its own, and the 
     await until(() => s.repo.getTask(task.id)!.status === "review" && s.repo.getTask(task.id)!.checkout?.touched !== null);
     const c = s.repo.getTask(task.id)!.checkout!;
     assert.deepEqual([...c.dirtyAtStart].sort(), ["README.md", "theirs.md"]);
-    assert.deepEqual(c.touched, ["mine.txt"], "only what changed during the run is this task's");
+    assert.deepEqual(c.touched, ["mine.txt"], "only what its own commands changed is this task's, not what another session changed meanwhile");
     assert.match(f.calls[0].prompt, /## Your checkout already has other changes[\s\S]*- README\.md[\s\S]*- theirs\.md[\s\S]*Do not edit, revert, stage or commit them/);
 
     // A rerun of the same task counts its own earlier file as its own, not as someone else's.

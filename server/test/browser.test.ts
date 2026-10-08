@@ -16,7 +16,7 @@ import { killsByName, serverRule } from "../src/engine/gate.ts";
 import { buildStagePrompt, type PromptCtx } from "../src/engine/prompts.ts";
 import { reviewSkippedBrowser } from "../src/engine/runner.ts";
 import { removeTemp } from "./helpers.ts";
-import type { Mode, Stage } from "../src/types.ts";
+import type { Mode, Stage, Task } from "../src/types.ts";
 
 const PW = "mcp__playwright__";
 const ONE_STAGE: Stage[] = [{ stage: "code", model: "m", effort: "low" }];
@@ -44,7 +44,7 @@ function gitRepo(): string {
 }
 
 /** Runs one stage with a fake session and returns the options it was started with. */
-async function optionsFor(mode: Mode, settings: Record<string, unknown>, probe?: (o: Options, repo: Repo, taskId: string) => Promise<void>, pipeline: Stage[] = ONE_STAGE) {
+async function optionsFor(mode: Mode, settings: Record<string, unknown>, probe?: (o: Options, repo: Repo, taskId: string) => Promise<void>, pipeline: Stage[] = ONE_STAGE, patch: Partial<Task> = {}) {
   const dir = gitRepo();
   const seen: Options[] = [];
   const q: QueryFn = (params) =>
@@ -59,6 +59,7 @@ async function optionsFor(mode: Mode, settings: Record<string, unknown>, probe?:
   const runner = new TaskRunner({ repo, bus: new Bus(), queryFn: q });
   const project = repo.createProject({ name: "demo", path: dir, policy: { worktrees: "allowed", autonomous: "allowed", maxConcurrent: 3 } });
   const task = repo.createTask({ project_id: project.id, title: "page", mode, pipeline });
+  if (Object.keys(patch).length) repo.updateTask(task.id, patch);
   try {
     runner.queueTask(task.id);
     await until(() => ["review", "failed"].includes(repo.getTask(task.id)!.status));
@@ -171,7 +172,7 @@ test("whatever a stage leaves listening on the task's port is stopped, by PID", 
 
 test("a run gets the board's own browser, and never your Chrome unless it is supervised and you allowed it", async () => {
   // With the helpers switched off the stage drives the browser itself, the way it always did.
-  const on = await optionsFor("autonomous", { browserChecks: true, chromeInSupervised: true, liveView: false, browserCheckModel: "stage" });
+  const on = await optionsFor("autonomous", { browserChecks: true, chromeInSupervised: true, chromeFallback: false, liveView: false, browserCheckModel: "stage" });
   const server = on.options.mcpServers?.playwright as { command: string; args: string[] };
   assert.ok(server, "the board's browser is attached");
   for (const flag of ["--headless", "--isolated", "--output-dir"]) assert.ok(server.args.includes(flag), `started with ${flag}`);
@@ -348,4 +349,30 @@ test("a run gets its own copy of the signed-in profile — only its sign-in part
   function out() {
     return join(tmpdir(), "kb-out");
   }
+});
+
+test("with Chrome as the fallback an autonomous run carries it, shut until the board's browser meets a sign-in page (D423)", async () => {
+  const OPTS = { signal: new AbortController().signal, toolUseID: "t" } as never;
+  const chromeNav = "mcp__claude-in-chrome__navigate";
+  let before = "";
+  const fb = await optionsFor("autonomous", { browserChecks: true, liveView: false, browserCheckModel: "stage" }, async (o) => {
+    before = (await o.canUseTool!(chromeNav, { url: "https://erp.example.com" }, OPTS))?.behavior ?? "";
+  });
+  assert.deepEqual(fb.options.extraArgs, { chrome: null }, "on by default, so the tools are there when the wall comes");
+  assert.equal(before, "deny", "but no Chrome call goes through before a sign-in page");
+
+  const off = await optionsFor("autonomous", { browserChecks: true, chromeFallback: false, liveView: false, browserCheckModel: "stage" });
+  assert.deepEqual(off.options.extraArgs, { "no-chrome": null }, "fallback off: no Chrome at all");
+});
+
+test("a card's own browser pick overrides Settings for that card only (D423)", async () => {
+  const OPTS = { signal: new AbortController().signal, toolUseID: "t" } as never;
+  const chromeNav = "mcp__claude-in-chrome__navigate";
+  let picked = "";
+  const r = await optionsFor("autonomous", { browserChecks: true, chromeFallback: false, liveView: false, browserCheckModel: "stage", taskBrowser: "board" }, async (o) => {
+    picked = (await o.canUseTool!(chromeNav, { url: "https://erp.example.com" }, OPTS))?.behavior ?? "";
+  }, ONE_STAGE, { browser: "chrome" });
+  assert.deepEqual(r.options.extraArgs, { chrome: null });
+  assert.equal(picked, "allow", "the card said Chrome, so an autonomous run uses it without the board-wide setting");
+  assert.equal(r.repo.getSettings().taskBrowser, "board", "Settings are untouched");
 });

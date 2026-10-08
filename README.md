@@ -105,9 +105,9 @@ opens that page for you if not). A ZIP copy does not update itself — the one-l
 4. **Watch it**: it moves to **In progress** while Claude plans, codes and reviews it, and a single
    **Your turn: …** line says when it needs you. An autonomous task does its live steps itself, end to
    end: the project's key files that git leaves out (such as `.env`) are copied into its folder, and it
-   never shows them in the transcript (Settings → Runs & limits; on by default). If it truly lacks an
+   never shows them in the transcript (Settings → Runs & limits; on by default). The side chat knows this too: it makes a live change autonomous unless you want to approve each write. If it truly lacks an
    access — a sign-in it has no cookies for, a key file the project has no copy of — it does not leave a
-   list: it names exactly that, the card says **Your turn: sign in to …**, and signing in runs the step
+   list: it names exactly that, the card says **Your turn: sign in to …** at once (sign in while it still runs and its next stage uses it), and signing in runs the step
    again on its own. A review that wants changes goes back to the coder, not to you. A dropped connection
    is retried by itself; a stage still editing files is not cut off by a turn or cost ceiling. If a stage
    cannot go on at all, the card says **Your turn** with the reason.
@@ -289,8 +289,10 @@ dist", folders and all, without asking*. The icon moves the way the command does
 looking, a pen writes, a bin shakes for deleting, arrows travel for the internet, a gear turns for
 changes to the computer. A chain (`cd server && npm ci && npm test`) is explained part by part, and
 wears the highest risk of its parts; on a card in the chat or the AI Manager the parts and the command
-itself are folded behind *▸ N commands* until you want them. A card that would print credentials
-keeps its warning and a *Review in the task* link, with Allow and Deny beside it. It comes from a fixed table of common commands (git, npm and the
+itself are folded behind *▸ N commands* until you want them. A command that would print a credentials
+file (`cat .env`, a `Read` of `.secrets/erp.json`) never reaches you: the board refuses it in every mode
+and tells Claude to let its script load the file instead. One that only loads such a file keeps an amber
+note on its card. It comes from a fixed table of common commands (git, npm and the
 other package managers, file commands, curl, docker, Python, PowerShell's cmdlets and more), so it is
 free and instant. A command the table does not know says so and offers **Ask Claude what it does**,
 one short answer from Claude's cheapest model, remembered so it is never paid for twice.
@@ -980,12 +982,14 @@ really write. The queue starts a card only when it does not clash with one that 
 
 | Both cards… | They run together when… |
 |---|---|
-| work in the project folder (autonomous in the folder, or supervised without its own branch) | their files do not overlap. A card the board cannot tell about counts as touching everything, so it takes its turn. A finished autonomous card that is not approved yet still holds its files: the next card on them waits until you approve or discard it. |
+| work in the project folder (autonomous in the folder, or supervised without its own branch) | their files do not overlap. A card the board cannot tell about counts as touching everything, so it takes its turn. A card the chat marks as changing **no files** (it only writes to a live system) runs beside the others, until it writes a file. A finished autonomous card that is not approved yet still holds its files: the next card on them waits until you approve or discard it. |
 | are live and write to a live system | they name different systems. Lookups only read, so they never wait. |
 | have their own worktrees | always; when they change the same files the card shows **may conflict**, before either reaches Review. |
 
 A card that waits says why on its ⏳ line ("Waits for “Fee on invoices”: both change src/pay.ts") and
-starts by itself when the other finishes. If a running task in the folder reaches for a file another one
+starts by itself when the other finishes. The chat checks a new card against the working cards and the
+Backlog cards it made itself, so when you ask for two cards "at the same time" it tells you up front if
+they will take turns. If a running task in the folder reaches for a file another one
 is changing, that write is refused with the other task's name — it does the rest first — and the refusal
 does not count toward the five that stop a run.
 
@@ -1059,7 +1063,11 @@ task form disables the option. The board obeys such rules and never edits them.
 ## Files and artifacts
 
 Attach images, PDF, Word, Excel, PowerPoint, CSV or text to a task: drop, paste (Ctrl-V) or pick, up
-to 10 MB. What the run gets depends on the file, and in every case it should not have to pay to look:
+to 10 MB. You can attach them **while writing a new task** (📎 under the spec, or paste into it): they are
+saved to the card before it starts, so its first stage has them. In the **Activity** tab, 📎 or a paste
+into the message box sends files with your message: they land in the task's Files and the message names
+each one with its path, so the run knows exactly which file you mean (D424). A done card's **Anything
+more on this?** box takes files the same way; **As a new card** gives the new card its own copies (D425). What the run gets depends on the file, and in every case it should not have to pay to look:
 
 - an **image** is described once by a cheap vision model, and the words go into every stage's prompt;
 - **text and CSV** carry their own first few KB as a preview, written on upload with no model call;
@@ -1123,6 +1131,13 @@ autonomous task may open that site (and its subdomains) as well as local pages. 
 copy, so nothing a run does is saved back. Choosing **Your own Chrome, for every task** gives every task,
 autonomous ones too, Claude in Chrome: your own browser, signed in to all your accounts, with no card in an
 autonomous run (D389).
+
+**Chrome as the fallback** (on by default, with the board's browser): when a site opens on a sign-in page
+in the board's browser, the run is handed your own Chrome for the rest of that stage, where you are
+probably signed in already. Only if Chrome can't do it either does the card say **Your turn: sign in to …**.
+Turn it off under the board's browser choice. **One card, another browser**: tell the AI Manager "use
+Chrome for that card" (or "the board's browser") and it sets that card alone; Settings stay as they are,
+and a stage already running picks it up from its next stage or a retry (D423).
 
 **Claude in Chrome** (off by default) is your own Chrome, signed in to your accounts. When switched on,
 supervised tasks can use it for checks that need your login, with every action approved.
@@ -1588,8 +1603,7 @@ event a switch for its sound, its pop-up and its desktop notification (sent only
 a background tab). **▶** next to an event plays it with its pop-up; **♪ Play them all** plays the whole
 set in ten seconds. The sounds are synthesised in the browser: no audio files.
 
-A **needs you** pop-up shows what the card wants to run and has **Allow** and **Deny** on it (a command
-that would print credentials only gets **Review**, which opens the card). A question with one answer to
+A **needs you** pop-up shows what the card wants to run and has **Allow** and **Deny** on it. A question with one answer to
 pick shows its options as buttons instead; anything more has **Type an answer…**, which opens the
 card. It closes itself the moment
 the card is dealt with *anywhere* — the pop-up, the task, the Approvals tab, another browser tab — with

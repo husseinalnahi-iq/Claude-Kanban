@@ -171,7 +171,7 @@ const TRAVERSAL = /(^|[\s"'=;&|(`\\/:,<>@])\.\.([\\/]|$|[\s"';&|)`,<>])/;
  * Anything that names the home folder: `~` and `~user`, the variables each shell keeps it in (with or
  * without braces), and the calls a one-line script would use to ask for it.
  */
-const HOME_VARS = "HOME|USERPROFILE|HOMEPATH|HOMEDRIVE|APPDATA|LOCALAPPDATA|ONEDRIVE";
+const HOME_VARS = "HOME|USERPROFILE|HOMEPATH|HOMEDRIVE|APPDATA|LOCALAPPDATA|CLOUDSYNC";
 const HOME_REF = new RegExp(
   String.raw`(^|[\s"'=;&|(:<>,\`])~[\w.+-]*([\\/]|$|[\s"';&|)<>,\`])` +
     String.raw`|\$\{?(?:${HOME_VARS})\}?(?![\w])|\$env:(?:${HOME_VARS})\b|%(?:${HOME_VARS})%` +

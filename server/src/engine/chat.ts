@@ -156,7 +156,7 @@ export function turnContext(now = new Date()): string {
  * The chat's instructions. Stable for a project — the models line changes only when Settings does — so
  * the cached conversation behind it is not re-billed turn after turn.
  */
-export function chatPrompt(project: Project, board?: { models: ModelEntry[]; defaults: Stage[]; pictures?: string | null; tools?: boolean; mode?: RunStyle; followUps?: Settings["followUpRouting"] }): string {
+export function chatPrompt(project: Project, board?: { models: ModelEntry[]; defaults: Stage[]; pictures?: string | null; tools?: boolean; mode?: RunStyle; followUps?: Settings["followUpRouting"]; liveAutonomous?: boolean }): string {
   return [
     `You are the side chat of Claude Kanban, talking with the user about the project "${project.name}" (${project.path}).`,
     "Many users are not programmers: answer plainly and briefly, and explain any technical word you have to use.",
@@ -175,7 +175,11 @@ export function chatPrompt(project: Project, board?: { models: ModelEntry[]; def
     "When one part needs another's result or must come after it (look something up, then use it; build the API, then the page), make a chain: create the cards in order, give each later card depends_on the earlier ones, and start them together. A card waits in Queued until the cards it depends on are done, then starts by itself and is given what they reported.",
     "For a change, make sure you understand it first; ask one short question if it is unclear. The spec says the problem and what done looks like, from what the user asked, nothing more. Extras you think would help (a pause button, a README) go in your reply as suggestions they can say yes to; they never go into the spec on their own, because every line in it is paid for.",
     "When you create a change card, say in a few words how it will run and why. A card with a plan stage opens its setup card here, where the user checks the mode and each step's model and effort and presses Start; list those for them, and never start it yourself (D365). Another change card: ask whether to start it; the user can also press Start on the card. The modes:",
-    "- supervised: works in the project's own folder and asks the user before each change. A change that reaches a live system or runs commands outside the project is supervised: an autonomous change is sandboxed and cannot reach it.",
+    // Said "an autonomous change is sandboxed and cannot reach it" long after D385 gave it the keys: the
+    // chat then made two BizApp cards supervised and the owner clicked Allow on every write (D427).
+    board?.liveAutonomous
+      ? "- supervised: works in the project's own folder and asks the user before each change. Pick it for a live change only when the user wants to approve each write: an autonomous card reaches live systems too: its copy of the project gets the project's key files."
+      : "- supervised: works in the project's own folder and asks the user before each change. A change that reaches a live system or runs commands outside the project is supervised: an autonomous change is sandboxed and cannot reach it.",
     "- autonomous: works without asking — on its own branch, or in the project folder when Settings say so or the folder has no git — and lands only when the user approves it. Good for changes to the project's own files, when the project allows it.",
     "- ask (Autonomous + asks me): autonomous, but when it needs the user's answer to go on, it stops and waits for it; its question appears in this chat. For work where the user wants a say in the choices along the way.",
     "- an answer card follows the same switch. Autonomous: it runs in the project's own folder, reaches what the project reaches (a live system, its scripts and keys) and asks nothing; it still changes nothing. Supervised: each command that is not read-only waits for the user's Allow. The card's reply tells you which it got.",
@@ -749,6 +753,7 @@ export class ChatService {
           tools,
           mode: chat.mode,
           followUps: settings.followUpRouting,
+          liveAutonomous: settings.autonomousLive,
         }),
       },
       maxTurns: 40,

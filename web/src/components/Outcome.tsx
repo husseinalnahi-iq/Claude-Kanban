@@ -29,7 +29,9 @@ export function BlockedPanel({ d }: { d: TaskDetail }) {
   const { busy, error, run } = useAction();
   const dialog = useAsk();
   const advisory = !!b.advisory;
-  const access = advisory ? accessAsk(b) : null;
+  // A stop keeps the access it named too (D422): asking for exactly that is the way on, stopped or not.
+  const access = accessAsk(b);
+  const signIn = b.needs_access?.kind === "sign_in";
   const stage = t.pipeline[b.stage_index]?.stage ?? "stage";
   const report = lastOf(stageRuns(d), (r) => r.stage_index === b.stage_index)?.result_md;
   const hasWork = !!(t.branch || t.worktree_path);
@@ -73,10 +75,11 @@ export function BlockedPanel({ d }: { d: TaskDetail }) {
       </div>
       <div className="text-[13px] text-ink-100">{b.reason}</div>
       {b.ask ? <div className="mt-1 text-[13px] text-ink-200">{advisory ? <span className="text-amber">It suggests:</span> : <span className="text-rose">It asks:</span>} {b.ask}</div> : null}
-      {advisory && access ? (
+      {access ? (
         <div className="mt-1.5 text-[12px] text-ink-400">
-          It did everything else and is waiting only on this. {b.needs_access?.kind === "sign_in" ? "Sign in below; the moment you close that window the card runs this step again by itself." : "Give it that, then press Retry. "}
-          You can also approve the work as it is.
+          {d.busy
+            ? "It is still working on the rest. Sign in now and its next stage uses that sign-in."
+            : `${advisory ? "It did everything else and is waiting only on this." : "Everything else is done; this is what it stopped for."} ${signIn ? "Sign in below; the moment you close that window the card runs this step again by itself." : "Give it that, then press Retry."}${advisory ? " You can also approve the work as it is." : ""}`}
         </div>
       ) : advisory ? (
         <div className="mt-1.5 text-[12px] text-ink-400">
@@ -97,15 +100,15 @@ export function BlockedPanel({ d }: { d: TaskDetail }) {
         </details>
       ) : null}
       <div className="mt-2.5 flex flex-wrap items-center gap-2">
-        {advisory && b.needs_access?.kind === "sign_in" ? (
-          <Button variant="primary" busy={busy} disabled={d.busy} title="Opens the board's browser at that site; sign in and close the window, and the card picks this step up again" onClick={() => run(() => api.signInSite(b.needs_access!.target))}>Sign in to {b.needs_access.target}</Button>
+        {signIn && b.needs_access ? (
+          <Button variant="primary" busy={busy} title="Opens the board's browser at that site; sign in and close the window, and the card picks this step up again" onClick={() => run(() => api.signInSite(b.needs_access!.target))}>Sign in to {b.needs_access.target}</Button>
         ) : null}
-        {canSwitch ? (
+        {d.busy ? null : canSwitch ? (
           <Button variant={advisory ? "ghost" : "primary"} busy={busy} disabled={d.busy} onClick={() => void switchAndRun()}>Switch to supervised &amp; run from #{from + 1}</Button>
         ) : (
           <Button variant="primary" busy={busy} disabled={d.busy} onClick={() => run(() => api.retry(t.id, b.stage_index))}>↻ Retry from #{n}</Button>
         )}
-        {advisory ? null : <Button variant="ghost" busy={busy} disabled={d.busy} onClick={() => run(() => api.reject(t.id, `Blocked: ${b.reason}`))}>Back to backlog</Button>}
+        {advisory || d.busy ? null : <Button variant="ghost" busy={busy} disabled={d.busy} onClick={() => run(() => api.reject(t.id, `Blocked: ${b.reason}`))}>Back to backlog</Button>}
       </div>
       <div className="mt-2"><ErrorLine error={error} /></div>
     </div>

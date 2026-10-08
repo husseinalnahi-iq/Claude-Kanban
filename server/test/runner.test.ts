@@ -432,6 +432,7 @@ function fakeGit(holds: { add?: Promise<void>; merge?: Promise<void> } = {}, ove
     isGitRepo: async () => true,
     currentBranch: async () => "main",
     isDirty: async () => false,
+    isAncestor: async () => false,
     aheadBehind: async () => ({ ahead: 1, behind: 0 }),
     updateFromBase: async () => (calls.push("update"), { ok: true, pulled: 0, conflicts: [] }),
     addWorktree: async (_p: string, id: string) => {
@@ -632,6 +633,22 @@ test("landing refuses to touch a dirty checkout, or the wrong branch, and never 
       await assert.rejects(runner.approveTask(task.id), /uncommitted changes/);
       assert.equal(g.calls.includes("merge"), false, "nothing was merged");
       assert.equal(s.repo.getTask(task.id)!.status, "review", "the task is untouched");
+    } finally {
+      await s.cleanup();
+    }
+  }
+
+  // 1b. Nothing on the branch that the base lacks (it changed only a live system, then took the base's
+  //     commits in): approving closes it without a merge, uncommitted work or not (D428).
+  {
+    const g = fakeGit({}, { isDirty: async () => true, isAncestor: async () => true });
+    const s = setup(fakeQuery().fn);
+    const runner = new TaskRunner({ repo: s.repo, bus: s.bus, queryFn: fakeQuery().fn, git: g.git });
+    try {
+      const task = s.repo.createTask({ project_id: s.project.id, title: "live only", mode: "autonomous", pipeline: ONE_STAGE });
+      s.repo.updateTask(task.id, { status: "review", branch: `kanban/${task.id}`, base_sha: "a".repeat(40) });
+      assert.equal((await runner.approveTask(task.id)).status, "done");
+      assert.equal(g.calls.includes("merge"), false, "nothing was merged into the dirty checkout");
     } finally {
       await s.cleanup();
     }
