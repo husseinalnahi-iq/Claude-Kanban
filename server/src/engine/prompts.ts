@@ -311,8 +311,9 @@ function stageInstructions(ctx: PromptCtx): string {
         "Treat the plan's established facts as done work: build on them rather than searching for them again, and re-check one only when the code contradicts it.",
         "Every question the spec asks and every \"show me / explain how\" request is part of the task: answer each one in your final summary, in words the person can follow, with real names and steps — not a placeholder for later.",
         // The card shows this list as "3/7 · Writing the login form" — the one progress signal a person
-        // can read across many tasks at once (D252). Without being asked, Opus kept none.
-        ...(caps === "sdk" ? ["When the work has more than three steps, keep a to-do list with your to-do tool and mark each item as you start and finish it: the person follows your progress on the card through it."] : []),
+        // can read across many tasks at once (D252). Without being asked, Opus kept none. The owner wants a
+        // list on every task, however small, and the first edit waits for it (D430).
+        ...(caps === "sdk" ? ["Start by writing a to-do list for this task with your to-do tool, before your first edit — every task, even a one-step one — and mark each item as you start and finish it: the person follows your progress on the card through it."] : []),
         ...(sandbox ? [sandbox] : []),
         ctx.verifyCommand
           ? `Before you finish, run \`${ctx.verifyCommand}\` and keep working until it passes — the board runs it too and will send the task back if it fails. Never weaken or delete a check to make it pass.`

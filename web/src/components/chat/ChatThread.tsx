@@ -14,6 +14,7 @@ import { PaperclipIcon, RunStyleSwitch } from "../ui.tsx";
 import { autonomousBlocked } from "../forms.tsx";
 import { ChatBoard, ChatCards, ChatTray, ChatUpdateRow } from "./ChatCard.tsx";
 import { CacheStrip } from "./CacheStrip.tsx";
+import { ChatSteps } from "../Checklist.tsx";
 import { toBase64 } from "../../lib/files.ts";
 
 const STARTERS = [
@@ -28,7 +29,7 @@ const drafts = new Map<string, string>();
 
 
 /**
- * Memoised: stored messages never change, and a streaming reply re-renders the panel many times a
+ * Memoised: stored messages rarely change (the step list does, and arrives as a new object), and a streaming reply re-renders the panel many times a
  * second. The cards they name do change: those rows read the board's live cards from context.
  */
 const MessageRow = memo(function MessageRow({ m }: { m: ChatMessage }) {
@@ -45,6 +46,7 @@ const MessageRow = memo(function MessageRow({ m }: { m: ChatMessage }) {
   }
   if (m.role === "tool") {
     if (m.meta.cards?.length) return <ChatCards m={m} />;
+    if (m.meta.steps) return <ChatSteps list={m.meta.steps} live={Boolean(m.meta.steps_live)} />;
     return <div className="rise pl-1 font-mono text-[11px] text-ink-500">· {m.text}</div>;
   }
   if (m.role === "update" && m.meta.update) return <ChatUpdateRow m={m} />;
@@ -159,7 +161,7 @@ export function ChatThread({
   const frame = useRef(0);
   useEffect(() => () => cancelAnimationFrame(frame.current), []);
   useWs((m) => {
-    if (m.type === "chat.message" && m.message.chat_id === chatId) setMessages((prev) => (prev.some((x) => x.id === m.message.id) ? prev : [...prev, m.message]));
+    if (m.type === "chat.message" && m.message.chat_id === chatId) setMessages((prev) => (prev.some((x) => x.id === m.message.id) ? prev.map((x) => (x.id === m.message.id ? m.message : x)) : [...prev, m.message]));
     else if (m.type === "chat.delta" && m.chatId === chatId) {
       latestDelta.current = m.text;
       cancelAnimationFrame(frame.current);

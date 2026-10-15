@@ -80,7 +80,7 @@ test("a chat reply streams, is stored with its tool lines, costs what it cost, a
     assert.deepEqual(q.denied.map((d: any) => d.behavior), ["deny", "deny", "allow", "allow", "allow"], "it changes a skill (yours or the project's) and reads one, but no other file (D406)");
     assert.match(q.denied[1].message, /only a skill can be changed/);
     assert.ok(!opts.disallowedTools.includes("Bash"), "the shell is offered, for read-only commands (D350)");
-    assert.equal(opts.hooks.PreToolUse.length, 1, "and a settings file's allow rule cannot take a command past canUseTool");
+    assert.equal(opts.hooks.PreToolUse.length, 2, "a settings file's allow rule cannot take a command past canUseTool, and the first tool waits for the step list");
     assert.equal(opts.resume, undefined);
 
     chat.send(c.id, "And where are the costs?");
@@ -948,4 +948,39 @@ test("the chat says an autonomous card reaches live systems when Settings let it
   assert.match(on, /an autonomous card reaches live systems too/);
   assert.doesNotMatch(on, /cannot reach it/);
   assert.match(chatPrompt(project, { models: [], defaults: [], liveAutonomous: false }), /an autonomous change is sandboxed and cannot reach it/);
+});
+
+test("the chat writes its steps for a message first and shows them as one row that moves as it works (D431)", async () => {
+  const seen: { first?: unknown; again?: unknown; listed?: unknown } = {};
+  const fn: QueryFn = (params) =>
+    (async function* () {
+      for await (const _ of params.prompt) void _;
+      const hook = params.options.hooks!.PreToolUse!.at(-1)!.hooks[0] as unknown as (i: unknown) => Promise<any>;
+      seen.first = (await hook({ tool_name: "Read" }))?.hookSpecificOutput?.permissionDecision;
+      seen.again = (await hook({ tool_name: "Read" }))?.hookSpecificOutput?.permissionDecision;
+      seen.listed = params.options.env?.CLAUDE_CODE_TASK_LIST_ID;
+      const use = (name: string, input: Record<string, unknown>) => ({ type: "assistant", session_id: "s", message: { content: [{ type: "tool_use", name, input }] } }) as any;
+      yield use("TaskCreate", { subject: "Read the costs code", activeForm: "Reading the costs code" });
+      yield use("TaskCreate", { subject: "Answer" });
+      yield use("TaskUpdate", { taskId: "1", status: "completed" });
+      yield { type: "assistant", session_id: "s", message: { content: [{ type: "text", text: "Costs live in runs." }] } } as any;
+      yield { type: "result", subtype: "success", is_error: false, result: "ok", total_cost_usd: 0.01, session_id: "s", modelUsage: {} } as any;
+    })();
+  const s = setup(fn);
+  const chat = new ChatService({ repo: s.repo, bus: s.bus, runner: s.runner });
+  try {
+    const c = chat.create(s.project.id);
+    chat.send(c.id, "Where are the costs?");
+    await until(() => !chat.isBusy(c.id));
+    assert.equal(seen.first, "deny", "its first tool call waits for the list");
+    assert.equal(seen.again, undefined, "but only once, so a model without the to-do tools still answers");
+    assert.match(String(seen.listed), new RegExp(`^kanban-chat-${c.id}-`), "a list of its own for each message, numbered from 1");
+    const rows = s.repo.chatMessages(c.id).filter((m) => m.meta.steps);
+    assert.equal(rows.length, 1, "one row for the steps, changed in place");
+    assert.deepEqual(rows[0].meta.steps!.map((x) => [x.text, x.status]), [["Read the costs code", "completed"], ["Answer", "pending"]]);
+    assert.equal(rows[0].meta.steps_live, false, "and it stops turning when the reply ends");
+    assert.ok(!s.repo.chatMessages(c.id).some((m) => m.role === "tool" && /Task/.test(m.text)), "the to-do calls are not shown as tool lines too");
+  } finally {
+    await s.cleanup();
+  }
 });

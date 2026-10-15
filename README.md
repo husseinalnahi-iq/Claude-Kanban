@@ -177,6 +177,10 @@ Approving, landing or discarding a task's work stays yours: Claude in the chat n
 The **✦ AI Manager** tab (or the **0** key, or **⤢ AI Manager** in the chat panel) makes the chat the whole
 window. Nothing of the board is on screen until you press **Board** at the top left.
 
+**Its steps, under every reply.** For each message that needs it to do something (read, search, make a
+card), the chat first writes its steps and ticks them off as it works, in a box under your message, the
+way Claude Code's own app shows its plan. The side chat does the same. A plain answer has no steps.
+
 - **Left: your chats** for the project (drag its edge to make the column wider or narrower; double-click
   the edge to put it back). Switch projects with the list at the top. Group them by
   **folders** you create and name (**+ folder**) or by **status**: *Needs you*, *Working*, *Quiet*,
@@ -993,6 +997,16 @@ they will take turns. If a running task in the folder reaches for a file another
 is changing, that write is refused with the other task's name — it does the rest first — and the refusal
 does not count toward the five that stop a run.
 
+**Your own Claude Code sessions take turns too, on live systems.** The board cannot see a Claude Code
+session you run yourself in the same project, and a card's own copy keeps files apart, not the records
+of a live system: both could change the same ERP records at once. Turn on the project's live lock with
+`node scripts/live-lock-setup.mjs "C:\work\proj"` (`--remove` turns it off). From then on, a
+card's command that runs a program or touches a key file first takes the lock, and waits while one of
+your sessions holds it (the card says *Waiting for your Claude Code session…*). Your session does the
+same through two hooks the script adds to the project's `.claude/settings.local.json`: while a card holds
+the lock, it asks you before such a command, naming the card. Your session gives the lock back at the end
+of each reply; one quiet for half an hour, or a board that stopped, no longer holds it.
+
 ---
 
 ## Landing safely
@@ -1131,6 +1145,12 @@ autonomous task may open that site (and its subdomains) as well as local pages. 
 copy, so nothing a run does is saved back. Choosing **Your own Chrome, for every task** gives every task,
 autonomous ones too, Claude in Chrome: your own browser, signed in to all your accounts, with no card in an
 autonomous run (D389).
+
+**Import passwords from Chrome** (under the sites list): export them from Chrome (Passwords → Settings →
+Export passwords), click the button, choose **Import** in the window that opens and pick that file. The
+browser reads the file itself; the board never sees a password. Tasks get the saved passwords with their
+copy of the sign-ins, so one whose sign-in has run out can sign in again by itself, still only on the
+sites it may open. Delete the exported file afterwards (D429).
 
 **Chrome as the fallback** (on by default, with the board's browser): when a site opens on a sign-in page
 in the board's browser, the run is handed your own Chrome for the rest of that stage, where you are
@@ -1458,7 +1478,9 @@ called). Turning off your plugins saves about 5% of a stage's start.
 **Where each card is.** While a task works, its card shows Claude's own to-do list for the stage as
 one line, *3/7 · Writing the login form*, with a thin bar; hover for the whole list, and the task's
 own page has it step by step under **Claude's steps**. It is read off the list Claude keeps for itself
-as it works, so it costs nothing and reads the same on ten cards at once. A finished task shows none.
+as it works, so it costs nothing and reads the same on ten cards at once. Every card gets one, however
+small the task, whether you made it on the board or in the AI Manager: a run that changes files writes
+its list before its first edit. A finished task shows none.
 
 **Comment on the code, line by line.** On a task's **Changes** tab, click any line of the diff to pin
 a comment to it. When you have said everything, **Send** hands all of them to the task's own session in

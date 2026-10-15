@@ -19,7 +19,10 @@ cd web && npx tsc --noEmit -p . && npm run build
 ```
 
 The board serves `web/dist`, so a UI change needs that build. Restart the board to pick up server
-changes: run `Start Claude Kanban.cmd` again — it stops an older instance when the code on disk is newer.
+changes: start `Claude Kanban.exe` again (or **Restart** on its tray icon) — it stops an older instance
+when the code on disk is newer and nothing is running. Not `Start Claude Kanban.cmd`: that keeps the
+board inside a console window and opens a browser tab each time, and closing the window stops the board.
+Poll the board with `curl`, never `powershell.exe` from Bash in a loop: each one flashes a window.
 
 Every feature change also updates what tells people about it: the **Tour** (`web/src/components/tour/features.ts`),
 the **Welcome** pop-up, the **Setup** checklist where it applies, and the **README**.

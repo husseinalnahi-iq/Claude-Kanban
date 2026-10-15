@@ -11,6 +11,7 @@ import { openDb } from "../src/db.ts";
 import { Repo } from "../src/repo.ts";
 import { Bus } from "../src/bus.ts";
 import { TaskRunner, type QueryFn } from "../src/engine/runner.ts";
+import { passwordImportPage } from "../src/engine/signIn.ts";
 import { browserDecision, browserServer, confineOutput, copyProfile, isLocalUrl, onSignedInSite, PLAYWRIGHT_PLUGIN_TOOLS, siteHost } from "../src/engine/browser.ts";
 import { killsByName, serverRule } from "../src/engine/gate.ts";
 import { buildStagePrompt, type PromptCtx } from "../src/engine/prompts.ts";
@@ -268,7 +269,7 @@ test("with a helper, code and review ask it to look; review must say whether any
   const code = buildStagePrompt(ctx("code"));
   assert.match(code, /ask the `browser-check` agent/);
   assert.doesNotMatch(code, /take a screenshot \(no file name/, "the stage is not told to drive the browser itself");
-  assert.match(code, /keep a to-do list/, "its steps reach the card");
+  assert.match(code, /a to-do list/, "its steps reach the card");
   const review = buildStagePrompt(ctx("review"));
   assert.match(review, /Browser: checked —[\s\S]*Browser: not needed —/);
 });
@@ -330,7 +331,9 @@ test("a run gets its own copy of the signed-in profile — only its sign-in part
     mkdirSync(join(from, "optimization_guide_model_store"), { recursive: true });
     writeFileSync(join(from, "optimization_guide_model_store", "model.bin"), "x");
     writeFileSync(join(from, "Default", "Network", "LOCK"), "");
+    writeFileSync(join(from, "Default", "Login Data"), "passwords-db");
     assert.equal(copyProfile(from, to), true);
+    assert.equal(readFileSync(join(to, "Default", "Login Data"), "utf8"), "passwords-db", "saved passwords come along, to sign in again (D429)");
     assert.equal(readFileSync(join(to, "Local State"), "utf8"), "{}", "the key the cookies are encrypted with comes along");
     assert.equal(readFileSync(join(to, "Default", "IndexedDB", "https_site_0.indexeddb.leveldb", "000003.log"), "utf8"), "token", "so does site storage");
     assert.equal(existsSync(join(to, "Default", "Extensions")), false, "extensions stay behind");
@@ -375,4 +378,10 @@ test("a card's own browser pick overrides Settings for that card only (D423)", a
   assert.deepEqual(r.options.extraArgs, { chrome: null });
   assert.equal(picked, "allow", "the card said Chrome, so an autonomous run uses it without the board-wide setting");
   assert.equal(r.repo.getSettings().taskBrowser, "board", "Settings are untouched");
+});
+
+test("importing passwords opens the board's browser at its own import page, Edge's for Edge (D429)", () => {
+  assert.equal(passwordImportPage("chrome"), "chrome://password-manager/settings");
+  assert.equal(passwordImportPage("chromium"), "chrome://password-manager/settings");
+  assert.equal(passwordImportPage("msedge"), "edge://settings/passwords");
 });

@@ -64,7 +64,11 @@ export const BOARD_PROFILE = "browser-profile";
  */
 const SIGN_IN_PARTS: Record<string, true | Record<string, true>> = {
   "Local State": true,
-  Default: { Network: true, Cookies: true, "Cookies-journal": true, "Local Storage": true, "Session Storage": true, IndexedDB: true, WebStorage: true, Preferences: true, "Secure Preferences": true },
+  Default: {
+    Network: true, Cookies: true, "Cookies-journal": true, "Local Storage": true, "Session Storage": true, IndexedDB: true, WebStorage: true, Preferences: true, "Secure Preferences": true,
+    // Saved passwords (D429): a run whose sign-in has expired can sign in again on its own.
+    "Login Data": true, "Login Data-journal": true, "Login Data For Account": true, "Login Data For Account-journal": true,
+  },
 };
 /** Open in the sign-in window right now, or a lock: never copied, even inside a part that is. */
 const NOT_COPIED = /^(Singleton.*|lockfile|LOCK)$/i;

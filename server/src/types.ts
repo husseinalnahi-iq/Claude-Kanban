@@ -994,6 +994,9 @@ export interface ChatMessage {
     suggest?: boolean;
     /** An assistant turn the manager posted on its own when a card finished or failed (D410). */
     debrief?: boolean;
+    /** The steps the chat wrote for one message with its to-do tool, and whether it is still working on them (D431). */
+    steps?: ChecklistItem[];
+    steps_live?: boolean;
     /** The files that went with a user message (D334). */
     files?: Pick<ChatFile, "id" | "name" | "media_type" | "bytes">[];
   };

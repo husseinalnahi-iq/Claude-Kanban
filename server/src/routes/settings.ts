@@ -6,7 +6,7 @@ import { ANTHROPIC_PROVIDER_ID, DEBATE_MODES, DEBATE_ROUND_CEILING, EFFORTS, HEL
 import { PROVIDER_PRESETS } from "../engine/providers/presets.ts";
 import { fileURLToPath } from "node:url";
 import { siteHost } from "../engine/browser.ts";
-import { openSignIn } from "../engine/signIn.ts";
+import { openSignIn, passwordImportPage } from "../engine/signIn.ts";
 import { realProbe } from "../setup/probe.ts";
 
 /** A real screenshot with text in it, shipped with the board (the README's approval card). */
@@ -151,6 +151,16 @@ export async function settingsRoutes(app: FastifyInstance, { repo, bus, runner }
     const settings = repo.updateSettings({ browserSites: sites } as never);
     bus.publish({ type: "settings.updated", settings });
     return { host, sites };
+  });
+
+  /**
+   * Settings → Browser for tasks → Import passwords from Chrome: opens the board browser's saved profile
+   * at its own password import page, where you pick the file Chrome exported (D429).
+   */
+  app.post("/browser/import-passwords", async (_req, reply) => {
+    const opened = openSignIn(repo.getSettings().stateDir, passwordImportPage, realProbe);
+    if (!opened.ok) return reply.code(409).send({ error: opened.error });
+    return { ok: true };
   });
 
   /**

@@ -1,6 +1,6 @@
 import { basename, relative, isAbsolute } from "node:path";
 import { homedir } from "node:os";
-import type { CanUseTool, Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { CanUseTool, HookCallbackMatcher, Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { Repo } from "../repo.ts";
 import type { Bus } from "../bus.ts";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -17,6 +17,7 @@ import { estimateCost, sumUsage } from "./providers/cost.ts";
 import type { TokenUsage } from "./providers/types.ts";
 import { ANTHROPIC_PROVIDER_ID } from "../types.ts";
 import { isReadOnlyShell, readViolation } from "./gate.ts";
+import { applyChecklistTool, CHAT_LIST_FIRST, TODO_TOOLS } from "./checklist.ts";
 import { commandOf, explainCommand } from "./explain.ts";
 import { credentialRisk } from "./credentials.ts";
 import { imageMakerLine } from "./images.ts";
@@ -24,7 +25,7 @@ import { CACHE_WARN_MIN, CACHE_WINDOW_MIN, KEEP_ALIVE_LEAD_MIN } from "./cacheWi
 import { LEAN } from "./lean.ts";
 
 /** Looking only. Anything else is refused: changing code is what a card is for. */
-export const CHAT_READ_TOOLS = ["Read", "Glob", "Grep", "WebSearch", "WebFetch", "TodoWrite"];
+export const CHAT_READ_TOOLS = ["Read", "Glob", "Grep", "WebSearch", "WebFetch", "ToolSearch", ...TODO_TOOLS];
 /**
  * Never offered to the chat at all, so it does not even try. The shell is offered, but only a command
  * that can only read passes (`isReadOnlyShell`, the supervised rule, D350): `git log` answers "what
@@ -76,7 +77,6 @@ export function describeTool(name: string, input: Record<string, unknown>, cwd: 
     case "Glob": return `looked for files matching ${q(input.pattern)}`;
     case "WebSearch": return `searched the web for ${q(input.query)}`;
     case "WebFetch": return `opened ${String(input.url ?? "a page")}`;
-    case "TodoWrite": return "made a plan";
     // From the chat only a skill can be changed (D406): name the skill, not just "SKILL.md".
     case "Edit":
     case "MultiEdit":
@@ -166,6 +166,8 @@ export function chatPrompt(project: Project, board?: { models: ModelEntry[]; def
     ...(board?.tools
       ? ["You also have the user's own skills, MCP servers and connectors. Use them to look things up and to work with their systems when they can do the job from here; a command that changes or runs something, and changing a file, are still a card's job."]
       : []),
+    // The step list shows under the reply, like Claude Code's own plan (owner, D431).
+    "For every message that needs you to do anything — read, search, look something up, make or change a card — first write your steps for it with your to-do tool (TaskCreate), before any other tool, and mark each one in_progress and completed with TaskUpdate as you go: the user follows your progress through that list under your reply. A plain answer from what you already know needs none.",
     `Skills are the one kind of file you change yourself: when the user asks to update, fix or create a skill, edit it in place with its absolute path — theirs are in ${join(homedir(), ".claude", "skills")}, the project's in ${join(project.path, ".claude", "skills")} — and say which files you changed.`,
     "Files the user attaches are listed in front of their message with their paths: open an image, a PDF or a text file with Read. A spreadsheet or a Word file needs a card (MarkItDown reads them): make an answer card and say so.",
     "Take the cheapest route that gets what the user wants:",
@@ -715,6 +717,26 @@ export class ChatService {
       if (settings.chatTools && (name.startsWith("mcp__") || name === "Skill")) return { behavior: "allow", updatedInput: input };
       return { behavior: "deny", message: "That is a card's job: create one with board_create_task (an answer card for a lookup) and tell the user what it will do. Do not tell them what you cannot do." };
     };
+    // The steps for this message, shown as one row under it that updates as they move (D431).
+    // A holder, not a plain variable: TypeScript cannot see the hook below and the loop both change it.
+    const steps: { row: ChatMessage | null } = { row: null };
+    const setSteps = (list: NonNullable<ChatMessage["meta"]["steps"]>, live: boolean) => {
+      const meta = { steps: list, steps_live: live };
+      if (!steps.row) steps.row = this.message({ chat_id: chat.id, role: "tool", text: "steps", meta });
+      else bus.publish({ type: "chat.message", message: (steps.row = repo.updateChatMessageMeta(steps.row.id, meta)) });
+    };
+    // Its first tool call waits for the list, once: a model without the to-do tools still answers.
+    let askedForList = false;
+    const listFirst: HookCallbackMatcher[] = [{
+      hooks: [
+        async (input) => {
+          const name = (input as { tool_name?: string }).tool_name ?? "";
+          if (askedForList || steps.row || TODO_TOOLS.includes(name) || name === "ToolSearch") return {};
+          askedForList = true;
+          return { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: CHAT_LIST_FIRST } };
+        },
+      ],
+    }];
     // Claude, or a Claude-compatible provider through the same Claude Code — tools and all (D301).
     let res: Resolved | null = null;
     try {
@@ -734,7 +756,16 @@ export class ChatService {
       resume: chat.session_id ?? undefined,
       includePartialMessages: true,
       settingSources: tools && settings.loadUserPlugins ? ["user", "project"] : ["project"],
-      ...(tools ? {} : { strictMcpConfig: true, skills: [], plugins: [], env: { ...(process.env as Record<string, string>), ENABLE_CLAUDEAI_MCP_SERVERS: "false" } }),
+      ...(tools ? {} : { strictMcpConfig: true, skills: [], plugins: [] }),
+      env: {
+        ...(process.env as Record<string, string>),
+        ...(tools ? {} : { ENABLE_CLAUDEAI_MCP_SERVERS: "false" }),
+        // The step list under the reply is read from the to-do tools, which newer models ship with off.
+        CLAUDE_CODE_ENABLE_TODO_TOOLS: "1",
+        // A list of its own for every message, so its steps are numbered from 1 even in a continued
+        // chat (checked on a real run: a resumed session with a new list id starts again at #1).
+        CLAUDE_CODE_TASK_LIST_ID: `kanban-chat-${chat.id}-${Date.now()}`,
+      },
       mcpServers: { board: createChatBoardServer(this.deps, project.id, chat.id, (c) => cards.push(c)) },
       extraArgs: { "no-chrome": null },
       disallowedTools: CHAT_DISALLOWED,
@@ -742,7 +773,7 @@ export class ChatService {
       canUseTool,
       // A project settings file that pre-allows a command would skip canUseTool; the supervised hook
       // forces every non-read-only tool back through it (D20, D350).
-      hooks: { PreToolUse: forceAsk(settings.autoAllowReadOnly, project.path) },
+      hooks: { PreToolUse: [...forceAsk(settings.autoAllowReadOnly, project.path), ...listFirst] },
       systemPrompt: {
         type: "preset",
         preset: "claude_code",
@@ -834,7 +865,11 @@ export class ChatService {
               streamed = "";
               // The stored message replaces the streamed words; without this both show until the reply ends.
               bus.publish({ type: "chat.delta", chatId: chat.id, text: "" });
-            } else if (block.type === "tool_use") {
+            } else if (block.type === "tool_use" && TODO_TOOLS.includes(block.name)) {
+              const next = applyChecklistTool(steps.row?.meta.steps ?? [], block.name, block.input);
+              if (next) setSteps(next, true);
+            } else if (block.type === "tool_use" && block.name !== "ToolSearch") {
+              // ToolSearch only loads the to-do tools; a line saying so would mean nothing to the user.
               this.message({ chat_id: chat.id, role: "tool", text: describeTool(block.name, block.input ?? {}, project.path) });
             }
           }
@@ -870,6 +905,7 @@ export class ChatService {
       // A reply cut short by Stop keeps what was written so far.
       if (streamed.trim()) this.message({ chat_id: chat.id, role: "assistant", text: `${streamed}${ctl.signal.aborted ? " …(stopped)" : ""}` });
       bus.publish({ type: "chat.delta", chatId: chat.id, text: "" });
+      if (steps.row && repo.getChat(chat.id)) setSteps(steps.row.meta.steps ?? [], false);
       // Claude's last request in this reply is when its cache window starts (D331). Only Claude's own
       // cache is an hour; another provider's is its own business, so the bar is not shown for it.
       if (repo.getChat(chat.id)) repo.updateChat(chat.id, { warm_at: res ? null : new Date().toISOString() });

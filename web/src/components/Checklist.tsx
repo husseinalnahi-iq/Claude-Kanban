@@ -64,3 +64,21 @@ export function ChecklistPanel({ list, live, title }: { list: ChecklistItem[]; l
     </div>
   );
 }
+
+/** Under a chat reply: the steps the chat wrote for your message, ticking off as it works (D431). */
+export function ChatSteps({ list, live }: { list: ChecklistItem[]; live: boolean }) {
+  const items = liveChecklist(list);
+  if (!items.length) return null;
+  return (
+    <ol className="rise space-y-1 rounded-lg border border-ink-700 px-3 py-2">
+      {items.map((x) => (
+        <li key={x.id} className={`flex items-start gap-2 text-[12px] leading-snug ${x.status === "completed" ? "text-ink-500" : x.status === "in_progress" ? "text-ink-100" : "text-ink-300"}`}>
+          <span className={`mt-px w-3.5 shrink-0 text-center ${x.status === "completed" ? "text-moss" : x.status === "in_progress" ? "text-amber" : "text-ink-600"}`}>
+            <StepMark status={x.status} live={live} />
+          </span>
+          <span className={x.status === "completed" ? "line-through decoration-ink-600" : ""}>{x.status === "in_progress" && live && x.doing ? x.doing : x.text}</span>
+        </li>
+      ))}
+    </ol>
+  );
+}

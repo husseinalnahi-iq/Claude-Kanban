@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { applyChecklistTool, checklistSummary } from "../src/engine/checklist.ts";
+import { applyChecklistTool, checklistSummary, needsListFirst } from "../src/engine/checklist.ts";
 import { fakeQuery, setup, until } from "./helpers.ts";
 import type { ChecklistItem, Stage } from "../src/types.ts";
 
@@ -57,6 +57,34 @@ test("the card carries the running stage's list, a subagent's list stays off it,
     s.runner.queueTask(t.id);
     await until(() => q.calls.length === 2 && s.repo.getTask(t.id)!.status === "review");
     assert.deepEqual(s.repo.getTask(t.id)!.checklist, [], "a fresh session has no list until it makes one");
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test("a stage that changes files writes its to-do list before its first edit, and is turned away only once", async () => {
+  const item: ChecklistItem = { id: "1", text: "Fix the typo", status: "pending" };
+  assert.equal(needsListFirst("Edit", [], "code"), true, "even a one-step task gets a list");
+  assert.equal(needsListFirst("Edit", [item], "code"), false);
+  assert.equal(needsListFirst("Edit", [{ ...item, deleted: true }], "code"), true, "a list of deleted items is no list");
+  assert.equal(needsListFirst("Read", [], "code"), false, "looking around first is fine");
+  assert.equal(needsListFirst("Edit", [], "plan"), false, "a plan changes no files");
+
+  const q = fakeQuery();
+  const s = setup(q.fn);
+  try {
+    const t = s.repo.createTask({ project_id: s.project.id, title: "Typo", mode: "supervised", pipeline: ONE });
+    s.runner.queueTask(t.id);
+    await until(() => s.repo.getTask(t.id)!.status === "review");
+    type Hook = (input: unknown, id: string, x: { signal: AbortSignal }) => Promise<{ hookSpecificOutput?: { permissionDecision?: string } }>;
+    const matchers = q.calls[0].options.hooks.PreToolUse as { hooks: Hook[] }[];
+    const edit = async () => {
+      const out = [];
+      for (const m of matchers) for (const h of m.hooks) out.push((await h({ hook_event_name: "PreToolUse", tool_name: "Edit", tool_input: { file_path: "a.txt" } }, "t1", { signal: new AbortController().signal }))?.hookSpecificOutput?.permissionDecision);
+      return out;
+    };
+    assert.ok((await edit()).includes("deny"), "the first edit waits for the list");
+    assert.ok(!(await edit()).includes("deny"), "a model without the list tools still gets its work done");
   } finally {
     await s.cleanup();
   }

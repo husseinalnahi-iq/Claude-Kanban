@@ -46,6 +46,26 @@ export function applyChecklistTool(list: ChecklistItem[], tool: string, input: R
   return null;
 }
 
+const FILE_WRITES = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+
+/**
+ * Every card keeps a to-do list, however small the task (owner, D430): a stage that changes files is
+ * stopped at its first edit until it has written one, the way Claude Code's own app requires a plan first.
+ */
+export function needsListFirst(tool: string, list: ChecklistItem[] | null | undefined, stage: string): boolean {
+  return (stage === "code" || stage === "custom") && FILE_WRITES.has(tool) && !liveChecklist(list).length;
+}
+
+export const LIST_FIRST =
+  "Before you change any file, write your to-do list for this task with your to-do tool (TaskCreate, or TodoWrite) — even a one-step task gets one — " +
+  "and mark each item as you start and finish it: the person follows your progress on the card through it. Then make this change again.";
+
+/** Every to-do tool Claude Code has had: the list lives in these, and none of them touches a file. */
+export const TODO_TOOLS = ["TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet"];
+
+export const CHAT_LIST_FIRST =
+  "First write your steps for this message with your to-do tool (TaskCreate, one per step) and mark each in_progress and completed with TaskUpdate as you go — the user follows them under your reply. Then make this call again.";
+
 /** The items to show: the ones Claude has not deleted. */
 export const liveChecklist = (list: ChecklistItem[] | null | undefined): ChecklistItem[] => (list ?? []).filter((x) => !x.deleted);
 

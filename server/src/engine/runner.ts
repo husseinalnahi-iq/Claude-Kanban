@@ -56,9 +56,10 @@ import { pickBrowser, realProbe } from "../setup/probe.ts";
 import { ANTHROPIC_PROVIDER_ID, ARTIFACT_EXTS, DEBATE_ROUND_CEILING, EFFORTS, MARKITDOWN_TOOL, PREPARING_COPY, TRANSIENT_DELAYS_MS, TRANSIENT_RETRIES, accessOf, browserOf, isHandsOff, recommendedOption, sharesProjectFolder, supervisedFrom, unlockedBySignIn, usesWorktree, worksInFolder, MAX_ATTACHMENT_BYTES, attachmentKind, supportsFastMode, type Attachment, type ClaudeModelsResult, type FastModeStatus } from "../types.ts";
 import { claudeUpgrades, fromSdk, type SdkModelInfo } from "./claudeModels.ts";
 import { BROWSER_AGENT, helperAgents, usesHelper } from "./helpers.ts";
-import { applyChecklistTool } from "./checklist.ts";
+import { applyChecklistTool, LIST_FIRST, needsListFirst } from "./checklist.ts";
 import { outcomeLine, resultText } from "./record.ts";
 import { isAnswerPipeline } from "./answer.ts";
+import { lockOn, mayReachLive, releaseForBoard, takeForBoard } from "./liveLock.ts";
 import { splitAtFirstEdit } from "./explore.ts";
 import { memoryFacts, type MemoryInput } from "./memory.ts";
 
@@ -1975,9 +1976,29 @@ export class TaskRunner {
         ],
       },
     ];
+    // Claude's own to-do list for this stage, shown on the card. A continued session keeps its list
+    // (its task numbers carry on); a fresh one starts with none. Read before the hooks below, which use it.
+    const listed = this.repo.getTask(task.id)?.checklist ?? [];
+    let checklist = a.resume ? listed : [];
+    if (!a.resume && listed.length) this.setTask(task.id, { checklist });
+    // Turned away once only: a model whose to-do tools are missing must still get its work done (D430).
+    let askedForList = false;
+    const listFirst: HookCallbackMatcher[] = [{
+      hooks: [
+        async (hookInput) => {
+          const name = (hookInput as { tool_name?: string }).tool_name ?? "";
+          if (askedForList || !needsListFirst(name, checklist, run.stage)) return {};
+          askedForList = true;
+          this.log(run.id, "\n[board] first edit held until the run writes its to-do list\n");
+          return { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: LIST_FIRST } };
+        },
+      ],
+    }];
     const steer = this.steerHooks(task.id, run.id);
     const sharesFolder = sharesProjectFolder(task);
     const folderWrites = this.folderWriteHooks(task.id);
+    // A lookup only reads: it never takes the project's live lock (D432).
+    const liveLock = isAnswerPipeline(task.pipeline) ? [] : [this.liveLockHook(task, a.project.path, run.id)];
 
     // Claude's fast mode, per stage. Only Opus 5 / 4.8 support it; on anything else the flag is not
     // sent at all, so a stage moved to a cheaper model does not start failing.
@@ -2014,7 +2035,8 @@ export class TaskRunner {
       permissionMode: autonomous && !handsOff ? "acceptEdits" : "default",
       canUseTool,
       hooks: {
-        PreToolUse: [...(autonomous ? autonomousGuard : forceAsk(settings.autoAllowReadOnly, a.cwd)), ...(sharesFolder ? [folderWrites.pre] : [])],
+        // A deny from any hook wins over an earlier "ask", so the list check can sit last.
+        PreToolUse: [...(autonomous ? autonomousGuard : forceAsk(settings.autoAllowReadOnly, a.cwd)), ...(sharesFolder ? [folderWrites.pre] : []), ...listFirst, ...liveLock],
         // A message typed while the stage runs is handed over at the next tool call (D215).
         PostToolUse: [...steer.PostToolUse, ...(sharesFolder ? [folderWrites.post] : [])],
         // A waiting message holds the turn open first; then the deterministic gate: a code stage
@@ -2121,12 +2143,6 @@ export class TaskRunner {
     let meteredOut = 0;
     // One reply arrives as several messages, one per block, each repeating the reply's whole usage.
     const countedReplies = new Set<string>();
-
-    // Claude's own to-do list for this stage, shown on the card. A continued session keeps its list
-    // (its task numbers carry on); a fresh one starts with none.
-    const listed = this.repo.getTask(task.id)?.checklist ?? [];
-    let checklist = a.resume ? listed : [];
-    if (!a.resume && listed.length) this.setTask(task.id, { checklist });
 
     // A stage that calls the same tool with the same arguments over and over is stuck, not working.
     const repeats = { key: "", count: 0 };
@@ -2267,6 +2283,11 @@ export class TaskRunner {
     } finally {
       this.active.delete(task.id);
       this.browserWatch.end(task.id, run.id);
+      try {
+        releaseForBoard(a.project.path, task.id, process.pid);
+      } catch {
+        // a lock file that cannot be read or removed goes stale with this process
+      }
       for (const ap of this.repo.pendingApprovals(task.id)) this.resolvers.get(ap.id)?.({ decision: "expired", note: "run ended" });
       // Screenshots were already kept from the tool results; the rest is page snapshots and logs.
       try {
@@ -2327,6 +2348,46 @@ export class TaskRunner {
    * a command is judged by what changed in the checkout while it ran, so edits made between its commands —
    * by you, another session — stay theirs. A no-op when the folder is not a repository (no snapshot).
    */
+  /**
+   * The project's live lock (D432): before a command that may reach a live system, a card takes it, and
+   * while one of your own Claude Code sessions holds it the command waits — in the hook, so the run just
+   * pauses, and the card says why. Off unless the project has `.kanban/locks/` (the setup makes it).
+   */
+  private liveLockHook(task: Task, projectPath: string, runId: string): HookCallbackMatcher {
+    return {
+      // The wait is as long as your session takes; the SDK's default would give up after a minute.
+      timeout: 24 * 60 * 60,
+      hooks: [
+        async (input, _toolUseID, { signal }) => {
+          const { tool_name: name = "", tool_input: toolInput = {} } = input as { tool_name?: string; tool_input?: Record<string, unknown> };
+          if (!lockOn(projectPath) || !mayReachLive(name, String(toolInput.command ?? ""))) return {};
+          let waiting = false;
+          for (;;) {
+            const yours = takeForBoard(projectPath, { id: task.id, title: task.title }, process.pid);
+            if (!yours) {
+              if (waiting) {
+                this.log(runId, "\n[board] your Claude Code session is done with the live systems; going on\n");
+                this.setTask(task.id, { summary: null });
+              }
+              return {};
+            }
+            if (!waiting) {
+              waiting = true;
+              const since = new Date(yours.since).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+              this.log(runId, `\n[board] your own Claude Code session is working on this project's live systems (since ${since}); this command waits for it (D432)\n`);
+              this.setTask(task.id, { summary: "Waiting for your Claude Code session to finish with the live systems" });
+            }
+            if (signal.aborted) return { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: "The run was stopped while waiting for the live systems." } };
+            await new Promise<void>((r) => {
+              const t = setTimeout(r, 5_000);
+              signal.addEventListener("abort", () => (clearTimeout(t), r()), { once: true });
+            });
+          }
+        },
+      ],
+    };
+  }
+
   private folderWriteHooks(taskId: string): { pre: HookCallbackMatcher; post: HookCallbackMatcher } {
     const shell = (name: string) => name === "Bash" || name === "PowerShell";
     const statusStamps = async (cwd: string) => new Map((await this.git.statusFiles(cwd)).slice(0, 500).map((f) => [f, fileStamp(join(cwd, f))]));

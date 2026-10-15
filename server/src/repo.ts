@@ -994,6 +994,14 @@ export class Repo {
     return toChatMessage(this.stmt("SELECT * FROM chat_messages WHERE id = ?").get(Number(res.lastInsertRowid)) as Row);
   }
 
+  /** Merges into one message's meta: the chat's step list changes in place as its steps move (D431). */
+  updateChatMessageMeta(id: number, meta: Partial<ChatMessage["meta"]>): ChatMessage {
+    const row = this.stmt("SELECT * FROM chat_messages WHERE id = ?").get(id) as Row;
+    const merged = { ...toChatMessage(row).meta, ...meta };
+    this.stmt("UPDATE chat_messages SET meta_json = ? WHERE id = ?").run(JSON.stringify(merged), id);
+    return { ...toChatMessage(row), meta: merged };
+  }
+
   /** What every side chat has cost, for the dashboard. */
   addIntakeCost(c: { task_id: string; kind: "triage" | "vision" | "recovery"; model: string; cost_usd: number }): void {
     if (!(c.cost_usd > 0)) return;

@@ -599,6 +599,7 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
   const [browserSites, setBrowserSites] = useState<string[]>([]);
   const [signInUrl, setSignInUrl] = useState("");
   const signIn = useAction();
+  const importPasswords = useAction();
   const [readOnlyNoCard, setReadOnlyNoCard] = useState(true);
   const [markitdown, setMarkitdown] = useState(true);
   const [liveView, setLiveView] = useState(true);
@@ -1505,6 +1506,17 @@ export function Settings({ project }: { project: ProjectWithGit | null }) {
                   A window opens at that site: sign in there, then close the window. Tasks started after that are signed in.
                 </div>
                 <ErrorLine error={signIn.error} />
+                <div className="mt-2.5 flex items-center gap-2 border-t border-ink-700 pt-2.5">
+                  <Button size="sm" busy={importPasswords.busy} onClick={() => importPasswords.run(() => api.importPasswords())}>
+                    Import passwords from Chrome
+                  </Button>
+                </div>
+                <div className="mt-1 text-[11px] text-ink-500">
+                  First, in Chrome: Passwords → Settings → Export passwords. Then click here, choose Import in the window that opens, pick
+                  that file, and close the window. Tasks can then sign in again by themselves when a sign-in runs out. Delete the exported
+                  file afterwards: anyone who opens it can read every password.
+                </div>
+                <ErrorLine error={importPasswords.error} />
               </div>
             ) : null}
           </div>

@@ -292,6 +292,8 @@ export const api = {
   patchSettings: (b: Partial<Omit<Settings, "stateDir">>) => req<Settings>("PATCH", "/settings", b),
   /** Opens the board browser's saved profile at a site for you to sign in to (D389). */
   signInSite: (url: string) => req<{ host: string; sites: string[] }>("POST", "/browser/sign-in", { url }),
+  /** Opens the board's browser at its own page for importing a passwords file from Chrome (D429). */
+  importPasswords: () => req<{ ok: true }>("POST", "/browser/import-passwords"),
   imageStatus: () => req<ImageStatus>("GET", "/settings/images"),
   setImageSecret: (name: string, value: string) => req<ImageStatus>("PUT", "/settings/images/secret", { name, value }),
   deleteImageSecret: (name: string) => req<ImageStatus>("DELETE", `/settings/images/secret/${encodeURIComponent(name)}`),
